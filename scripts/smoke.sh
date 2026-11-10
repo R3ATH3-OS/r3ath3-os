@@ -4,6 +4,7 @@
 # Success writes 0x10 (status 33). A panic writes 0x11 (status 35).
 # CPU faults: #UD 0x31→99, #PF 0x33→103, #DF 0x34→105.
 # Any other vector writes 0x2F (status 95), outside timeout's 124–127.
+# Task scripts write 0x50 (ok → 161) or 0x51 (error → 163).
 # A triple-fault or silent reset does not print the fault line and does not
 # use those statuses (this QEMU build has exited 0 on triple fault).
 set -u
@@ -18,6 +19,8 @@ TIMEOUT_STATUS=124
 UD_STATUS=99
 PF_STATUS=103
 DF_STATUS=105
+SCRIPT_OK_STATUS=161
+SCRIPT_ERR_STATUS=163
 UD_LINE='R3ATH3_FAULT vector=6 name=ud error=none rip=0x[0-9a-f]+'
 PF_LINE='R3ATH3_FAULT vector=14 name=pf error=0x0 rip=0x[0-9a-f]+ cr2=0x40000000'
 DF_LINE='R3ATH3_FAULT vector=8 name=df error=0x0 rip=0x[0-9a-f]+'
@@ -36,6 +39,7 @@ require_tool cargo
 require_tool rustc
 require_tool qemu-system-x86_64
 require_tool timeout
+require_tool python3
 
 log() { printf '%s\n' "$*"; }
 
@@ -85,6 +89,12 @@ judge_ud() { judge_fault "$1" "$2" "$UD_STATUS" "$UD_LINE"; }
 judge_pf() { judge_fault "$1" "$2" "$PF_STATUS" "$PF_LINE"; }
 judge_df() { judge_fault "$1" "$2" "$DF_STATUS" "$DF_LINE"; }
 
+judge_exact() {
+  local status="$1" file="$2" expected_status="$3" expected_file="$4"
+  [[ "$status" -eq "$expected_status" ]] || return 1
+  cmp -s "$file" "$expected_file"
+}
+
 selftest_harness() {
   local dir="$OUT/selftest"
   mkdir -p "$dir"
@@ -119,6 +129,22 @@ selftest_harness() {
   if judge_ud "$UD_STATUS" "$dir/ud-with-marker.log"; then ok=1; fi
   if judge_pf "$PF_STATUS" "$dir/empty.log"; then ok=1; fi
   if judge_df 0 "$dir/empty.log"; then ok=1; fi
+
+  printf '%s\n' \
+    "R3ATH3_STAGE rust_main" \
+    "R3ATH3_SCRIPT_READY" \
+    "R3ATH3_OUT hi" \
+    "R3ATH3_SCRIPT_OK lines=1" >"$dir/script-ok.log"
+  printf '%s\n' \
+    "R3ATH3_STAGE rust_main" \
+    "R3ATH3_SCRIPT_READY" \
+    "R3ATH3_SCRIPT_ERROR line=2 reason=unknown" >"$dir/script-err.log"
+  judge_exact "$SCRIPT_OK_STATUS" "$dir/script-ok.log" "$SCRIPT_OK_STATUS" "$dir/script-ok.log" || ok=1
+  judge_exact "$SCRIPT_ERR_STATUS" "$dir/script-err.log" "$SCRIPT_ERR_STATUS" "$dir/script-err.log" || ok=1
+  if judge_exact 0 "$dir/script-ok.log" "$SCRIPT_OK_STATUS" "$dir/script-ok.log"; then ok=1; fi
+  if judge_exact "$SCRIPT_OK_STATUS" "$dir/empty.log" "$SCRIPT_OK_STATUS" "$dir/script-ok.log"; then ok=1; fi
+  if judge_exact "$SCRIPT_OK_STATUS" "$dir/script-err.log" "$SCRIPT_OK_STATUS" "$dir/script-ok.log"; then ok=1; fi
+  if judge_exact "$SCRIPT_ERR_STATUS" "$dir/empty.log" "$SCRIPT_ERR_STATUS" "$dir/script-err.log"; then ok=1; fi
 
   if [[ "$ok" -eq 0 ]]; then
     log "[PASS] harness-selftest"
@@ -178,6 +204,243 @@ run_qemu() {
   echo "$status"
 }
 
+write_script_cases() {
+  mkdir -p "$OUT/task"
+  cat >"$OUT/task/ok.task" <<'EOF'
+# comment
+set n 2
+set k 3
+add n k
+sub n 1
+say "hi"
+print n
+repeat 2
+add n 1
+say "x"
+end
+print n
+halt
+EOF
+  cat >"$OUT/task/ok.expected" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SCRIPT_READY
+R3ATH3_OUT hi
+R3ATH3_OUT n=4
+R3ATH3_OUT x
+R3ATH3_OUT x
+R3ATH3_OUT n=6
+R3ATH3_SCRIPT_OK lines=12
+EOF
+  cat >"$OUT/task/unknown.task" <<'EOF'
+set n 1
+bogus
+EOF
+  cat >"$OUT/task/unknown.expected" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SCRIPT_READY
+R3ATH3_SCRIPT_ERROR line=2 reason=unknown
+EOF
+  cat >"$OUT/task/overflow.task" <<'EOF'
+set n 9223372036854775807
+add n 1
+EOF
+  cat >"$OUT/task/overflow.expected" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SCRIPT_READY
+R3ATH3_SCRIPT_ERROR line=2 reason=overflow
+EOF
+  cat >"$OUT/task/repeat.task" <<'EOF'
+repeat 100
+say "z"
+end
+EOF
+  cat >"$OUT/task/repeat.expected" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SCRIPT_READY
+R3ATH3_SCRIPT_ERROR line=1 reason=repeat
+EOF
+  cat >"$OUT/task/repeat-halt.task" <<'EOF'
+halt
+repeat 100
+end
+EOF
+  cat >"$OUT/task/repeat-halt.expected" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SCRIPT_READY
+R3ATH3_SCRIPT_ERROR line=2 reason=repeat
+EOF
+  python3 -c 'open("'"$OUT"'/task/limit.task","wb").write(b"\n"*49)'
+  cat >"$OUT/task/limit.expected" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SCRIPT_READY
+R3ATH3_SCRIPT_ERROR line=49 reason=limit
+EOF
+  cat >"$OUT/task/nested.task" <<'EOF'
+repeat 1
+repeat 1
+end
+end
+EOF
+  cat >"$OUT/task/nested.expected" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SCRIPT_READY
+R3ATH3_SCRIPT_ERROR line=2 reason=nested
+EOF
+  cat >"$OUT/task/unclosed.task" <<'EOF'
+repeat 1
+say "z"
+EOF
+  cat >"$OUT/task/unclosed.expected" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SCRIPT_READY
+R3ATH3_SCRIPT_ERROR line=3 reason=unclosed
+EOF
+  printf '%s\n' 'print n' >"$OUT/task/undefined.task"
+  cat >"$OUT/task/undefined.expected" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SCRIPT_READY
+R3ATH3_SCRIPT_ERROR line=1 reason=undefined
+EOF
+  printf '%s\n' 'set' >"$OUT/task/syntax.task"
+  cat >"$OUT/task/syntax.expected" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SCRIPT_READY
+R3ATH3_SCRIPT_ERROR line=1 reason=syntax
+EOF
+  printf 'say "a\001b"\n' >"$OUT/task/char.task"
+  cat >"$OUT/task/char.expected" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SCRIPT_READY
+R3ATH3_SCRIPT_ERROR line=1 reason=char
+EOF
+  : >"$OUT/task/timeout.task"
+  cat >"$OUT/task/timeout.expected" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SCRIPT_READY
+R3ATH3_SCRIPT_ERROR line=1 reason=timeout
+EOF
+}
+
+run_script_qemu() {
+  local name="$1"
+  local seconds="$2"
+  local script_file="$3"
+  local append_run="${4:-1}"
+  local elf="$OUT/script.elf"
+  local log_file="$OUT/$name.serial.log"
+  local err_file="$OUT/$name.qemu.err"
+  if [[ ! -f "$elf" ]]; then
+    echo "missing elf" >"$log_file"
+    echo 127
+    return
+  fi
+  set +e
+  timeout --foreground --kill-after=5s "$seconds" python3 - "$script_file" "$elf" "$log_file" "$err_file" "$seconds" "$append_run" <<'PY'
+import os, select, signal, subprocess, sys, time
+script_path, elf, out_log, err_log, seconds, append_run = sys.argv[1:]
+payload = open(script_path, "rb").read()
+if append_run == "1":
+    if not payload.endswith(b"\n"):
+        payload += b"\n"
+    payload += b"run\n"
+err_f = open(err_log, "wb")
+proc = subprocess.Popen(
+    [
+        "qemu-system-x86_64",
+        "-machine", "pc,accel=tcg",
+        "-cpu", "qemu64",
+        "-m", "64M",
+        "-smp", "1",
+        "-kernel", elf,
+        "-nic", "none",
+        "-display", "none",
+        "-vga", "none",
+        "-serial", "stdio",
+        "-no-reboot",
+        "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+    ],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=err_f,
+)
+def stop(_signum, _frame):
+    if proc.poll() is None:
+        proc.kill()
+    sys.exit(124)
+signal.signal(signal.SIGTERM, stop)
+deadline = time.time() + float(seconds)
+buf = b""
+sent = False
+fd = proc.stdout.fileno()
+while True:
+    if time.time() > deadline:
+        proc.kill()
+        proc.wait()
+        open(out_log, "wb").write(buf)
+        sys.exit(124)
+    ready, _, _ = select.select([fd], [], [], 0.05)
+    if ready:
+        chunk = os.read(fd, 4096)
+        if chunk:
+            buf += chunk
+        elif proc.poll() is not None:
+            break
+    if (not sent) and b"R3ATH3_SCRIPT_READY\n" in buf:
+        view = memoryview(payload)
+        try:
+            for start in range(0, len(view), 8):
+                proc.stdin.write(view[start:start + 8])
+                proc.stdin.flush()
+                time.sleep(0.001)
+        except (BrokenPipeError, OSError):
+            pass
+        sent = True
+    if proc.poll() is not None:
+        while True:
+            try:
+                leftover = os.read(fd, 4096)
+            except OSError:
+                break
+            if not leftover:
+                break
+            buf += leftover
+        break
+open(out_log, "wb").write(buf)
+code = proc.wait()
+sys.exit(code if code is not None else 124)
+PY
+  local status=$?
+  set -e
+  echo "$status"
+}
+
+expect_script() {
+  local name="$1"
+  local seconds="$2"
+  local script_file="$3"
+  local expected="$4"
+  local append_run="${5:-1}"
+  local want="$SCRIPT_OK_STATUS"
+  case "$name" in
+    script-ok) want="$SCRIPT_OK_STATUS" ;;
+    *) want="$SCRIPT_ERR_STATUS" ;;
+  esac
+  local status
+  status="$(run_script_qemu "$name" "$seconds" "$script_file" "$append_run")"
+  if judge_exact "$status" "$OUT/$name.serial.log" "$want" "$expected"; then
+    log "[PASS] $name exit=$status"
+  else
+    log "[FAIL] $name exit=$status"
+    log "----- serial -----"
+    cat "$OUT/$name.serial.log" 2>/dev/null || true
+    log "----- expected -----"
+    cat "$expected" 2>/dev/null || true
+    log "----- qemu stderr -----"
+    cat "$OUT/$name.qemu.err" 2>/dev/null || true
+    FAILURES=$((FAILURES + 1))
+  fi
+}
+
 expect_case() {
   local name="$1"
   local judge="$2"
@@ -224,6 +487,21 @@ else
   fi
   if build_kernel fault-df fault-df; then
     expect_case fault-df judge_df 8
+  fi
+  if build_kernel script script; then
+    write_script_cases
+    expect_script script-ok 8 "$OUT/task/ok.task" "$OUT/task/ok.expected"
+    expect_script script-unknown 8 "$OUT/task/unknown.task" "$OUT/task/unknown.expected"
+    expect_script script-overflow 8 "$OUT/task/overflow.task" "$OUT/task/overflow.expected"
+    expect_script script-repeat 8 "$OUT/task/repeat.task" "$OUT/task/repeat.expected"
+    expect_script script-repeat-halt 8 "$OUT/task/repeat-halt.task" "$OUT/task/repeat-halt.expected"
+    expect_script script-limit 8 "$OUT/task/limit.task" "$OUT/task/limit.expected"
+    expect_script script-nested 8 "$OUT/task/nested.task" "$OUT/task/nested.expected"
+    expect_script script-unclosed 8 "$OUT/task/unclosed.task" "$OUT/task/unclosed.expected"
+    expect_script script-undefined 8 "$OUT/task/undefined.task" "$OUT/task/undefined.expected"
+    expect_script script-syntax 8 "$OUT/task/syntax.task" "$OUT/task/syntax.expected"
+    expect_script script-char 8 "$OUT/task/char.task" "$OUT/task/char.expected"
+    expect_script script-timeout 20 "$OUT/task/timeout.task" "$OUT/task/timeout.expected" 0
   fi
 fi
 

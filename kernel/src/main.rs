@@ -11,6 +11,8 @@ mod boot;
 mod exceptions;
 mod port;
 mod qemu_exit;
+#[cfg(feature = "script")]
+mod script;
 mod serial;
 mod vga;
 
@@ -22,7 +24,8 @@ const _: () = {
         + cfg!(feature = "capture") as u8
         + cfg!(feature = "fault-ud") as u8
         + cfg!(feature = "fault-pf") as u8
-        + cfg!(feature = "fault-df") as u8;
+        + cfg!(feature = "fault-df") as u8
+        + cfg!(feature = "script") as u8;
     assert!(modes <= 1, "enable at most one test feature");
 };
 
@@ -53,12 +56,16 @@ pub extern "C" fn kernel_main() -> ! {
     #[cfg(feature = "fault-df")]
     exceptions::trigger_df();
 
+    #[cfg(feature = "script")]
+    script::run();
+
     #[cfg(not(any(
         feature = "fault-panic",
         feature = "fault-hang",
         feature = "fault-ud",
         feature = "fault-pf",
-        feature = "fault-df"
+        feature = "fault-df",
+        feature = "script"
     )))]
     boot_ok();
 }
@@ -68,7 +75,8 @@ pub extern "C" fn kernel_main() -> ! {
     feature = "fault-hang",
     feature = "fault-ud",
     feature = "fault-pf",
-    feature = "fault-df"
+    feature = "fault-df",
+    feature = "script"
 )))]
 fn boot_ok() -> ! {
     serial::write_str(BOOT_MARKER);

@@ -3,7 +3,8 @@
 //! # Invariants
 //! `init` runs once, before any other serial write, with interrupts disabled.
 //! Bytes are written only after the transmitter-holding-register bit is set.
-//! There is no interrupt-driven RX/TX and no second UART.
+//! `try_recv` polls the data-ready bit and never waits. There is no
+//! interrupt-driven RX/TX and no second UART.
 
 use core::fmt;
 
@@ -24,8 +25,22 @@ pub fn init() {
 }
 
 pub fn write_str(text: &str) {
-    for byte in text.bytes() {
+    write_bytes(text.as_bytes());
+}
+
+pub fn write_bytes(bytes: &[u8]) {
+    for &byte in bytes {
         write_byte(byte);
+    }
+}
+
+/// One received byte, or `None` when the receive buffer is empty.
+pub fn try_recv() -> Option<u8> {
+    let ready = unsafe { port::inb(COM1 + 5) } & 0x01 != 0;
+    if ready {
+        Some(unsafe { port::inb(COM1) })
+    } else {
+        None
     }
 }
 
