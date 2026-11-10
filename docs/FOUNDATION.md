@@ -18,11 +18,12 @@ The image in this repository is a QEMU-only x86_64 kernel. It boots, reports CPU
 | Panic | Serial `R3ATH3_PANIC` plus message, then QEMU fail status 35 |
 | CPU exceptions | IDT for vectors 0–31. Named lines for `#DE`, `#UD`, `#GP`, `#PF`, and `#DF`. `#DF` uses IST1, a 16 KiB stack with no guard page. The RIP saved for `#DF` is architecturally undefined; the line prints the value the CPU pushed. AMD-only `#VC` (29) and `#SX` (30) keep the CPU error code. Line shape: `R3ATH3_FAULT vector=<n> name=<name> error=<code or none> rip=<hex>` and `cr2=<hex>` on `#PF`. Named QEMU statuses are 97/99/101/103/105. Any other vector exits 95, outside GNU timeout's 124–127. |
 | Smoke test | Pass (33), panic (35), hang (timeout 124), `#UD` (99), `#PF` (103), `#DF` (105), script ok (161), and script error (163). Fault judges require the exact status and an exact fault line. Script judges require the whole serial log. |
-| Task language | Fixed buffers only. Polled COM1, no interrupts. Commands and limits are in `docs/TASK.md`. Success status 161, error status 163. |
+| Task language | Fixed buffers only. `script` reads polled COM1 (status 161/163). `kbd-script` reads IRQ1 and echoes lines (success 181). Commands and limits are in `docs/TASK.md`. |
+| Timer and keyboard | 8259 PIC vectors 32–47, only IRQ0 and IRQ1 unmasked. PIT divisor 11932, nominal 100 Hz. 300 ticks must move the virtual RTC by 3 or 4 seconds (status 177). PS/2 scan code set 1, 128-event ring, overflow drops. Echo test status 179. |
 
 ## Planned, not in this image
 
-An allocator, processes, isolation, a scheduler, drivers beyond COM1 and VGA text, networking, persistent storage, a human authorization gate, an append-only action record, and any model or agent runtime. Maskable interrupts stay off: no PIC, APIC, timer, or `sti`. Those do not belong in ring 0 by default. A future action gate, if built, stays outside the kernel and starts from denial.
+An allocator, processes, isolation, a scheduler, networking, persistent storage, a mouse, a graphical UI, a human authorization gate, an append-only action record, and any model or agent runtime. IRQ0 and IRQ1 are the only unmasked lines. There is no APIC. A future action gate, if built, stays outside the kernel and starts from denial.
 
 ## Human–AI rule
 
@@ -30,9 +31,9 @@ A model suggestion is untrusted input. This kernel has no interface that turns a
 
 ## Unsafe boundaries
 
-All `unsafe` is in `kernel/src/port.rs`, `kernel/src/serial.rs`, `kernel/src/vga.rs`, `kernel/src/qemu_exit.rs`, `kernel/src/exceptions.rs`, and the assembly in `kernel/src/boot.rs`. The task interpreter calls the serial driver and does not add its own `unsafe`.
+All `unsafe` is in `kernel/src/port.rs`, `kernel/src/serial.rs`, `kernel/src/vga.rs`, `kernel/src/qemu_exit.rs`, `kernel/src/irq.rs`, `kernel/src/exceptions.rs`, and the assembly in `kernel/src/boot.rs`. The task interpreter calls those drivers and does not add its own `unsafe`.
 
-- Port I/O is limited to COM1 `0x3F8..=0x3FD` and QEMU debug-exit `0xF4`.
+- Port I/O is COM1 `0x3F8..=0x3FD`, the PIC (`0x20`/`0x21`/`0xA0`/`0xA1`), the PIT (`0x40`/`0x43`), the PS/2 controller (`0x60`/`0x64`), the CMOS RTC (`0x70`/`0x71`), and QEMU debug-exit `0xF4`.
 - Maskable interrupts stay off. One CPU. No shared device state. Exception entry uses interrupt gates, which also clear IF.
 - VGA writes are 80×25 cells at `0xB8000` after the identity map is on.
 - The boot stub builds the page tables before paging and calls `kernel_main` once on a 16 KiB stack. Its GDT has no TSS.

@@ -5,7 +5,9 @@
 //! CPU faults use `0x30` (#DE → 97), `0x31` (#UD → 99), `0x32` (#GP → 101),
 //! `0x33` (#PF → 103), `0x34` (#DF → 105). Any other vector uses `0x2F` (95),
 //! which sits outside GNU timeout's own statuses 124–127.
-//! A task script writes `0x50` (ok → 161) or `0x51` (error → 163).
+//! A COM1 task script writes `0x50` (ok → 161) or `0x51` (error → 163).
+//! Timer proof writes `0x58` (177). Keyboard echo writes `0x59` (179).
+//! A keyboard task script writes `0x5A` (181) on success.
 //! This device exists only in the emulator. Do not boot this image on hardware.
 
 use crate::port;
@@ -29,9 +31,24 @@ pub fn script_ok() -> ! {
     exit(0x50)
 }
 
-#[cfg(feature = "script")]
+#[cfg(any(feature = "script", feature = "kbd-script"))]
 pub fn script_error() -> ! {
     exit(0x51)
+}
+
+#[cfg(feature = "kbd-script")]
+pub fn kbd_script_ok() -> ! {
+    exit(0x5A)
+}
+
+#[cfg(feature = "ticks")]
+pub fn ticks_ok() -> ! {
+    exit(0x58)
+}
+
+#[cfg(feature = "keys")]
+pub fn keys_ok() -> ! {
+    exit(0x59)
 }
 
 pub fn cpu_fault(vector: u64) -> ! {

@@ -35,6 +35,7 @@ pub fn write_bytes(bytes: &[u8]) {
 }
 
 /// One received byte, or `None` when the receive buffer is empty.
+#[cfg(feature = "script")]
 pub fn try_recv() -> Option<u8> {
     let ready = unsafe { port::inb(COM1 + 5) } & 0x01 != 0;
     if ready {

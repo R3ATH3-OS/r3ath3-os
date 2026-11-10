@@ -2,9 +2,13 @@
 
 Suggested wording, not a certification: "An authentic Human–AI co-op OS".
 
-This is a fixed-buffer interpreter in the QEMU kernel. It is not an AI runtime. There is no heap. Maskable interrupts stay off, and COM1 is polled.
+This is a fixed-buffer interpreter in the QEMU kernel. It is not an AI runtime. There is no heap. The `script` build polls COM1. IRQ0 and IRQ1 are enabled for the timer and the keyboard.
 
 ## Input
+
+COM1 is the `script` build. It prints `R3ATH3_SCRIPT_READY`, then reads COM1 until a line whose text is `run`. Success exits 161.
+
+The keyboard is the `kbd-script` build. It prints `R3ATH3_KBD_READY`, echoes each edited line to COM1 as `R3ATH3_ECHO ...` and to VGA row 0, and uses the same `run` terminator. Success exits 181. Errors still exit 163. The `keys` build only checks translation: shift, backspace, and Enter, then exits 179.
 
 The `script` build prints `R3ATH3_SCRIPT_READY`, then reads COM1 until a line whose text is `run`. That line ends the script and is not a command. Each byte is polled at most 20,000,000 times. If the next byte does not arrive, the kernel prints `R3ATH3_SCRIPT_ERROR` with `reason=timeout` and the 1-based number of the line it was reading (`1` if nothing has arrived). `\r` is ignored. A line longer than 72 bytes is `reason=limit`. More than 48 physical lines, counting blanks, comments, and `run`, is also `reason=limit`, so input cannot continue without bound.
 

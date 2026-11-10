@@ -3,7 +3,8 @@
 //! # Invariants
 //! Boot code identity-maps the first 1 GiB before `kernel_main`, so this
 //! physical address is the same virtual address. Only the boot processor
-//! writes it, interrupts are off, and the write covers exactly 80×25 cells.
+//! writes it. IRQ handlers do not. `write_marker` fills 80×25 cells and
+//! `write_line` fills the first row.
 //! QEMU's default VGA text mode displays this buffer. No hardware scanout is
 //! programmed.
 
@@ -29,6 +30,18 @@ pub fn write_marker(text: &str) {
             }
             cells[column] = GREEN_ON_BLACK | u16::from(byte);
             column += 1;
+        }
+    }
+}
+
+pub fn write_line(text: &[u8]) {
+    unsafe {
+        let cells = core::slice::from_raw_parts_mut(BUFFER, WIDTH);
+        for cell in cells.iter_mut() {
+            *cell = GREEN_ON_BLACK | u16::from(b' ');
+        }
+        for (column, &byte) in text.iter().take(WIDTH).enumerate() {
+            cells[column] = GREEN_ON_BLACK | u16::from(byte);
         }
     }
 }

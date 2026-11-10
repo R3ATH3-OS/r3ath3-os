@@ -21,6 +21,9 @@ fault-ud = []
 fault-pf = []
 fault-df = []
 script = []
+kbd-script = []
+ticks = []
+keys = []
 
 [profile.dev]
 panic = "abort"
