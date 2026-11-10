@@ -1,6 +1,6 @@
 //! R3@TH3 OS boot milestone.
 //!
-//! Vision, not an implemented cooperative system: "An authentic Human–AI co-op OS".
+//! Suggested wording, not a certification and not a claim that this image is that system: "An authentic Human–AI co-op OS".
 //! This binary boots, reports CPU exceptions on serial, and exits QEMU.
 //! No model, agent, or capability check runs in ring 0.
 

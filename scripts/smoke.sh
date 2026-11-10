@@ -3,6 +3,7 @@
 # QEMU isa-debug-exit maps port 0xF4 value V to process status (V << 1) | 1.
 # Success writes 0x10 (status 33). A panic writes 0x11 (status 35).
 # CPU faults: #UD 0x31→99, #PF 0x33→103, #DF 0x34→105.
+# Any other vector writes 0x2F (status 95), outside timeout's 124–127.
 # A triple-fault or silent reset does not print the fault line and does not
 # use those statuses (this QEMU build has exited 0 on triple fault).
 set -u
@@ -108,7 +109,11 @@ selftest_harness() {
   printf '%s\n' "R3ATH3_FAULT vector=6 name=ud error=none rip=0x1002b0" >"$dir/ud.log"
   printf '' >"$dir/empty.log"
   printf '%s\n' "R3ATH3_FAULT vector=6 name=ud error=none rip=0x1002b0" "$MARKER" >"$dir/ud-with-marker.log"
+  printf '%s\n' "R3ATH3_FAULT vector=14 name=pf error=0x0 rip=0x1002b0 cr2=0x40000000" >"$dir/pf.log"
+  printf '%s\n' "R3ATH3_FAULT vector=8 name=df error=0x0 rip=0x1002b0" >"$dir/df.log"
   judge_ud "$UD_STATUS" "$dir/ud.log" || ok=1
+  judge_pf "$PF_STATUS" "$dir/pf.log" || ok=1
+  judge_df "$DF_STATUS" "$dir/df.log" || ok=1
   if judge_ud 0 "$dir/ud.log"; then ok=1; fi
   if judge_ud "$UD_STATUS" "$dir/empty.log"; then ok=1; fi
   if judge_ud "$UD_STATUS" "$dir/ud-with-marker.log"; then ok=1; fi

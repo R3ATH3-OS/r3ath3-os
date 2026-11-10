@@ -7,10 +7,13 @@
 //!
 //! The runtime GDT replaces the boot stub's GDT and adds a 64-bit TSS.
 //! `#DF` (vector 8) uses IST1, a dedicated 16 KiB stack inside the identity
-//! map. Other exceptions use the interrupted stack. Handlers do not return.
+//! map. That stack has no guard page. Other exceptions use the interrupted
+//! stack. Handlers do not return.
 //!
-//! Unsafe here is limited to descriptor loads (`lgdt`, `ltr`, `lidt`), reads
-//! of the CPU exception frame and CR2, and the injected-fault instructions.
+//! `unsafe` in this module covers every privileged step: stores into the GDT,
+//! TSS, and IDT; `lgdt`, `ltr`, and `lidt`; the exception-frame read, the CR2
+//! read, and the IST stack-pointer check; plus the smoke-only `ud2`, unmapped
+//! read, and not-present gate edits.
 
 use core::arch::{asm, global_asm};
 use core::ptr;
@@ -55,6 +58,40 @@ global_asm!(
         call rust_exception_entry
         ud2
 
+    # Each stub is global so a later codegen-units change can still link it.
+    .global isr_0
+    .global isr_1
+    .global isr_2
+    .global isr_3
+    .global isr_4
+    .global isr_5
+    .global isr_6
+    .global isr_7
+    .global isr_8
+    .global isr_9
+    .global isr_10
+    .global isr_11
+    .global isr_12
+    .global isr_13
+    .global isr_14
+    .global isr_15
+    .global isr_16
+    .global isr_17
+    .global isr_18
+    .global isr_19
+    .global isr_20
+    .global isr_21
+    .global isr_22
+    .global isr_23
+    .global isr_24
+    .global isr_25
+    .global isr_26
+    .global isr_27
+    .global isr_28
+    .global isr_29
+    .global isr_30
+    .global isr_31
+
     isr_0:  pushq $0; pushq $0;  jmp exception_common
     isr_1:  pushq $0; pushq $1;  jmp exception_common
     isr_2:  pushq $0; pushq $2;  jmp exception_common
@@ -84,8 +121,9 @@ global_asm!(
     isr_26: pushq $0; pushq $26; jmp exception_common
     isr_27: pushq $0; pushq $27; jmp exception_common
     isr_28: pushq $0; pushq $28; jmp exception_common
-    isr_29: pushq $0; pushq $29; jmp exception_common
-    isr_30: pushq $0; pushq $30; jmp exception_common
+    # AMD-only. #VC (29) and #SX (30) push a real error code; do not push 0.
+    isr_29: pushq $29; jmp exception_common
+    isr_30: pushq $30; jmp exception_common
     isr_31: pushq $0; pushq $31; jmp exception_common
     "#,
     options(att_syntax)
@@ -349,6 +387,8 @@ fn write_fault(frame: &ExceptionFrame) {
         serial::write_str("none");
     }
     serial::write_str(" rip=");
+    // For #DF the saved RIP is architecturally undefined. The line still
+    // prints the value the CPU pushed; the smoke pattern only checks its shape.
     write_hex(frame.rip);
     if frame.vector == 14 {
         serial::write_str(" cr2=");
@@ -364,12 +404,15 @@ fn name(vector: u64) -> &'static str {
         8 => "df",
         13 => "gp",
         14 => "pf",
+        29 => "vc",
+        30 => "sx",
         _ => "other",
     }
 }
 
 fn has_error_code(vector: u64) -> bool {
-    matches!(vector, 8 | 10 | 11 | 12 | 13 | 14 | 17 | 21)
+    // 29 (#VC) and 30 (#SX) are AMD-only and do push an error code.
+    matches!(vector, 8 | 10 | 11 | 12 | 13 | 14 | 17 | 21 | 29 | 30)
 }
 
 fn cr2() -> u64 {

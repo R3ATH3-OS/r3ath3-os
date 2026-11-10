@@ -13,7 +13,7 @@ This repository boots a small Rust kernel in QEMU and stops there. It does not r
 - Deterministic COM1 line: `R3ATH3_BOOT_OK arch=x86_64 serial=com1 milestone=boot-foundation`
 - QEMU `isa-debug-exit`: pass status **33**, panic status **35**.
 - A 64-bit IDT for CPU exceptions, plus a GDT/TSS so `#DF` uses a dedicated IST stack. Maskable interrupts stay disabled. No PIC or APIC.
-- Fault serial line, then a distinct QEMU status: `#UD` **99**, `#PF` **103** (`cr2=0x40000000`), `#DF` **105**. Also handled: `#DE` **97**, `#GP` **101**.
+- Fault serial line, then a distinct QEMU status: `#UD` **99**, `#PF` **103** (`cr2=0x40000000`), `#DF` **105**. Also handled: `#DE` **97**, `#GP` **101**. Any other vector exits **95** (outside GNU timeout's 124–127). The RIP printed for `#DF` is architecturally undefined. The `#DF` stack has no guard page.
 - Bounded smoke test: pass, injected panic, hang/timeout, `#UD`, `#PF`, and forced `#DF`. The harness rejects a missing marker, a silent log, and a triple-fault status.
 
 ## What is not implemented
