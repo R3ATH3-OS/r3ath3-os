@@ -534,8 +534,29 @@ while time.time() < deadline:
     time.sleep(0.02)
 else:
     proc.kill(); proc.wait(); sys.exit(124)
-mon = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-mon.connect(sock_path)
+mon = None
+for _ in range(50):
+    if os.path.exists(sock_path):
+        candidate = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            candidate.connect(sock_path)
+            mon = candidate
+            break
+        except OSError:
+            candidate.close()
+    time.sleep(0.1)
+if mon is None:
+    message = "monitor socket did not appear: " + sock_path + "\n"
+    sys.stderr.write(message)
+    try:
+        err_f.write(message.encode())
+        err_f.flush()
+    except OSError:
+        pass
+    if proc.poll() is None:
+        proc.kill()
+        proc.wait()
+    sys.exit(1)
 mon.settimeout(0.2)
 try:
     mon.recv(4096)
