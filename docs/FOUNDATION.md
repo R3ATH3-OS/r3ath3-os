@@ -34,10 +34,10 @@ A model suggestion is untrusted input. This kernel has no interface that turns a
 All `unsafe` is in `kernel/src/port.rs`, `kernel/src/serial.rs`, `kernel/src/vga.rs`, `kernel/src/qemu_exit.rs`, `kernel/src/irq.rs`, `kernel/src/exceptions.rs`, and the assembly in `kernel/src/boot.rs`. The task interpreter calls those drivers and does not add its own `unsafe`.
 
 - Port I/O is COM1 `0x3F8..=0x3FD`, the PIC (`0x20`/`0x21`/`0xA0`/`0xA1`), the PIT (`0x40`/`0x43`), the PS/2 controller (`0x60`/`0x64`), the CMOS RTC (`0x70`/`0x71`), and QEMU debug-exit `0xF4`.
-- Maskable interrupts stay off. One CPU. No shared device state. Exception entry uses interrupt gates, which also clear IF.
+- One CPU. After init, IRQ0 and IRQ1 are unmasked and `sti` has run. Other PIC inputs stay masked. The tick counter and the keyboard ring are shared with those handlers: IRQ0 updates the counter, IRQ1 is the only producer of the ring, and main is the only consumer. A full ring drops the event and increments a counter. Exception and IRQ gates clear IF while a handler runs.
 - VGA writes are 80×25 cells at `0xB8000` after the identity map is on.
 - The boot stub builds the page tables before paging and calls `kernel_main` once on a 16 KiB stack. Its GDT has no TSS.
-- `exceptions::init` then loads a GDT with a 64-bit TSS, points IST1 at a 16 KiB stack inside the identity map, and loads a 32-entry IDT. That IST stack has no guard page. `#DF` is reported only when the handler's stack pointer is inside it. The RIP in that report is architecturally undefined. A fault before that init is a QEMU exit without a fault line.
+- `exceptions::init` then loads a GDT with a 64-bit TSS, points IST1 at a 16 KiB stack inside the identity map, and loads a 48-entry IDT (vectors 0–47). That IST stack has no guard page. `#DF` is reported only when the handler's stack pointer is inside it. The RIP in that report is architecturally undefined. A fault before that init is a QEMU exit without a fault line.
 - The link keeps `.got`. `core`'s `panic_fmt` calls `rust_begin_unwind` through that slot. Dropping it makes a panic triple-fault with no serial line.
 - `0xF4` is an emulator device. This image is not for physical hardware.
 
