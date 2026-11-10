@@ -1,7 +1,7 @@
 # r3ath3-os
 R3@TH3 OS – a human–AI communication operating environment.
 
-Vision, not an implemented system: **An authentic Human–AI co-op OS**.
+Suggested wording, not a certification and not a claim that the system exists yet: **An authentic Human–AI co-op OS**.
 
 This repository boots a small Rust kernel in QEMU and stops there. It does not run agents, models, or a cooperative userspace.
 

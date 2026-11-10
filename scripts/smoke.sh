@@ -63,7 +63,9 @@ selftest_harness() {
   printf '%s\n' "R3ATH3_STAGE rust_main" >"$dir/missing.log"
   printf '%s\n' "R3ATH3_PANIC message=injected boot fault" >"$dir/panic.log"
   printf '%s\n' "R3ATH3_HANG" >"$dir/hang.log"
-  printf '%s\n' "$MARKER" >"$dir/panic-with-marker.log"
+  # Panic text is present so the status and panic checks pass. The marker
+  # on the next line is what must cause rejection.
+  printf '%s\n' "R3ATH3_PANIC message=injected boot fault" "$MARKER" >"$dir/panic-with-marker.log"
 
   local ok=0
   judge_boot_ok "$PASS_STATUS" "$dir/good.log" || ok=1
@@ -113,7 +115,9 @@ run_qemu() {
     return
   fi
   set +e
-  timeout --foreground "$seconds" qemu-system-x86_64 \
+  # SIGTERM at $seconds. If the guest ignores it, SIGKILL follows 5s later
+  # (timeout status 137). A guest that exits on SIGTERM still returns 124.
+  timeout --foreground --kill-after=5s "$seconds" qemu-system-x86_64 \
     -machine pc,accel=tcg \
     -cpu qemu64 \
     -m 64M \
@@ -153,23 +157,22 @@ log "toolchain qemu=$(qemu-system-x86_64 --version | head -n 1)"
 
 selftest_harness
 
-# One online-free release build populates the lockfile path. The first cargo
-# invocation of this script may need the network only if the lockfile is absent;
-# callers create the lockfile before --offline. If --offline fails, retry once
-# without it so a clean tree still builds with zero crates.
-if ! (cd "$KERNEL_DIR" && cargo generate-lockfile --offline >/dev/null 2>&1 || cargo generate-lockfile >/dev/null 2>&1); then
-  log "[FAIL] cargo lockfile"
-  exit 1
-fi
-
-if build_kernel boot-ok; then
-  expect_case boot-ok judge_boot_ok 8
-fi
-if build_kernel fault-panic fault-panic; then
-  expect_case fault-panic judge_panic 8
-fi
-if build_kernel fault-hang fault-hang; then
-  expect_case fault-hang judge_hang 8
+# Use the tracked lockfile only. Do not regenerate it: an online fallback can
+# rewrite kernel/Cargo.lock, and `cd && A || B` would run B outside KERNEL_DIR
+# when cd fails.
+if [[ ! -f "$KERNEL_DIR/Cargo.lock" ]]; then
+  log "[FAIL] kernel/Cargo.lock missing; smoke does not create or update it"
+  FAILURES=$((FAILURES + 1))
+else
+  if build_kernel boot-ok; then
+    expect_case boot-ok judge_boot_ok 8
+  fi
+  if build_kernel fault-panic fault-panic; then
+    expect_case fault-panic judge_panic 8
+  fi
+  if build_kernel fault-hang fault-hang; then
+    expect_case fault-hang judge_hang 8
+  fi
 fi
 
 if [[ "$FAILURES" -eq 0 ]]; then

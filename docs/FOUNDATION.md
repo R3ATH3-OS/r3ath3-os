@@ -1,6 +1,6 @@
 # Boot foundation
 
-Vision approved as a direction, not as a claim that it exists yet: "An authentic Human–AI co-op OS".
+Suggested wording, not a certification and not a claim that the system exists yet: "An authentic Human–AI co-op OS".
 
 The image in this repository is a QEMU-only x86_64 boot milestone. It prints one serial line and exits. It is not a cooperative OS.
 
@@ -42,7 +42,7 @@ All `unsafe` is in `kernel/src/port.rs`, `kernel/src/serial.rs`, `kernel/src/vga
 
 | Component | Role | License |
 | --- | --- | --- |
-| This kernel's Rust and assembly | Project code | No repository `LICENSE` file yet. This change does not add one. |
+| This kernel's Rust and assembly | Project code | No repository `LICENSE` file. Choosing one is left to the maintainer. |
 | rustc / cargo 1.83.0, target `x86_64-unknown-none` | Compiler and linker (`rust-lld`) | MIT OR Apache-2.0 |
 | QEMU `qemu-system-x86_64` | Emulator only (TCG, no network device) | GPL-2.0-only |
 | GNU binutils (`readelf` / `objdump` if used to inspect) | Optional inspection | GPL-3.0-or-later |
