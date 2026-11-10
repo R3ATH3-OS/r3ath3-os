@@ -17,6 +17,9 @@ default = []
 fault-panic = []
 fault-hang = []
 capture = []
+fault-ud = []
+fault-pf = []
+fault-df = []
 
 [profile.dev]
 panic = "abort"

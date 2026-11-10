@@ -2,6 +2,8 @@
 //!
 //! QEMU turns an `out` of `V` to port `0xF4` into process status `(V << 1) | 1`.
 //! `0x10` therefore becomes status 33 (pass) and `0x11` becomes status 35 (fail).
+//! CPU faults use `0x30` (#DE → 97), `0x31` (#UD → 99), `0x32` (#GP → 101),
+//! `0x33` (#PF → 103), `0x34` (#DF → 105). Any other vector uses `0x3E` (125).
 //! This device exists only in the emulator. Do not boot this image on hardware.
 
 use crate::port;
@@ -18,6 +20,18 @@ pub fn success() -> ! {
 
 pub fn fail() -> ! {
     exit(FAILED)
+}
+
+pub fn cpu_fault(vector: u64) -> ! {
+    let code = match vector {
+        0 => 0x30,
+        6 => 0x31,
+        13 => 0x32,
+        14 => 0x33,
+        8 => 0x34,
+        _ => 0x3E,
+    };
+    exit(code);
 }
 
 fn exit(code: u32) -> ! {
