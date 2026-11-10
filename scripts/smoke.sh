@@ -21,6 +21,10 @@ PF_STATUS=103
 DF_STATUS=105
 SCRIPT_OK_STATUS=161
 SCRIPT_ERR_STATUS=163
+TICKS_STATUS=177
+KEYS_STATUS=179
+KBD_SCRIPT_STATUS=181
+TICKS_LINE='R3ATH3_TICKS ok count=300 hz=100 rtc=[34]'
 UD_LINE='R3ATH3_FAULT vector=6 name=ud error=none rip=0x[0-9a-f]+'
 PF_LINE='R3ATH3_FAULT vector=14 name=pf error=0x0 rip=0x[0-9a-f]+ cr2=0x40000000'
 DF_LINE='R3ATH3_FAULT vector=8 name=df error=0x0 rip=0x[0-9a-f]+'
@@ -89,6 +93,16 @@ judge_ud() { judge_fault "$1" "$2" "$UD_STATUS" "$UD_LINE"; }
 judge_pf() { judge_fault "$1" "$2" "$PF_STATUS" "$PF_LINE"; }
 judge_df() { judge_fault "$1" "$2" "$DF_STATUS" "$DF_LINE"; }
 
+judge_ticks() {
+  local status="$1" file="$2"
+  [[ "$status" -eq "$TICKS_STATUS" ]] || return 1
+  grep -E -x -q "$TICKS_LINE" "$file" || return 1
+  if grep -F -q "$MARKER" "$file"; then
+    return 1
+  fi
+  return 0
+}
+
 judge_exact() {
   local status="$1" file="$2" expected_status="$3" expected_file="$4"
   [[ "$status" -eq "$expected_status" ]] || return 1
@@ -145,6 +159,19 @@ selftest_harness() {
   if judge_exact "$SCRIPT_OK_STATUS" "$dir/empty.log" "$SCRIPT_OK_STATUS" "$dir/script-ok.log"; then ok=1; fi
   if judge_exact "$SCRIPT_OK_STATUS" "$dir/script-err.log" "$SCRIPT_OK_STATUS" "$dir/script-ok.log"; then ok=1; fi
   if judge_exact "$SCRIPT_ERR_STATUS" "$dir/empty.log" "$SCRIPT_ERR_STATUS" "$dir/script-err.log"; then ok=1; fi
+
+  printf '%s\n' "R3ATH3_STAGE rust_main" "R3ATH3_TICKS ok count=300 hz=100 rtc=3" >"$dir/ticks.log"
+  printf '%s\n' "R3ATH3_TICKS ok count=300 hz=100 rtc=9" >"$dir/ticks-bad.log"
+  judge_ticks "$TICKS_STATUS" "$dir/ticks.log" || ok=1
+  if judge_ticks "$TICKS_STATUS" "$dir/ticks-bad.log"; then ok=1; fi
+  if judge_ticks 0 "$dir/ticks.log"; then ok=1; fi
+  if judge_ticks "$TICKS_STATUS" "$dir/empty.log"; then ok=1; fi
+  printf '%s\n' "R3ATH3_STAGE rust_main" "R3ATH3_KEYS_READY" "R3ATH3_KEY a" "R3ATH3_KEYS ok text=a drops=0" >"$dir/keys.log"
+  judge_exact "$KEYS_STATUS" "$dir/keys.log" "$KEYS_STATUS" "$dir/keys.log" || ok=1
+  if judge_exact "$KEYS_STATUS" "$dir/empty.log" "$KEYS_STATUS" "$dir/keys.log"; then ok=1; fi
+  printf '%s\n' "R3ATH3_KBD_READY" "R3ATH3_SCRIPT_OK lines=2" >"$dir/kbd.log"
+  judge_exact "$KBD_SCRIPT_STATUS" "$dir/kbd.log" "$KBD_SCRIPT_STATUS" "$dir/kbd.log" || ok=1
+  if judge_exact "$SCRIPT_OK_STATUS" "$dir/kbd.log" "$KBD_SCRIPT_STATUS" "$dir/kbd.log"; then ok=1; fi
 
   if [[ "$ok" -eq 0 ]]; then
     log "[PASS] harness-selftest"
@@ -441,6 +468,138 @@ expect_script() {
   fi
 }
 
+write_input_cases() {
+  mkdir -p "$OUT/task"
+  cat >"$OUT/task/keys.expected" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_KEYS_READY
+R3ATH3_KEY a
+R3ATH3_KEY B
+R3ATH3_KEY bs
+R3ATH3_KEY C
+R3ATH3_KEY enter
+R3ATH3_KEYS ok text=aC drops=0
+EOF
+  python3 - "$OUT/task/kbd.expected" <<'PY'
+import sys
+lines = ["R3ATH3_STAGE rust_main", "R3ATH3_KBD_READY"]
+for phrase in ("set n 1", "print n", "run"):
+    buf = ""
+    for ch in phrase:
+        buf += ch
+        lines.append("R3ATH3_ECHO " + buf)
+lines.extend(["R3ATH3_OUT n=1", "R3ATH3_SCRIPT_OK lines=2"])
+open(sys.argv[1], "w", encoding="utf-8").write("\n".join(lines) + "\n")
+PY
+}
+
+expect_monitor() {
+  local name="$1"
+  local seconds="$2"
+  local elf="$3"
+  local ready="$4"
+  local keys="$5"
+  local expected="$6"
+  local want="$7"
+  local log_file="$OUT/$name.serial.log"
+  local err_file="$OUT/$name.qemu.err"
+  local sock="$OUT/$name.mon.sock"
+  rm -f "$sock"
+  set +e
+  timeout --foreground --kill-after=5s "$seconds" python3 - "$elf" "$log_file" "$err_file" "$seconds" "$ready" "$keys" "$sock" <<'PY'
+import os, select, socket, subprocess, sys, time
+elf, out_log, err_log, seconds, ready, keys, sock_path = sys.argv[1:]
+err_f = open(err_log, "wb")
+proc = subprocess.Popen(
+    [
+        "qemu-system-x86_64", "-machine", "pc,accel=tcg", "-cpu", "qemu64",
+        "-m", "64M", "-smp", "1", "-kernel", elf, "-nic", "none",
+        "-display", "none", "-vga", "std", "-serial", "file:" + out_log,
+        "-monitor", "unix:" + sock_path + ",server,nowait", "-no-reboot",
+        "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+    ],
+    stdout=subprocess.DEVNULL, stderr=err_f,
+)
+deadline = time.time() + float(seconds)
+marker = ready.encode()
+while time.time() < deadline:
+    if proc.poll() is not None:
+        break
+    try:
+        data = open(out_log, "rb").read()
+    except FileNotFoundError:
+        data = b""
+    if marker in data:
+        break
+    time.sleep(0.02)
+else:
+    proc.kill(); proc.wait(); sys.exit(124)
+mon = None
+for _ in range(50):
+    if os.path.exists(sock_path):
+        candidate = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            candidate.connect(sock_path)
+            mon = candidate
+            break
+        except OSError:
+            candidate.close()
+    time.sleep(0.1)
+if mon is None:
+    message = "monitor socket did not appear: " + sock_path + "\n"
+    sys.stderr.write(message)
+    try:
+        err_f.write(message.encode())
+        err_f.flush()
+    except OSError:
+        pass
+    if proc.poll() is None:
+        proc.kill()
+        proc.wait()
+    sys.exit(1)
+mon.settimeout(0.2)
+try:
+    mon.recv(4096)
+except Exception:
+    pass
+for key in keys.split():
+    try:
+        mon.sendall(f"sendkey {key}\n".encode())
+    except OSError:
+        break
+    time.sleep(0.03)
+code = proc.wait() if proc.poll() is not None else None
+end = time.time() + 2
+while proc.poll() is None and time.time() < end:
+    time.sleep(0.02)
+if proc.poll() is None:
+    proc.kill()
+    code = proc.wait()
+else:
+    code = proc.wait()
+try:
+    mon.sendall(b"quit\n")
+except OSError:
+    pass
+mon.close()
+sys.exit(code if code is not None else 124)
+PY
+  local status=$?
+  set -e
+  if judge_exact "$status" "$log_file" "$want" "$expected"; then
+    log "[PASS] $name exit=$status"
+  else
+    log "[FAIL] $name exit=$status"
+    log "----- serial -----"
+    cat "$log_file" 2>/dev/null || true
+    log "----- expected -----"
+    cat "$expected" 2>/dev/null || true
+    log "----- qemu stderr -----"
+    cat "$err_file" 2>/dev/null || true
+    FAILURES=$((FAILURES + 1))
+  fi
+}
+
 expect_case() {
   local name="$1"
   local judge="$2"
@@ -502,6 +661,16 @@ else
     expect_script script-syntax 8 "$OUT/task/syntax.task" "$OUT/task/syntax.expected"
     expect_script script-char 8 "$OUT/task/char.task" "$OUT/task/char.expected"
     expect_script script-timeout 20 "$OUT/task/timeout.task" "$OUT/task/timeout.expected" 0
+  fi
+  write_input_cases
+  if build_kernel ticks ticks; then
+    expect_case ticks judge_ticks 12
+  fi
+  if build_kernel keys keys; then
+    expect_monitor keys 8 "$OUT/keys.elf" "R3ATH3_KEYS_READY" "a shift-b backspace shift_r-c ret" "$OUT/task/keys.expected" "$KEYS_STATUS"
+  fi
+  if build_kernel kbd-script kbd-script; then
+    expect_monitor kbd-script 8 "$OUT/kbd-script.elf" "R3ATH3_KBD_READY" "s e t spc n spc 1 ret p r i n t spc n ret r u n ret" "$OUT/task/kbd.expected" "$KBD_SCRIPT_STATUS"
   fi
 fi
 

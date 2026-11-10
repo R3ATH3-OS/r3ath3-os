@@ -2,8 +2,9 @@
 //!
 //! # Invariants
 //! `init` runs once on the boot processor, after the 1 GiB identity map is on
-//! and after COM1 is initialized, with maskable interrupts still disabled.
-//! It does not execute `sti`. There is no PIC or APIC programming.
+//! and after COM1 is initialized. It loads the exception and IRQ gates, remaps
+//! the 8259 PIC, and runs `sti`, with only IRQ0 (timer) and IRQ1 (keyboard)
+//! unmasked.
 //!
 //! The runtime GDT replaces the boot stub's GDT and adds a 64-bit TSS.
 //! `#DF` (vector 8) uses IST1, a dedicated 16 KiB stack inside the identity
@@ -25,7 +26,7 @@ use crate::serial;
 const UNMAPPED: u64 = 0x4000_0000;
 const KERNEL_CODE: u16 = 0x08;
 const KERNEL_DATA_TSS_LIMIT: u16 = 5 * 8 - 1;
-const IDT_LIMIT: u16 = 32 * 16 - 1;
+const IDT_LIMIT: u16 = 48 * 16 - 1;
 const TSS_SELECTOR: u16 = 0x18;
 
 global_asm!(
@@ -214,7 +215,7 @@ impl IdtEntry {
 
 #[repr(C, align(16))]
 struct Idt {
-    entries: [IdtEntry; 32],
+    entries: [IdtEntry; 48],
 }
 
 #[repr(C, packed)]
@@ -249,7 +250,7 @@ struct AlignedTss(Tss);
 struct AlignedStack([u8; 16384]);
 
 static mut IDT: Idt = Idt {
-    entries: [IdtEntry::NULL; 32],
+    entries: [IdtEntry::NULL; 48],
 };
 static mut TSS: AlignedTss = unsafe { core::mem::zeroed() };
 static mut GDT: [u64; 5] = [0; 5];
@@ -296,6 +297,10 @@ pub fn init() {
             idt.add(vector)
                 .write(IdtEntry::gate(stub_addr(vector), ist));
         }
+        for vector in 32..48 {
+            idt.add(vector)
+                .write(IdtEntry::gate(irq_stub_addr(vector), 0));
+        }
         let idtr = TablePointer {
             limit: IDT_LIMIT,
             base: ptr::addr_of!(IDT) as u64,
@@ -306,6 +311,7 @@ pub fn init() {
             options(nostack, preserves_flags)
         );
     }
+    crate::irq::enable();
 }
 
 #[cfg(feature = "fault-ud")]
@@ -465,6 +471,47 @@ fn tss_descriptor(base: u64) -> (u64, u64) {
     low |= ((limit >> 16) & 0xF) << 48;
     low |= ((base >> 24) & 0xFF) << 56;
     (low, base >> 32)
+}
+
+unsafe extern "C" {
+    fn isr_32();
+    fn isr_33();
+    fn isr_34();
+    fn isr_35();
+    fn isr_36();
+    fn isr_37();
+    fn isr_38();
+    fn isr_39();
+    fn isr_40();
+    fn isr_41();
+    fn isr_42();
+    fn isr_43();
+    fn isr_44();
+    fn isr_45();
+    fn isr_46();
+    fn isr_47();
+}
+
+fn irq_stub_addr(vector: usize) -> u64 {
+    let stub: unsafe extern "C" fn() = match vector {
+        32 => isr_32,
+        33 => isr_33,
+        34 => isr_34,
+        35 => isr_35,
+        36 => isr_36,
+        37 => isr_37,
+        38 => isr_38,
+        39 => isr_39,
+        40 => isr_40,
+        41 => isr_41,
+        42 => isr_42,
+        43 => isr_43,
+        44 => isr_44,
+        45 => isr_45,
+        46 => isr_46,
+        _ => isr_47,
+    };
+    stub as usize as u64
 }
 
 fn stub_addr(vector: usize) -> u64 {

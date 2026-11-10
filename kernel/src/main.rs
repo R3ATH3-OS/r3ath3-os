@@ -9,9 +9,10 @@
 
 mod boot;
 mod exceptions;
+mod irq;
 mod port;
 mod qemu_exit;
-#[cfg(feature = "script")]
+#[cfg(any(feature = "script", feature = "kbd-script"))]
 mod script;
 mod serial;
 mod vga;
@@ -25,7 +26,10 @@ const _: () = {
         + cfg!(feature = "fault-ud") as u8
         + cfg!(feature = "fault-pf") as u8
         + cfg!(feature = "fault-df") as u8
-        + cfg!(feature = "script") as u8;
+        + cfg!(feature = "script") as u8
+        + cfg!(feature = "kbd-script") as u8
+        + cfg!(feature = "ticks") as u8
+        + cfg!(feature = "keys") as u8;
     assert!(modes <= 1, "enable at most one test feature");
 };
 
@@ -59,13 +63,25 @@ pub extern "C" fn kernel_main() -> ! {
     #[cfg(feature = "script")]
     script::run();
 
+    #[cfg(feature = "kbd-script")]
+    script::run();
+
+    #[cfg(feature = "ticks")]
+    irq::ticks_demo();
+
+    #[cfg(feature = "keys")]
+    irq::keys_demo();
+
     #[cfg(not(any(
         feature = "fault-panic",
         feature = "fault-hang",
         feature = "fault-ud",
         feature = "fault-pf",
         feature = "fault-df",
-        feature = "script"
+        feature = "script",
+        feature = "kbd-script",
+        feature = "ticks",
+        feature = "keys"
     )))]
     boot_ok();
 }
@@ -76,7 +92,10 @@ pub extern "C" fn kernel_main() -> ! {
     feature = "fault-ud",
     feature = "fault-pf",
     feature = "fault-df",
-    feature = "script"
+    feature = "script",
+    feature = "kbd-script",
+    feature = "ticks",
+    feature = "keys"
 )))]
 fn boot_ok() -> ! {
     serial::write_str(BOOT_MARKER);

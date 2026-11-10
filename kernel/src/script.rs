@@ -1,7 +1,7 @@
 //! Fixed-buffer task language. See `docs/TASK.md`.
 //!
 //! No heap. Scripts, lines, names, and variables live in stack arrays.
-//! COM1 is polled. Maskable interrupts stay off.
+//! COM1 is polled. After init, only IRQ0 (timer) and IRQ1 (keyboard) are unmasked.
 
 use crate::qemu_exit;
 use crate::serial;
@@ -15,6 +15,7 @@ const MAX_REPEAT: i64 = 16;
 /// Physical lines read from COM1, including blanks, comments, and `run`.
 const MAX_INPUT_LINES: u32 = 48;
 /// Polls of the receive-buffer bit before a missing byte is `reason=timeout`.
+#[cfg(feature = "script")]
 const BYTE_WAIT_SPINS: u32 = 20_000_000;
 
 const OP_SET: u8 = 1;
@@ -66,16 +67,28 @@ struct Var {
 }
 
 pub fn run() -> ! {
-    serial::write_str("R3ATH3_SCRIPT_READY\n");
     let mut prog = [Cmd::empty(); MAX_CMDS];
-    let count = read_program(&mut prog);
+    #[cfg(feature = "kbd-script")]
+    let count = {
+        serial::write_str("R3ATH3_KBD_READY\n");
+        read_program_kbd(&mut prog)
+    };
+    #[cfg(feature = "script")]
+    let count = {
+        serial::write_str("R3ATH3_SCRIPT_READY\n");
+        read_program(&mut prog)
+    };
     execute(&prog[..count]);
     serial::write_str("R3ATH3_SCRIPT_OK lines=");
     write_u32(count as u32);
     serial::write_str("\n");
+    #[cfg(feature = "kbd-script")]
+    qemu_exit::kbd_script_ok();
+    #[cfg(feature = "script")]
     qemu_exit::script_ok();
 }
 
+#[cfg(feature = "script")]
 fn read_program(prog: &mut [Cmd]) -> usize {
     let mut count = 0usize;
     let mut depth = 0u8;
@@ -98,42 +111,105 @@ fn read_program(prog: &mut [Cmd]) -> usize {
             len += 1;
             continue;
         }
-        if line_no > MAX_INPUT_LINES {
-            fail(line_no, "limit");
-        }
-        let kept = strip_comment(&buf[..len]);
-        let trimmed = trim(&buf[..kept]);
-        if trimmed == b"run" {
-            if depth != 0 {
-                fail(line_no, "unclosed");
-            }
+        if commit_line(&buf[..len], line_no, prog, &mut count, &mut depth) {
             return count;
-        }
-        if !trimmed.is_empty() {
-            if count == MAX_CMDS {
-                fail(line_no, "limit");
-            }
-            prog[count] = parse_command(trimmed, line_no);
-            match prog[count].op {
-                OP_REPEAT => {
-                    if depth == 1 {
-                        fail(line_no, "nested");
-                    }
-                    depth = 1;
-                }
-                OP_END => {
-                    if depth == 0 {
-                        fail(line_no, "syntax");
-                    }
-                    depth = 0;
-                }
-                _ => {}
-            }
-            count += 1;
         }
         line_no = line_no.saturating_add(1);
         len = 0;
     }
+}
+
+#[cfg(feature = "kbd-script")]
+fn read_program_kbd(prog: &mut [Cmd]) -> usize {
+    let mut count = 0usize;
+    let mut depth = 0u8;
+    let mut line_no = 1u32;
+    let mut buf = [0u8; MAX_LINE];
+    let mut len = 0usize;
+    loop {
+        let event = loop {
+            if let Some(event) = crate::irq::pop_key() {
+                break event;
+            }
+            unsafe {
+                core::arch::asm!("hlt", options(nomem, nostack, preserves_flags));
+            }
+        };
+        match event {
+            crate::irq::Key::Char(ch) => {
+                if len == MAX_LINE {
+                    fail(line_no, "limit");
+                }
+                buf[len] = ch;
+                len += 1;
+                echo_line(&buf[..len]);
+            }
+            crate::irq::Key::Backspace => {
+                if len > 0 {
+                    len -= 1;
+                }
+                echo_line(&buf[..len]);
+            }
+            crate::irq::Key::Enter => {
+                if commit_line(&buf[..len], line_no, prog, &mut count, &mut depth) {
+                    return count;
+                }
+                line_no = line_no.saturating_add(1);
+                len = 0;
+            }
+        }
+    }
+}
+
+fn commit_line(
+    raw: &[u8],
+    line_no: u32,
+    prog: &mut [Cmd],
+    count: &mut usize,
+    depth: &mut u8,
+) -> bool {
+    if line_no > MAX_INPUT_LINES {
+        fail(line_no, "limit");
+    }
+    let kept = strip_comment(raw);
+    let trimmed = trim(&raw[..kept]);
+    if trimmed == b"run" {
+        if *depth != 0 {
+            fail(line_no, "unclosed");
+        }
+        return true;
+    }
+    if !trimmed.is_empty() {
+        if *count == MAX_CMDS {
+            fail(line_no, "limit");
+        }
+        prog[*count] = parse_command(trimmed, line_no);
+        match prog[*count].op {
+            OP_REPEAT => {
+                if *depth == 1 {
+                    fail(line_no, "nested");
+                }
+                *depth = 1;
+            }
+            OP_END => {
+                if *depth == 0 {
+                    fail(line_no, "syntax");
+                }
+                *depth = 0;
+            }
+            _ => {}
+        }
+        *count += 1;
+    }
+    false
+}
+
+#[cfg(feature = "kbd-script")]
+fn echo_line(text: &[u8]) {
+    serial::write_str("R3ATH3_ECHO ");
+    serial::write_bytes(text);
+    serial::write_str("\n");
+    crate::vga::write_line(text);
 }
 
 fn parse_command(line: &[u8], line_no: u32) -> Cmd {
@@ -473,6 +549,7 @@ fn trim(src: &[u8]) -> &[u8] {
     &src[start..end]
 }
 
+#[cfg(feature = "script")]
 fn read_byte() -> Option<u8> {
     for _ in 0..BYTE_WAIT_SPINS {
         if let Some(byte) = serial::try_recv() {
