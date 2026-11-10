@@ -1,7 +1,7 @@
 //! Fixed-buffer task language. See `docs/TASK.md`.
 //!
 //! No heap. Scripts, lines, names, and variables live in stack arrays.
-//! COM1 is polled. Maskable interrupts stay off.
+//! COM1 is polled. After init, only IRQ0 (timer) and IRQ1 (keyboard) are unmasked.
 
 use crate::qemu_exit;
 use crate::serial;

@@ -7,9 +7,11 @@
 //! milestone does not carry a Multiboot header.
 //!
 //! `_start` builds a 1 GiB identity map with 2 MiB pages, enables long mode,
-//! and calls `kernel_main` on a 16 KiB stack. Interrupts are left disabled.
+//! and calls `kernel_main` on a 16 KiB stack. This stub leaves IF clear.
 //! This stub's GDT has no TSS. `exceptions::init` loads the runtime GDT, TSS,
-//! and IDT. A fault before that init is a QEMU exit without a fault line.
+//! and IDT, remaps the 8259 PIC, and runs `sti`, with only IRQ0 (timer) and
+//! IRQ1 (keyboard) unmasked. A fault before that init is a QEMU exit without
+//! a fault line.
 
 use core::arch::global_asm;
 

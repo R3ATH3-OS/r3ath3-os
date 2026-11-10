@@ -2,8 +2,9 @@
 //!
 //! # Invariants
 //! `init` runs once on the boot processor, after the 1 GiB identity map is on
-//! and after COM1 is initialized, with maskable interrupts still disabled.
-//! It does not execute `sti`. There is no PIC or APIC programming.
+//! and after COM1 is initialized. It loads the exception and IRQ gates, remaps
+//! the 8259 PIC, and runs `sti`, with only IRQ0 (timer) and IRQ1 (keyboard)
+//! unmasked.
 //!
 //! The runtime GDT replaces the boot stub's GDT and adds a 64-bit TSS.
 //! `#DF` (vector 8) uses IST1, a dedicated 16 KiB stack inside the identity
