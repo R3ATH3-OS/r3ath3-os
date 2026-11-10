@@ -2,7 +2,7 @@
 
 Suggested wording, not a certification and not a claim that the system exists yet: "An authentic Human–AI co-op OS".
 
-The image in this repository is a QEMU-only x86_64 kernel. It boots, reports CPU exceptions on serial, and exits. It is not a cooperative OS.
+The image in this repository is a QEMU-only x86_64 kernel. It boots, reports CPU exceptions, and can run one fixed-buffer task script from COM1. It is not a cooperative OS.
 
 ## Docs repository
 
@@ -17,7 +17,8 @@ The image in this repository is a QEMU-only x86_64 kernel. It boots, reports CPU
 | VGA text | Same line at `0xB8000` for a screenshot |
 | Panic | Serial `R3ATH3_PANIC` plus message, then QEMU fail status 35 |
 | CPU exceptions | IDT for vectors 0–31. Named lines for `#DE`, `#UD`, `#GP`, `#PF`, and `#DF`. `#DF` uses IST1, a 16 KiB stack with no guard page. The RIP saved for `#DF` is architecturally undefined; the line prints the value the CPU pushed. AMD-only `#VC` (29) and `#SX` (30) keep the CPU error code. Line shape: `R3ATH3_FAULT vector=<n> name=<name> error=<code or none> rip=<hex>` and `cr2=<hex>` on `#PF`. Named QEMU statuses are 97/99/101/103/105. Any other vector exits 95, outside GNU timeout's 124–127. |
-| Smoke test | Pass (33), panic (35), hang (timeout 124), `#UD` (99), `#PF` (103), `#DF` (105). The judge requires the exact status and an exact fault line, and rejects a missing line or a triple-fault status. |
+| Smoke test | Pass (33), panic (35), hang (timeout 124), `#UD` (99), `#PF` (103), `#DF` (105), script ok (161), and script error (163). Fault judges require the exact status and an exact fault line. Script judges require the whole serial log. |
+| Task language | Fixed buffers only. Polled COM1, no interrupts. Commands and limits are in `docs/TASK.md`. Success status 161, error status 163. |
 
 ## Planned, not in this image
 
@@ -29,7 +30,7 @@ A model suggestion is untrusted input. This kernel has no interface that turns a
 
 ## Unsafe boundaries
 
-All `unsafe` is in `kernel/src/port.rs`, `kernel/src/serial.rs`, `kernel/src/vga.rs`, `kernel/src/qemu_exit.rs`, `kernel/src/exceptions.rs`, and the assembly in `kernel/src/boot.rs`.
+All `unsafe` is in `kernel/src/port.rs`, `kernel/src/serial.rs`, `kernel/src/vga.rs`, `kernel/src/qemu_exit.rs`, `kernel/src/exceptions.rs`, and the assembly in `kernel/src/boot.rs`. The task interpreter calls the serial driver and does not add its own `unsafe`.
 
 - Port I/O is limited to COM1 `0x3F8..=0x3FD` and QEMU debug-exit `0xF4`.
 - Maskable interrupts stay off. One CPU. No shared device state. Exception entry uses interrupt gates, which also clear IF.
