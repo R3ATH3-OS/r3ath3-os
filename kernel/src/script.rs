@@ -12,6 +12,8 @@ const MAX_VARS: usize = 8;
 const MAX_NAME: usize = 8;
 const MAX_TEXT: usize = 40;
 const MAX_REPEAT: i64 = 16;
+/// Physical lines read from COM1, including blanks, comments, and `run`.
+const MAX_INPUT_LINES: u32 = 48;
 /// Polls of the receive-buffer bit before a missing byte is `reason=timeout`.
 const BYTE_WAIT_SPINS: u32 = 20_000_000;
 
@@ -96,6 +98,9 @@ fn read_program(prog: &mut [Cmd]) -> usize {
             len += 1;
             continue;
         }
+        if line_no > MAX_INPUT_LINES {
+            fail(line_no, "limit");
+        }
         let kept = strip_comment(&buf[..len]);
         let trimmed = trim(&buf[..kept]);
         if trimmed == b"run" {
@@ -172,6 +177,9 @@ fn parse_command(line: &[u8], line_no: u32) -> Cmd {
             cmd.imm = parse_i64(n, line_no);
             if cmd.imm < 0 {
                 fail(line_no, "syntax");
+            }
+            if cmd.imm > MAX_REPEAT {
+                fail(line_no, "repeat");
             }
         }
         OP_SET => {
@@ -256,9 +264,6 @@ fn execute(cmds: &[Cmd]) {
                 ip += 1;
             }
             OP_REPEAT => {
-                if cmd.imm > MAX_REPEAT {
-                    fail(cmd.line, "repeat");
-                }
                 let end = matching_end(cmds, ip).unwrap_or_else(|| fail(cmd.line, "unclosed"));
                 if cmd.imm == 0 {
                     active = false;
@@ -373,6 +378,9 @@ fn parse_say(rest: &[u8], line: u32, dest: &mut [u8; MAX_TEXT]) -> u8 {
     while i < rest.len() && rest[i] != b'"' {
         if n == MAX_TEXT {
             fail(line, "limit");
+        }
+        if !(0x20..=0x7E).contains(&rest[i]) {
+            fail(line, "char");
         }
         dest[n] = rest[i];
         n += 1;

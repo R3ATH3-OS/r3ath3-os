@@ -259,12 +259,73 @@ R3ATH3_STAGE rust_main
 R3ATH3_SCRIPT_READY
 R3ATH3_SCRIPT_ERROR line=1 reason=repeat
 EOF
+  cat >"$OUT/task/repeat-halt.task" <<'EOF'
+halt
+repeat 100
+end
+EOF
+  cat >"$OUT/task/repeat-halt.expected" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SCRIPT_READY
+R3ATH3_SCRIPT_ERROR line=2 reason=repeat
+EOF
+  python3 -c 'open("'"$OUT"'/task/limit.task","wb").write(b"\n"*49)'
+  cat >"$OUT/task/limit.expected" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SCRIPT_READY
+R3ATH3_SCRIPT_ERROR line=49 reason=limit
+EOF
+  cat >"$OUT/task/nested.task" <<'EOF'
+repeat 1
+repeat 1
+end
+end
+EOF
+  cat >"$OUT/task/nested.expected" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SCRIPT_READY
+R3ATH3_SCRIPT_ERROR line=2 reason=nested
+EOF
+  cat >"$OUT/task/unclosed.task" <<'EOF'
+repeat 1
+say "z"
+EOF
+  cat >"$OUT/task/unclosed.expected" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SCRIPT_READY
+R3ATH3_SCRIPT_ERROR line=3 reason=unclosed
+EOF
+  printf '%s\n' 'print n' >"$OUT/task/undefined.task"
+  cat >"$OUT/task/undefined.expected" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SCRIPT_READY
+R3ATH3_SCRIPT_ERROR line=1 reason=undefined
+EOF
+  printf '%s\n' 'set' >"$OUT/task/syntax.task"
+  cat >"$OUT/task/syntax.expected" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SCRIPT_READY
+R3ATH3_SCRIPT_ERROR line=1 reason=syntax
+EOF
+  printf 'say "a\001b"\n' >"$OUT/task/char.task"
+  cat >"$OUT/task/char.expected" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SCRIPT_READY
+R3ATH3_SCRIPT_ERROR line=1 reason=char
+EOF
+  : >"$OUT/task/timeout.task"
+  cat >"$OUT/task/timeout.expected" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SCRIPT_READY
+R3ATH3_SCRIPT_ERROR line=1 reason=timeout
+EOF
 }
 
 run_script_qemu() {
   local name="$1"
   local seconds="$2"
   local script_file="$3"
+  local append_run="${4:-1}"
   local elf="$OUT/script.elf"
   local log_file="$OUT/$name.serial.log"
   local err_file="$OUT/$name.qemu.err"
@@ -274,13 +335,14 @@ run_script_qemu() {
     return
   fi
   set +e
-  timeout --foreground --kill-after=5s "$seconds" python3 - "$script_file" "$elf" "$log_file" "$err_file" "$seconds" <<'PY'
+  timeout --foreground --kill-after=5s "$seconds" python3 - "$script_file" "$elf" "$log_file" "$err_file" "$seconds" "$append_run" <<'PY'
 import os, select, signal, subprocess, sys, time
-script_path, elf, out_log, err_log, seconds = sys.argv[1:]
+script_path, elf, out_log, err_log, seconds, append_run = sys.argv[1:]
 payload = open(script_path, "rb").read()
-if not payload.endswith(b"\n"):
-    payload += b"\n"
-payload += b"run\n"
+if append_run == "1":
+    if not payload.endswith(b"\n"):
+        payload += b"\n"
+    payload += b"run\n"
 err_f = open(err_log, "wb")
 proc = subprocess.Popen(
     [
@@ -325,14 +387,22 @@ while True:
             break
     if (not sent) and b"R3ATH3_SCRIPT_READY\n" in buf:
         view = memoryview(payload)
-        for start in range(0, len(view), 8):
-            proc.stdin.write(view[start:start + 8])
-            proc.stdin.flush()
-            time.sleep(0.001)
+        try:
+            for start in range(0, len(view), 8):
+                proc.stdin.write(view[start:start + 8])
+                proc.stdin.flush()
+                time.sleep(0.001)
+        except (BrokenPipeError, OSError):
+            pass
         sent = True
     if proc.poll() is not None:
-        leftover = os.read(fd, 4096) if ready else b""
-        if leftover:
+        while True:
+            try:
+                leftover = os.read(fd, 4096)
+            except OSError:
+                break
+            if not leftover:
+                break
             buf += leftover
         break
 open(out_log, "wb").write(buf)
@@ -349,13 +419,14 @@ expect_script() {
   local seconds="$2"
   local script_file="$3"
   local expected="$4"
+  local append_run="${5:-1}"
   local want="$SCRIPT_OK_STATUS"
   case "$name" in
     script-ok) want="$SCRIPT_OK_STATUS" ;;
     *) want="$SCRIPT_ERR_STATUS" ;;
   esac
   local status
-  status="$(run_script_qemu "$name" "$seconds" "$script_file")"
+  status="$(run_script_qemu "$name" "$seconds" "$script_file" "$append_run")"
   if judge_exact "$status" "$OUT/$name.serial.log" "$want" "$expected"; then
     log "[PASS] $name exit=$status"
   else
@@ -423,6 +494,14 @@ else
     expect_script script-unknown 8 "$OUT/task/unknown.task" "$OUT/task/unknown.expected"
     expect_script script-overflow 8 "$OUT/task/overflow.task" "$OUT/task/overflow.expected"
     expect_script script-repeat 8 "$OUT/task/repeat.task" "$OUT/task/repeat.expected"
+    expect_script script-repeat-halt 8 "$OUT/task/repeat-halt.task" "$OUT/task/repeat-halt.expected"
+    expect_script script-limit 8 "$OUT/task/limit.task" "$OUT/task/limit.expected"
+    expect_script script-nested 8 "$OUT/task/nested.task" "$OUT/task/nested.expected"
+    expect_script script-unclosed 8 "$OUT/task/unclosed.task" "$OUT/task/unclosed.expected"
+    expect_script script-undefined 8 "$OUT/task/undefined.task" "$OUT/task/undefined.expected"
+    expect_script script-syntax 8 "$OUT/task/syntax.task" "$OUT/task/syntax.expected"
+    expect_script script-char 8 "$OUT/task/char.task" "$OUT/task/char.expected"
+    expect_script script-timeout 20 "$OUT/task/timeout.task" "$OUT/task/timeout.expected" 0
   fi
 fi
 
