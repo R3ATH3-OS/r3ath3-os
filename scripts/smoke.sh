@@ -2,6 +2,10 @@
 # Bounded QEMU boot smoke test. Exits 0 only when every case passes.
 # QEMU isa-debug-exit maps port 0xF4 value V to process status (V << 1) | 1.
 # Success writes 0x10 (status 33). A panic writes 0x11 (status 35).
+# CPU faults: #UD 0x31→99, #PF 0x33→103, #DF 0x34→105.
+# Any other vector writes 0x2F (status 95), outside timeout's 124–127.
+# A triple-fault or silent reset does not print the fault line and does not
+# use those statuses (this QEMU build has exited 0 on triple fault).
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -11,6 +15,12 @@ MARKER="R3ATH3_BOOT_OK arch=x86_64 serial=com1 milestone=boot-foundation"
 PASS_STATUS=33
 FAIL_STATUS=35
 TIMEOUT_STATUS=124
+UD_STATUS=99
+PF_STATUS=103
+DF_STATUS=105
+UD_LINE='R3ATH3_FAULT vector=6 name=ud error=none rip=0x[0-9a-f]+'
+PF_LINE='R3ATH3_FAULT vector=14 name=pf error=0x0 rip=0x[0-9a-f]+ cr2=0x40000000'
+DF_LINE='R3ATH3_FAULT vector=8 name=df error=0x0 rip=0x[0-9a-f]+'
 FAILURES=0
 
 mkdir -p "$OUT"
@@ -56,6 +66,25 @@ judge_hang() {
   return 0
 }
 
+# Exact QEMU status plus one full fault line. Wrong status (including a
+# triple-fault exit of 0) or a missing line (silent reset) is a failure.
+judge_fault() {
+  local status="$1" file="$2" expected="$3" pattern="$4"
+  [[ "$status" -eq "$expected" ]] || return 1
+  grep -E -x -q "$pattern" "$file" || return 1
+  if grep -F -q "$MARKER" "$file"; then
+    return 1
+  fi
+  if grep -F -q "R3ATH3_PANIC" "$file"; then
+    return 1
+  fi
+  return 0
+}
+
+judge_ud() { judge_fault "$1" "$2" "$UD_STATUS" "$UD_LINE"; }
+judge_pf() { judge_fault "$1" "$2" "$PF_STATUS" "$PF_LINE"; }
+judge_df() { judge_fault "$1" "$2" "$DF_STATUS" "$DF_LINE"; }
+
 selftest_harness() {
   local dir="$OUT/selftest"
   mkdir -p "$dir"
@@ -76,6 +105,20 @@ selftest_harness() {
   if judge_panic "$FAIL_STATUS" "$dir/panic-with-marker.log"; then ok=1; fi
   judge_hang "$TIMEOUT_STATUS" "$dir/hang.log" || ok=1
   if judge_hang 0 "$dir/hang.log"; then ok=1; fi
+
+  printf '%s\n' "R3ATH3_FAULT vector=6 name=ud error=none rip=0x1002b0" >"$dir/ud.log"
+  printf '' >"$dir/empty.log"
+  printf '%s\n' "R3ATH3_FAULT vector=6 name=ud error=none rip=0x1002b0" "$MARKER" >"$dir/ud-with-marker.log"
+  printf '%s\n' "R3ATH3_FAULT vector=14 name=pf error=0x0 rip=0x1002b0 cr2=0x40000000" >"$dir/pf.log"
+  printf '%s\n' "R3ATH3_FAULT vector=8 name=df error=0x0 rip=0x1002b0" >"$dir/df.log"
+  judge_ud "$UD_STATUS" "$dir/ud.log" || ok=1
+  judge_pf "$PF_STATUS" "$dir/pf.log" || ok=1
+  judge_df "$DF_STATUS" "$dir/df.log" || ok=1
+  if judge_ud 0 "$dir/ud.log"; then ok=1; fi
+  if judge_ud "$UD_STATUS" "$dir/empty.log"; then ok=1; fi
+  if judge_ud "$UD_STATUS" "$dir/ud-with-marker.log"; then ok=1; fi
+  if judge_pf "$PF_STATUS" "$dir/empty.log"; then ok=1; fi
+  if judge_df 0 "$dir/empty.log"; then ok=1; fi
 
   if [[ "$ok" -eq 0 ]]; then
     log "[PASS] harness-selftest"
@@ -172,6 +215,15 @@ else
   fi
   if build_kernel fault-hang fault-hang; then
     expect_case fault-hang judge_hang 8
+  fi
+  if build_kernel fault-ud fault-ud; then
+    expect_case fault-ud judge_ud 8
+  fi
+  if build_kernel fault-pf fault-pf; then
+    expect_case fault-pf judge_pf 8
+  fi
+  if build_kernel fault-df fault-df; then
+    expect_case fault-df judge_df 8
   fi
 fi
 

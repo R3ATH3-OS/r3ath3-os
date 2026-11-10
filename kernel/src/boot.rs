@@ -8,8 +8,8 @@
 //!
 //! `_start` builds a 1 GiB identity map with 2 MiB pages, enables long mode,
 //! and calls `kernel_main` on a 16 KiB stack. Interrupts are left disabled.
-//! There is no IDT. A fault before serial output is visible only as a QEMU
-//! exit other than status 33.
+//! This stub's GDT has no TSS. `exceptions::init` loads the runtime GDT, TSS,
+//! and IDT. A fault before that init is a QEMU exit without a fault line.
 
 use core::arch::global_asm;
 
