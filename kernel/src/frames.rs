@@ -255,15 +255,17 @@ pub fn stats() -> (usize, usize) {
 }
 
 /// Test helper: is every byte of an allocated frame zero? `false` for a frame
-/// that is not currently allocated.
+/// that is not currently allocated. Compiled only for the `frames` test.
+#[cfg(feature = "frames")]
 pub fn frame_is_zero(frame: PhysFrame) -> bool {
     if !owned(frame) {
         return false;
     }
     let base = frame.0 as *const u8;
     for offset in 0..FRAME_SIZE as usize {
-        // SAFETY: `owned` proved this is an allocated, managed frame, so all
-        // 4096 bytes are RAM inside the identity map and nobody else uses them.
+        // SAFETY: `owned` proves the frame is allocated and managed RAM;
+        // exclusivity holds because the only caller is the `frames` test,
+        // which allocated it and has not freed it.
         if unsafe { base.add(offset).read_volatile() } != 0 {
             return false;
         }
@@ -273,17 +275,23 @@ pub fn frame_is_zero(frame: PhysFrame) -> bool {
 
 /// Test helper: write a byte pattern over an allocated frame and read it back.
 /// `false` on a mismatch or for a frame that is not currently allocated.
+/// Compiled only for the `frames` test.
+#[cfg(feature = "frames")]
 pub fn write_pattern_and_verify(frame: PhysFrame) -> bool {
     if !owned(frame) {
         return false;
     }
     let base = frame.0 as *mut u8;
     for offset in 0..FRAME_SIZE as usize {
-        // SAFETY: as `frame_is_zero`; the caller owns the frame exclusively.
+        // SAFETY: `owned` proves the frame is allocated and managed RAM;
+        // exclusivity holds because the only caller is the `frames` test,
+        // which allocated it and has not freed it.
         unsafe { base.add(offset).write_volatile((offset as u8) ^ 0xA5) };
     }
     for offset in 0..FRAME_SIZE as usize {
-        // SAFETY: same frame, same ownership.
+        // SAFETY: `owned` proves the frame is allocated and managed RAM;
+        // exclusivity holds because the only caller is the `frames` test,
+        // which allocated it and has not freed it.
         if unsafe { base.add(offset).read_volatile() } != (offset as u8) ^ 0xA5 {
             return false;
         }
@@ -291,6 +299,7 @@ pub fn write_pattern_and_verify(frame: PhysFrame) -> bool {
     true
 }
 
+#[cfg(feature = "frames")]
 fn owned(frame: PhysFrame) -> bool {
     frame.0 % FRAME_SIZE == 0
         && frame.0 < COVERAGE

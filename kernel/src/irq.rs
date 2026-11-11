@@ -34,7 +34,7 @@ const CMOS_INDEX: u16 = 0x70;
 const CMOS_DATA: u16 = 0x71;
 
 const PIT_DIVISOR: u16 = 11932;
-#[cfg(feature = "ticks")]
+#[cfg(any(feature = "ticks", feature = "shell"))]
 pub const HZ: u32 = 100;
 #[cfg(feature = "ticks")]
 const TICK_WAIT: u64 = 300;
@@ -51,7 +51,7 @@ static KB_DATA: KbData = KbData(UnsafeCell::new([0; KB_CAP]));
 struct KbData(UnsafeCell<[u8; KB_CAP]>);
 unsafe impl Sync for KbData {}
 
-#[cfg(any(feature = "keys", feature = "kbd-script"))]
+#[cfg(any(feature = "keys", feature = "kbd-script", feature = "shell"))]
 #[derive(Clone, Copy)]
 pub enum Key {
     Char(u8),
@@ -150,7 +150,7 @@ pub fn enable() {
     }
 }
 
-#[cfg(feature = "ticks")]
+#[cfg(any(feature = "ticks", feature = "shell"))]
 pub fn ticks() -> u64 {
     TICKS.load(Ordering::Acquire)
 }
@@ -172,7 +172,7 @@ pub fn wait_ticks(n: u64) -> u64 {
     }
 }
 
-#[cfg(any(feature = "keys", feature = "kbd-script"))]
+#[cfg(any(feature = "keys", feature = "kbd-script", feature = "shell"))]
 pub fn pop_key() -> Option<Key> {
     let head = KB_HEAD.load(Ordering::Relaxed);
     if head == KB_TAIL.load(Ordering::Acquire) {
@@ -184,6 +184,20 @@ pub fn pop_key() -> Option<Key> {
         0x08 => Some(Key::Backspace),
         0x0A => Some(Key::Enter),
         ch => Some(Key::Char(ch)),
+    }
+}
+
+/// Wait until the next interrupt. `irq::enable` has already run `sti`.
+///
+/// A key that arrives after `pop_key` returns `None` and before this `hlt`
+/// retires is taken on the next interrupt. The PIT is 100 Hz, so that wait is
+/// at most one tick, about 10 ms.
+#[cfg(any(feature = "kbd-script", feature = "shell"))]
+pub fn idle_hlt() {
+    // SAFETY: `hlt` pauses this CPU until an interrupt. Interrupts are enabled.
+    // The instruction does not read or write Rust memory and preserves flags.
+    unsafe {
+        asm!("hlt", options(nomem, nostack, preserves_flags));
     }
 }
 
@@ -409,6 +423,21 @@ fn translate(code: u8, shift: bool) -> Option<u8> {
                 b'='
             }
         }
+        0x27 => {
+            if shift {
+                b':'
+            } else {
+                b';'
+            }
+        }
+        0x28 => {
+            if shift {
+                b'"'
+            } else {
+                b'\''
+            }
+        }
+        // Scan codes this table does not list produce no key and are ignored.
         _ => return None,
     };
     Some(ch)
