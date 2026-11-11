@@ -2,7 +2,8 @@
 //!
 //! Suggested wording, not a certification and not a claim that this image is that system: "An authentic Human–AI co-op OS".
 //! This binary boots, reports CPU exceptions on serial, sets up a bump-allocated
-//! kernel heap and a physical frame allocator, and exits QEMU.
+//! kernel heap and a physical frame allocator, and exits QEMU. The `shell`
+//! feature reads the keyboard instead of taking that exit.
 //! No model, agent, or capability check runs in ring 0.
 
 #![no_std]
@@ -27,9 +28,11 @@ mod memmap;
 mod memtest;
 mod port;
 mod qemu_exit;
-#[cfg(any(feature = "script", feature = "kbd-script"))]
+#[cfg(any(feature = "script", feature = "kbd-script", feature = "shell"))]
 mod script;
 mod serial;
+#[cfg(feature = "shell")]
+mod shell;
 mod vga;
 
 use core::fmt::Write;
@@ -50,7 +53,8 @@ const _: () = {
         + cfg!(feature = "heap-oom-panic") as u8
         + cfg!(feature = "frames") as u8
         + cfg!(feature = "frames-oom") as u8
-        + cfg!(feature = "mem-badinfo") as u8;
+        + cfg!(feature = "mem-badinfo") as u8
+        + cfg!(feature = "shell") as u8;
     assert!(modes <= 1, "enable at most one test feature");
 };
 
@@ -121,6 +125,9 @@ pub extern "C" fn kernel_main() -> ! {
     #[cfg(feature = "frames-oom")]
     memtest::run_frames_oom();
 
+    #[cfg(feature = "shell")]
+    shell::run();
+
     #[cfg(not(any(
         feature = "fault-panic",
         feature = "fault-hang",
@@ -136,7 +143,8 @@ pub extern "C" fn kernel_main() -> ! {
         feature = "heap-oom-panic",
         feature = "frames",
         feature = "frames-oom",
-        feature = "mem-badinfo"
+        feature = "mem-badinfo",
+        feature = "shell"
     )))]
     boot_ok();
 }
@@ -156,7 +164,8 @@ pub extern "C" fn kernel_main() -> ! {
     feature = "heap-oom-panic",
     feature = "frames",
     feature = "frames-oom",
-    feature = "mem-badinfo"
+    feature = "mem-badinfo",
+    feature = "shell"
 )))]
 fn boot_ok() -> ! {
     serial::write_str(BOOT_MARKER);

@@ -9,6 +9,8 @@
 # Allocator proofs: heap 0x60 → 193, heap exhaustion 0x61 → 195, frames 0x62 →
 # 197, frame exhaustion 0x63 → 199, memory init error 0x64 → 201. The heap
 # overflow panic case reuses the panic status 35 on purpose.
+# Shell: exit ok 0x68 → 209, command error 0x69 → 211, line overflow 0x6A → 213,
+# script error 0x6B → 215, halt 0x6C → 217.
 # A triple-fault or silent reset does not print the fault line and does not
 # use those statuses (this QEMU build has exited 0 on triple fault).
 set -u
@@ -33,11 +35,16 @@ HEAP_OOM_STATUS=195
 FRAMES_STATUS=197
 FRAMES_OOM_STATUS=199
 MEM_ERROR_STATUS=201
+SHELL_OK_STATUS=209
+SHELL_CMD_STATUS=211
+SHELL_OVERFLOW_STATUS=213
+SHELL_SCRIPT_STATUS=215
+SHELL_HALT_STATUS=217
 RAM_BYTES=67108864
 HEAP_BYTES=1048576
 HEAP_LINE='R3ATH3_HEAP ok size=1048576 used=([0-9]+) align_max=4096'
 HEAP_OOM_LINE='R3ATH3_HEAP_OOM ok chunks=16 used=1048576'
-HEAP_PANIC_LINE='R3ATH3_PANIC .*memory allocation of 2097152 bytes failed'
+HEAP_PANIC_LINE='R3ATH3_PANIC location=[^ ]+:[0-9]+ message=memory allocation of 2097152 bytes failed'
 FRAMES_LINE='R3ATH3_FRAMES ok total=([0-9]+) free=([0-9]+) first=0x([0-9a-f]+) kernel_end=0x([0-9a-f]+)'
 FRAMES_OOM_LINE='R3ATH3_FRAMES_OOM ok allocated=([0-9]+) max=0x([0-9a-f]+)'
 MEM_ERROR_LINE='R3ATH3_MEM_ERROR reason=startinfo'
@@ -159,7 +166,7 @@ judge_frames() {
   [[ "$line" =~ ^${FRAMES_LINE}$ ]] || return 1
   local total="${BASH_REMATCH[1]}" free="${BASH_REMATCH[2]}"
   local first=$((16#${BASH_REMATCH[3]})) kernel_end=$((16#${BASH_REMATCH[4]}))
-  (( total > 0 && free <= total )) || return 1
+  (( total > 0 && free == total )) || return 1
   (( first >= kernel_end )) || return 1
   (( total * 4096 <= RAM_BYTES )) || return 1
   if grep -F -q "$MARKER" "$file"; then
@@ -190,6 +197,70 @@ judge_frames_oom() {
 }
 
 judge_mem_badinfo() { judge_fault "$1" "$2" "$MEM_ERROR_STATUS" "$MEM_ERROR_LINE"; }
+
+# Status 209, two identical mem lines, and one uptime line. The expected file
+# uses the literal lines MEM and UPTIME where those three lines sit.
+judge_shell_mem() {
+  local status="$1" file="$2" expected="$3"
+  [[ "$status" -eq "$SHELL_OK_STATUS" ]] || return 1
+  if grep -F -q "R3ATH3_PANIC" "$file"; then
+    return 1
+  fi
+  if grep -F -q "$MARKER" "$file"; then
+    return 1
+  fi
+  python3 - "$file" "$expected" <<'PY'
+import re, sys
+actual_path, expected_path = sys.argv[1:]
+mem_re = re.compile(
+    r"^mem heap_used=([0-9]+) heap_size=1048576 frames_total=([0-9]+) frames_free=([0-9]+)$"
+)
+up_re = re.compile(
+    r"^uptime ticks=([0-9]+) hz=100 seconds=([0-9]+)\.([0-9]{2})$"
+)
+try:
+    text = [line.decode("ascii") for line in open(actual_path, "rb").read().splitlines()]
+    expected = [line.decode("ascii") for line in open(expected_path, "rb").read().splitlines()]
+except UnicodeDecodeError:
+    sys.exit(1)
+mems = []
+ups = 0
+out = []
+for line in text:
+    mem = mem_re.match(line)
+    up = up_re.match(line)
+    if mem:
+        used = int(mem.group(1))
+        total = int(mem.group(2))
+        free = int(mem.group(3))
+        if used > 4096 or total <= 0 or free != total or total * 4096 > 67108864:
+            sys.exit(1)
+        mems.append(line)
+        out.append("MEM")
+    elif up:
+        ticks = int(up.group(1))
+        seconds = int(up.group(2))
+        hundredths = int(up.group(3))
+        if ticks <= 0 or seconds != ticks // 100 or hundredths != ticks % 100:
+            sys.exit(1)
+        ups += 1
+        out.append("UPTIME")
+    else:
+        out.append(line)
+if len(mems) != 2 or mems[0] != mems[1] or ups != 1:
+    sys.exit(1)
+if out != expected:
+    sys.exit(1)
+sys.exit(0)
+PY
+}
+
+judge_shell_screen() {
+  local status="$1" serial="$2" expected_serial="$3" vga="$4" expected_vga="$5"
+  judge_exact "$status" "$serial" "$SHELL_OK_STATUS" "$expected_serial" || return 1
+  [[ -f "$vga" && -f "$expected_vga" ]] || return 1
+  cmp -s "$vga" "$expected_vga"
+}
 
 judge_exact() {
   local status="$1" file="$2" expected_status="$3" expected_file="$4"
@@ -302,6 +373,96 @@ selftest_harness() {
   judge_mem_badinfo "$MEM_ERROR_STATUS" "$dir/mem-badinfo.log" || ok=1
   if judge_mem_badinfo 0 "$dir/mem-badinfo.log"; then ok=1; fi
   if judge_mem_badinfo "$MEM_ERROR_STATUS" "$dir/mem-badinfo-wrong.log"; then ok=1; fi
+
+  printf '%s\n' "R3ATH3_PANIC message=memory allocation of 2097152 bytes failed" >"$dir/heap-panic-noloc.log"
+  if judge_heap_panic "$FAIL_STATUS" "$dir/heap-panic-noloc.log"; then ok=1; fi
+  printf '%s\n' "R3ATH3_FRAMES ok total=15000 free=14999 first=0x300000 kernel_end=0x2a0000" >"$dir/frames-unequal.log"
+  if judge_frames "$FRAMES_STATUS" "$dir/frames-unequal.log"; then ok=1; fi
+
+  printf '%s\n' "R3ATH3_STAGE rust_main" "r3> exit" "R3ATH3_SHELL_EXIT last=ok" >"$dir/shell-basic.log"
+  printf '%s\n' "R3ATH3_STAGE rust_main" "r3> exit" >"$dir/shell-basic-short.log"
+  if judge_exact "$SHELL_CMD_STATUS" "$dir/shell-basic.log" "$SHELL_OK_STATUS" "$dir/shell-basic.log"; then ok=1; fi
+  if judge_exact "$SHELL_OK_STATUS" "$dir/shell-basic-short.log" "$SHELL_OK_STATUS" "$dir/shell-basic.log"; then ok=1; fi
+  printf '%s\n' "R3ATH3_STAGE rust_main" "r3> halt" "R3ATH3_SHELL_HALT" >"$dir/shell-halt.log"
+  if judge_exact "$SHELL_OK_STATUS" "$dir/shell-halt.log" "$SHELL_HALT_STATUS" "$dir/shell-halt.log"; then ok=1; fi
+
+  cat >"$dir/shell-mem.log" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SHELL_READY
+r3> mem
+mem heap_used=100 heap_size=1048576 frames_total=16000 frames_free=16000
+r3> echo x
+x
+r3> mem
+mem heap_used=100 heap_size=1048576 frames_total=16000 frames_free=16000
+r3> uptime
+uptime ticks=250 hz=100 seconds=2.50
+r3> exit
+R3ATH3_SHELL_EXIT last=ok
+EOF
+  cat >"$dir/shell-mem.expected" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SHELL_READY
+r3> mem
+MEM
+r3> echo x
+x
+r3> mem
+MEM
+r3> uptime
+UPTIME
+r3> exit
+R3ATH3_SHELL_EXIT last=ok
+EOF
+  judge_shell_mem "$SHELL_OK_STATUS" "$dir/shell-mem.log" "$dir/shell-mem.expected" || ok=1
+  if judge_shell_mem "$SHELL_CMD_STATUS" "$dir/shell-mem.log" "$dir/shell-mem.expected"; then ok=1; fi
+  python3 - "$dir/shell-mem.log" "$dir/shell-mem-differ.log" <<'PY'
+import sys
+src, dst = sys.argv[1:]
+lines = open(src).read().splitlines(True)
+seen = 0
+out = []
+for line in lines:
+    if line.startswith("mem heap_used="):
+        seen += 1
+        if seen == 2:
+            line = line.replace("heap_used=100", "heap_used=101", 1)
+    out.append(line)
+open(dst, "w").write("".join(out))
+PY
+  if judge_shell_mem "$SHELL_OK_STATUS" "$dir/shell-mem-differ.log" "$dir/shell-mem.expected"; then ok=1; fi
+  sed 's/heap_used=100/heap_used=5000/g' "$dir/shell-mem.log" >"$dir/shell-mem-big.log"
+  if judge_shell_mem "$SHELL_OK_STATUS" "$dir/shell-mem-big.log" "$dir/shell-mem.expected"; then ok=1; fi
+  sed 's/frames_free=16000/frames_free=15999/g' "$dir/shell-mem.log" >"$dir/shell-mem-frames.log"
+  if judge_shell_mem "$SHELL_OK_STATUS" "$dir/shell-mem-frames.log" "$dir/shell-mem.expected"; then ok=1; fi
+  sed 's/seconds=2.50/seconds=3.50/' "$dir/shell-mem.log" >"$dir/shell-mem-uptime.log"
+  if judge_shell_mem "$SHELL_OK_STATUS" "$dir/shell-mem-uptime.log" "$dir/shell-mem.expected"; then ok=1; fi
+
+  python3 - "$dir" <<'PY'
+import sys
+out = sys.argv[1]
+cells = [0x0A20] * 2000
+def dump(path, values):
+    lines = []
+    for row in range(25):
+        chunk = values[row * 80:(row + 1) * 80]
+        lines.append(" ".join(f"{cell:04X}" for cell in chunk))
+    open(path, "w", encoding="ascii").write("\n".join(lines) + "\n")
+dump(out + "/screen-good.vga", cells)
+changed = cells[:]
+changed[0] = 0x0A21
+dump(out + "/screen-cell.vga", changed)
+attr = cells[:]
+attr[1] = 0x0720
+dump(out + "/screen-attr.vga", attr)
+open(out + "/screen-serial.log", "w", encoding="ascii").write("R3ATH3_SHELL_EXIT last=ok\n")
+PY
+  judge_shell_screen "$SHELL_OK_STATUS" "$dir/screen-serial.log" "$dir/screen-serial.log" \
+    "$dir/screen-good.vga" "$dir/screen-good.vga" || ok=1
+  if judge_shell_screen "$SHELL_OK_STATUS" "$dir/screen-serial.log" "$dir/screen-serial.log" \
+    "$dir/screen-cell.vga" "$dir/screen-good.vga"; then ok=1; fi
+  if judge_shell_screen "$SHELL_OK_STATUS" "$dir/screen-serial.log" "$dir/screen-serial.log" \
+    "$dir/screen-attr.vga" "$dir/screen-good.vga"; then ok=1; fi
 
   if [[ "$ok" -eq 0 ]]; then
     log "[PASS] harness-selftest"
@@ -634,11 +795,17 @@ expect_monitor() {
   local log_file="$OUT/$name.serial.log"
   local err_file="$OUT/$name.qemu.err"
   local sock="$OUT/$name.mon.sock"
-  rm -f "$sock"
+  rm -f "$sock" "$log_file"
   set +e
   timeout --foreground --kill-after=5s "$seconds" python3 - "$elf" "$log_file" "$err_file" "$seconds" "$ready" "$keys" "$sock" <<'PY'
 import os, select, socket, subprocess, sys, time
 elf, out_log, err_log, seconds, ready, keys, sock_path = sys.argv[1:]
+# A previous run's transcript must not satisfy the ready wait. QEMU truncates
+# the serial file only after it starts, and the first read can happen before that.
+try:
+    os.remove(out_log)
+except FileNotFoundError:
+    pass
 err_f = open(err_log, "wb")
 proc = subprocess.Popen(
     [
@@ -724,6 +891,510 @@ PY
     cat "$log_file" 2>/dev/null || true
     log "----- expected -----"
     cat "$expected" 2>/dev/null || true
+    log "----- qemu stderr -----"
+    cat "$err_file" 2>/dev/null || true
+    FAILURES=$((FAILURES + 1))
+  fi
+}
+
+write_shell_cases() {
+  python3 - "$OUT" <<'PY'
+import os, sys
+out = sys.argv[1]
+os.makedirs(out + "/task", exist_ok=True)
+prefix = (
+    "R3ATH3_STAGE rust_main\n"
+    "R3ATH3_SHELL_READY\n"
+    "R3@TH3 shell. Type help for commands.\n"
+    "r3> "
+)
+help_text = (
+    "help        list commands\n"
+    "echo TEXT   print TEXT\n"
+    "clear       clear the screen\n"
+    "uptime      timer ticks and seconds since boot\n"
+    "mem         heap and frame use\n"
+    "run SCRIPT  run a task script, lines separated by ;\n"
+    "exit        leave the shell with the last status\n"
+    "halt        stop the machine\n"
+)
+p = "r3> "
+ansi = "\x1b[2J\x1b[H"
+exit_ok = "R3ATH3_SHELL_EXIT last=ok\n"
+
+def write_bytes(name, data):
+    open(out + "/task/" + name, "wb").write(data.encode("latin1"))
+
+def write_text(name, text):
+    open(out + "/task/" + name, "w", encoding="utf-8").write(text)
+
+write_text("shell-basic.steps", "line\nline help\nline echo hello  world\nline clear\nline exit\n")
+write_bytes(
+    "shell-basic.expected",
+    prefix
+    + "\n"
+    + p
+    + "help\n"
+    + help_text
+    + p
+    + "echo hello  world\n"
+    + "hello world\n"
+    + p
+    + "clear\n"
+    + ansi
+    + p
+    + "exit\n"
+    + exit_ok,
+)
+
+write_text(
+    "shell-backspace.steps",
+    "keys backspace e c z backspace h o spc h i backspace backspace y o ret\nline exit\n",
+)
+write_bytes(
+    "shell-backspace.expected",
+    prefix
+    + "ecz"
+    + "\x08 \x08"
+    + "ho hi"
+    + "\x08 \x08"
+    + "\x08 \x08"
+    + "yo\n"
+    + "yo\n"
+    + p
+    + "exit\n"
+    + exit_ok,
+)
+
+write_text("shell-unknown.steps", "line foo\nline clear x\nline exit\n")
+write_bytes(
+    "shell-unknown.expected",
+    prefix
+    + "foo\n"
+    + "error: unknown command: foo\n"
+    + p
+    + "clear x\n"
+    + "error: usage: clear\n"
+    + p
+    + "exit\n"
+    + "R3ATH3_SHELL_EXIT last=cmd\n",
+)
+
+write_text("shell-overflow.steps", "keys " + " ".join(["a"] * 76) + " b c ret\nline exit\n")
+write_bytes(
+    "shell-overflow.expected",
+    prefix
+    + ("a" * 76)
+    + "\n"
+    + "error: line too long (max 76)\n"
+    + p
+    + "exit\n"
+    + "R3ATH3_SHELL_EXIT last=overflow\n",
+)
+
+run1 = 'run set n 2; add n 3; print n; say "hi"; repeat 2; say "x"; end'
+run2 = 'run set a 1; halt; say "no"'
+write_text(
+    "shell-run.steps",
+    "line " + run1 + "\nline " + run2 + "\nline echo after\nline exit\n",
+)
+write_bytes(
+    "shell-run.expected",
+    prefix
+    + run1
+    + "\n"
+    + "n=5\nhi\nx\nx\n"
+    + p
+    + run2
+    + "\n"
+    + p
+    + "echo after\n"
+    + "after\n"
+    + p
+    + "exit\n"
+    + exit_ok,
+)
+
+err1 = 'run set n 1; bogus'
+err2 = 'run repeat 1; say "z"'
+write_text("shell-run-error.steps", "line " + err1 + "\nline " + err2 + "\nline exit\n")
+write_bytes(
+    "shell-run-error.expected",
+    prefix
+    + err1
+    + "\n"
+    + "error: script line=2 reason=unknown\n"
+    + p
+    + err2
+    + "\n"
+    + "error: script line=3 reason=unclosed\n"
+    + p
+    + "exit\n"
+    + "R3ATH3_SHELL_EXIT last=script\n",
+)
+
+write_text("shell-mem.steps", "line mem\nline echo x\nline mem\nline uptime\nline exit\n")
+write_bytes(
+    "shell-mem.expected",
+    prefix + "mem\nMEM\n" + p + "echo x\nx\n" + p + "mem\nMEM\n" + p + "uptime\nUPTIME\n" + p + "exit\n" + exit_ok,
+)
+
+write_text("shell-halt.steps", "line foo\nline halt\n")
+write_bytes(
+    "shell-halt.expected",
+    prefix + "foo\nerror: unknown command: foo\n" + p + "halt\nR3ATH3_SHELL_HALT\n",
+)
+
+screen_steps = "line clear\n" + ("line\n" * 24) + "line echo vga\nxp\nline exit\n"
+write_text("shell-screen.steps", screen_steps)
+write_bytes(
+    "shell-screen.expected",
+    prefix
+    + "clear\n"
+    + ansi
+    + p
+    + ("\n" + p) * 24
+    + "echo vga\n"
+    + "vga\n"
+    + p
+    + "exit\n"
+    + exit_ok,
+)
+
+# Model of the VGA console in section 5.2, after the shell-screen steps.
+WIDTH, HEIGHT = 80, 25
+ATTR = 0x0A00
+
+class Console:
+    def __init__(self):
+        self.cells = [ATTR | 0x20] * (WIDTH * HEIGHT)
+        self.row = 0
+        self.col = 0
+
+    def clear(self):
+        self.cells = [ATTR | 0x20] * (WIDTH * HEIGHT)
+        self.row = 0
+        self.col = 0
+
+    def newline(self):
+        self.col = 0
+        if self.row + 1 == HEIGHT:
+            self.cells[: WIDTH * (HEIGHT - 1)] = self.cells[WIDTH:]
+            self.cells[WIDTH * (HEIGHT - 1) :] = [ATTR | 0x20] * WIDTH
+        else:
+            self.row += 1
+
+    def put(self, byte):
+        if byte == 10:
+            self.newline()
+            return
+        if self.col == WIDTH:
+            self.newline()
+        glyph = byte if 0x20 <= byte <= 0x7E else ord("?")
+        self.cells[self.row * WIDTH + self.col] = ATTR | glyph
+        self.col += 1
+
+    def puts(self, text):
+        for byte in text.encode("ascii"):
+            self.put(byte)
+
+console = Console()
+console.clear()
+console.puts("r3> ")
+for _ in range(24):
+    console.put(10)
+    console.puts("r3> ")
+console.puts("echo vga")
+console.put(10)
+console.puts("vga\n")
+console.puts("r3> ")
+
+def row_text(row):
+    chars = []
+    for col in range(WIDTH):
+        cell = console.cells[row * WIDTH + col]
+        if (cell >> 8) != 0x0A:
+            raise SystemExit("attribute drifted")
+        chars.append(chr(cell & 0xFF))
+    return "".join(chars)
+
+for row in range(22):
+    if row_text(row) != "r3> " + (" " * 76):
+        raise SystemExit(f"row {row} mismatch")
+if row_text(22) != "r3> echo vga" + (" " * 68):
+    raise SystemExit("row 22 mismatch")
+if row_text(23) != "vga" + (" " * 77):
+    raise SystemExit("row 23 mismatch")
+if row_text(24) != "r3> " + (" " * 76):
+    raise SystemExit("row 24 mismatch")
+
+lines = []
+for row in range(HEIGHT):
+    chunk = console.cells[row * WIDTH : (row + 1) * WIDTH]
+    lines.append(" ".join(f"{cell:04X}" for cell in chunk))
+open(out + "/task/shell-screen.vga", "w", encoding="ascii").write("\n".join(lines) + "\n")
+PY
+}
+
+expect_shell() {
+  local name="$1"
+  local seconds="$2"
+  local steps="$3"
+  local expected="$4"
+  local want="$5"
+  local kind="$6"
+  local log_file="$OUT/$name.serial.log"
+  local err_file="$OUT/$name.qemu.err"
+  local sock="$OUT/$name.mon.sock"
+  local vga_file="$OUT/$name.vga"
+  local elf="$OUT/shell.elf"
+  rm -f "$sock" "$vga_file" "$log_file"
+  set +e
+  timeout --foreground --kill-after=5s "$seconds" python3 - \
+    "$elf" "$log_file" "$err_file" "$seconds" "$steps" "$sock" "$vga_file" <<'PY'
+import os, re, signal, socket, subprocess, sys, time
+elf, out_log, err_log, seconds, steps_path, sock_path, vga_path = sys.argv[1:]
+# A previous run's transcript must not satisfy the ready wait. QEMU truncates
+# the serial file only after it starts, and the first read can happen before that.
+try:
+    os.remove(out_log)
+except FileNotFoundError:
+    pass
+err_f = open(err_log, "wb")
+proc = subprocess.Popen(
+    [
+        "qemu-system-x86_64", "-machine", "pc,accel=tcg", "-cpu", "qemu64",
+        "-m", "64M", "-smp", "1", "-kernel", elf, "-nic", "none",
+        "-display", "none", "-vga", "std", "-serial", "file:" + out_log,
+        "-monitor", "unix:" + sock_path + ",server,nowait", "-no-reboot",
+        "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+    ],
+    stdout=subprocess.DEVNULL, stderr=err_f,
+)
+
+def stop(_signum, _frame):
+    if proc.poll() is None:
+        proc.kill()
+    sys.exit(124)
+
+signal.signal(signal.SIGTERM, stop)
+deadline = time.time() + float(seconds)
+
+def fail(code, message):
+    sys.stderr.write(message + "\n")
+    try:
+        err_f.write((message + "\n").encode())
+        err_f.flush()
+    except OSError:
+        pass
+    if proc.poll() is None:
+        proc.kill()
+        proc.wait()
+    sys.exit(code)
+
+def read_serial():
+    try:
+        return open(out_log, "rb").read()
+    except FileNotFoundError:
+        return b""
+
+def prompt_count():
+    return read_serial().count(b"r3> ")
+
+PLAIN = {
+    " ": "spc",
+    "-": "minus",
+    "=": "equal",
+    ";": "semicolon",
+    "'": "apostrophe",
+}
+SHIFTED = {
+    "!": "1", "@": "2", "#": "3", "$": "4", "%": "5",
+    "^": "6", "&": "7", "*": "8", "(": "9", ")": "0",
+    "_": "minus", "+": "equal", ":": "semicolon", '"': "apostrophe",
+}
+
+def qcodes_for_text(text):
+    keys = []
+    for ch in text:
+        if ("a" <= ch <= "z") or ("0" <= ch <= "9"):
+            keys.append(ch)
+        elif "A" <= ch <= "Z":
+            keys.append("shift-" + ch.lower())
+        elif ch in PLAIN:
+            keys.append(PLAIN[ch])
+        elif ch in SHIFTED:
+            keys.append("shift-" + SHIFTED[ch])
+        else:
+            fail(2, "no qcode for " + repr(ch))
+    keys.append("ret")
+    return keys
+
+steps = []
+for raw in open(steps_path, "r", encoding="utf-8"):
+    raw = raw.rstrip("\n")
+    if raw == "" or raw.startswith("#"):
+        continue
+    if raw == "line":
+        steps.append(("line", qcodes_for_text("")))
+    elif raw.startswith("line "):
+        steps.append(("line", qcodes_for_text(raw[5:])))
+    elif raw.startswith("keys "):
+        steps.append(("keys", raw[5:].split()))
+    elif raw == "xp":
+        steps.append(("xp", []))
+    else:
+        fail(2, "bad step " + raw)
+
+ready_deadline = min(deadline, time.time() + 5)
+while time.time() < ready_deadline:
+    if proc.poll() is not None:
+        break
+    data = read_serial()
+    if b"R3ATH3_SHELL_READY" in data and prompt_count() >= 1:
+        break
+    time.sleep(0.02)
+else:
+    fail(124, "timed out waiting for the shell prompt")
+if b"R3ATH3_SHELL_READY" not in read_serial() or prompt_count() < 1:
+    fail(124, "shell prompt missing")
+
+mon = None
+for _ in range(50):
+    if os.path.exists(sock_path):
+        candidate = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            candidate.connect(sock_path)
+            mon = candidate
+            break
+        except OSError:
+            candidate.close()
+    time.sleep(0.05)
+if mon is None:
+    fail(1, "monitor socket did not appear: " + sock_path)
+mon.settimeout(0.2)
+try:
+    mon.recv(4096)
+except Exception:
+    pass
+
+ANSI = re.compile(rb"\x1b\[[0-9;?]*[A-Za-z]")
+
+def parse_cells(buf):
+    clean = ANSI.sub(b"", buf)
+    cells = []
+    for line in clean.splitlines():
+        line = line.strip()
+        match = re.match(rb"^[0-9a-fA-F]+:((?: 0x[0-9a-fA-F]{4})+)$", line)
+        if not match:
+            continue
+        for hx in re.findall(rb"0x([0-9a-fA-F]{4})", match.group(1)):
+            cells.append(int(hx, 16))
+    return cells
+
+def send_keys(keys):
+    for key in keys:
+        try:
+            mon.sendall(("sendkey " + key + "\n").encode())
+        except OSError:
+            return False
+        time.sleep(0.03)
+    return True
+
+def wait_prompts(target):
+    limit = time.time() + 5
+    while time.time() < limit and time.time() < deadline:
+        if prompt_count() >= target:
+            return True
+        if proc.poll() is not None:
+            return False
+        time.sleep(0.02)
+    return False
+
+for index, (kind, keys) in enumerate(steps):
+    last = index + 1 == len(steps)
+    if kind in ("line", "keys"):
+        before = prompt_count()
+        if not send_keys(keys):
+            fail(1, "monitor closed while sending keys")
+        if not last and not wait_prompts(before + 1):
+            fail(124, "timed out waiting for the next prompt")
+    elif kind == "xp":
+        try:
+            mon.sendall(b"xp /2000hx 0xb8000\n")
+        except OSError:
+            fail(1, "monitor closed before xp")
+        buf = b""
+        cells = []
+        xp_deadline = time.time() + 2
+        while time.time() < xp_deadline and len(cells) < 2000:
+            try:
+                chunk = mon.recv(65536)
+            except socket.timeout:
+                chunk = b""
+            if chunk:
+                buf += chunk
+                cells = parse_cells(buf)
+            else:
+                time.sleep(0.01)
+        if len(cells) < 2000:
+            fail(1, "xp returned %d cells" % len(cells))
+        lines = []
+        for row in range(25):
+            chunk = cells[row * 80:(row + 1) * 80]
+            lines.append(" ".join("%04X" % cell for cell in chunk))
+        open(vga_path, "w", encoding="ascii").write("\n".join(lines) + "\n")
+    else:
+        fail(2, "unknown step " + kind)
+
+while proc.poll() is None:
+    if time.time() > deadline:
+        fail(124, "timed out waiting for QEMU to exit")
+    time.sleep(0.02)
+code = proc.wait()
+try:
+    mon.close()
+except OSError:
+    pass
+sys.exit(code if code is not None else 124)
+PY
+  local status=$?
+  set -e
+  local passed=0
+  case "$kind" in
+    exact)
+      if judge_exact "$status" "$log_file" "$want" "$expected"; then
+        passed=1
+      fi
+      ;;
+    mem)
+      if judge_shell_mem "$status" "$log_file" "$expected"; then
+        passed=1
+      fi
+      ;;
+    screen)
+      if judge_shell_screen "$status" "$log_file" "$expected" "$vga_file" "$OUT/task/shell-screen.vga"; then
+        passed=1
+      fi
+      ;;
+    *)
+      log "[FAIL] $name unknown judge $kind"
+      FAILURES=$((FAILURES + 1))
+      return
+      ;;
+  esac
+  if [[ "$passed" -eq 1 ]]; then
+    log "[PASS] $name exit=$status"
+  else
+    log "[FAIL] $name exit=$status"
+    log "----- serial -----"
+    cat "$log_file" 2>/dev/null || true
+    log "----- expected -----"
+    cat "$expected" 2>/dev/null || true
+    if [[ "$kind" == "screen" ]]; then
+      log "----- vga -----"
+      cat "$vga_file" 2>/dev/null || true
+    fi
     log "----- qemu stderr -----"
     cat "$err_file" 2>/dev/null || true
     FAILURES=$((FAILURES + 1))
@@ -828,6 +1499,22 @@ else
   fi
   if build_kernel mem-badinfo mem-badinfo; then
     expect_case mem-badinfo judge_mem_badinfo 8
+  fi
+  if build_kernel shell shell; then
+    if write_shell_cases; then
+      expect_shell shell-basic 12 "$OUT/task/shell-basic.steps" "$OUT/task/shell-basic.expected" "$SHELL_OK_STATUS" exact
+      expect_shell shell-backspace 12 "$OUT/task/shell-backspace.steps" "$OUT/task/shell-backspace.expected" "$SHELL_OK_STATUS" exact
+      expect_shell shell-unknown 12 "$OUT/task/shell-unknown.steps" "$OUT/task/shell-unknown.expected" "$SHELL_CMD_STATUS" exact
+      expect_shell shell-overflow 20 "$OUT/task/shell-overflow.steps" "$OUT/task/shell-overflow.expected" "$SHELL_OVERFLOW_STATUS" exact
+      expect_shell shell-run 12 "$OUT/task/shell-run.steps" "$OUT/task/shell-run.expected" "$SHELL_OK_STATUS" exact
+      expect_shell shell-run-error 12 "$OUT/task/shell-run-error.steps" "$OUT/task/shell-run-error.expected" "$SHELL_SCRIPT_STATUS" exact
+      expect_shell shell-mem 12 "$OUT/task/shell-mem.steps" "$OUT/task/shell-mem.expected" "$SHELL_OK_STATUS" mem
+      expect_shell shell-halt 12 "$OUT/task/shell-halt.steps" "$OUT/task/shell-halt.expected" "$SHELL_HALT_STATUS" exact
+      expect_shell shell-screen 20 "$OUT/task/shell-screen.steps" "$OUT/task/shell-screen.expected" "$SHELL_OK_STATUS" screen
+    else
+      log "[FAIL] write shell cases"
+      FAILURES=$((FAILURES + 1))
+    fi
   fi
 fi
 

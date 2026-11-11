@@ -30,6 +30,7 @@ heap-oom-panic = []
 frames = []
 frames-oom = []
 mem-badinfo = []
+shell = []
 
 [profile.dev]
 panic = "abort"

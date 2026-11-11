@@ -35,6 +35,7 @@ In `boot.rs`, `_start` stores `%ebx` into the 4-byte `.bss.boot` symbol `pvh_sta
 | Pointer is nonzero, 8-byte aligned, and the whole 56-byte struct is below 1 GiB | `startinfo` |
 | `magic == 0x336EC578` | `startinfo` |
 | `version >= 1` (memmap fields exist) | `memmap` |
+| `memmap_paddr == 0` | `memmap` |
 | `memmap_entries` is 1–32 and the whole table is below 1 GiB | `memmap` |
 | At least one type-1 (RAM) entry overlaps [1 MiB, 1 GiB) | `nousable` |
 
@@ -84,6 +85,7 @@ Concurrency: one CPU. **IRQ handlers must not allocate.** `irq.rs` stays allocat
   - The frames holding `hvm_start_info` and the memmap table.
   - Everything below 1 MiB is never handed out, because the clip starts at 1 MiB.
 - If no managed frame is left after that, `init` fails with `nousable`.
+- The allocator assumes type-1 entries do not overlap reserved entries, as QEMU and firmware E820 maps provide. An overlapping map is not detected.
 
 API, main context only:
 
@@ -91,7 +93,7 @@ API, main context only:
 - `frames::free(PhysFrame) -> Result<(), FrameError>`: checks in this order. `Unaligned` if not a multiple of 4 KiB, `OutOfRange` if at or above 1 GiB, `NotAllocated` if the frame is not managed (never usable) or not currently allocated (double free). It never panics.
 - `frames::stats() -> (total, free)`. `total` counts managed frames: the frames the allocator can hand out, which excludes the kernel image and start-info pages. `total - free` is the number allocated.
 - `PhysFrame(pub u64)` is a newtype. Values returned by `alloc` are 4 KiB-aligned and below 1 GiB. The field is public so callers can pass a made-up value to `free`, which validates it.
-- Test helpers: `frames::kernel_end()`, `frames::frame_is_zero(PhysFrame)`, and `frames::write_pattern_and_verify(PhysFrame)`. The last two return `false` for a frame that is not currently allocated, so they cannot touch memory the allocator does not own.
+- Test helpers: `frames::kernel_end()`, `frames::frame_is_zero(PhysFrame)`, and `frames::write_pattern_and_verify(PhysFrame)`. The last two are compiled only for the `frames` feature. They return `false` for a frame that is not currently allocated, so they cannot touch memory the allocator does not own. `owned` proves the frame is allocated and managed RAM; exclusivity holds because the only caller is the `frames` test, which allocated it and has not freed it.
 - Reentry guard: an `AtomicBool` busy flag. Reentry, such as a future IRQ handler calling in, panics with `frame allocator reentered`.
 
 ## 7. Plugging into `main.rs`
@@ -146,4 +148,4 @@ The harness self-test also feeds each new judge a right line with a wrong status
 - `heap.rs`: the `unsafe impl GlobalAlloc` and the `unsafe impl Sync` for the static area.
 - `frames.rs`: the shared bitmap state behind the busy flag, `rep stosq` zeroing of a frame, and the volatile frame reads and writes in the two test helpers.
 
-The only other change is the one `movl %ebx, pvh_start_info` line (and its symbol) in the assembly in `boot.rs`. `mem.rs`, `memtest.rs`, and `main.rs` have no `unsafe`. Every new `unsafe` block or impl has a `// SAFETY:` comment naming its invariant.
+The only other change is the one `movl %ebx, pvh_start_info` line (and its symbol) in the assembly in `boot.rs`. The full unsafe list is in `docs/FOUNDATION.md`. `script.rs`, `shell.rs`, `mem.rs`, `memtest.rs`, and `main.rs` have no `unsafe`. Every new `unsafe` block or impl has a `// SAFETY:` comment naming its invariant.

@@ -1,10 +1,13 @@
 //! Fixed-buffer task language. See `docs/TASK.md`.
 //!
 //! The interpreter does not allocate. Scripts, lines, names, and variables live
-//! in stack arrays.
-//! COM1 is polled. After init, only IRQ0 (timer) and IRQ1 (keyboard) are unmasked.
+//! in stack arrays. This file stays in safe Rust.
+//! COM1 is polled for the `script` build. After init, only IRQ0 (timer) and
+//! IRQ1 (keyboard) are unmasked. The `shell` build calls `run_inline`.
 
+#[cfg(any(feature = "script", feature = "kbd-script"))]
 use crate::qemu_exit;
+#[cfg(any(feature = "script", feature = "kbd-script"))]
 use crate::serial;
 
 const MAX_CMDS: usize = 24;
@@ -67,6 +70,18 @@ struct Var {
     used: bool,
 }
 
+/// A parse or execute failure. `line` is 1-based. `reason` is one word.
+pub struct ScriptError {
+    pub line: u32,
+    pub reason: &'static str,
+}
+
+/// Where `say` and `print` send one line of text, without a prefix or newline.
+pub trait Sink {
+    fn line(&mut self, text: &[u8]);
+}
+
+#[cfg(any(feature = "script", feature = "kbd-script"))]
 pub fn run() -> ! {
     let mut prog = [Cmd::empty(); MAX_CMDS];
     #[cfg(feature = "kbd-script")]
@@ -79,7 +94,9 @@ pub fn run() -> ! {
         serial::write_str("R3ATH3_SCRIPT_READY\n");
         read_program(&mut prog)
     };
-    execute(&prog[..count]);
+    if let Err(error) = execute(&prog[..count], &mut SerialSink) {
+        fail(error.line, error.reason);
+    }
     serial::write_str("R3ATH3_SCRIPT_OK lines=");
     write_u32(count as u32);
     serial::write_str("\n");
@@ -112,8 +129,10 @@ fn read_program(prog: &mut [Cmd]) -> usize {
             len += 1;
             continue;
         }
-        if commit_line(&buf[..len], line_no, prog, &mut count, &mut depth) {
-            return count;
+        match commit_line(&buf[..len], line_no, prog, &mut count, &mut depth, true) {
+            Ok(true) => return count,
+            Ok(false) => {}
+            Err(error) => fail(error.line, error.reason),
         }
         line_no = line_no.saturating_add(1);
         len = 0;
@@ -132,9 +151,7 @@ fn read_program_kbd(prog: &mut [Cmd]) -> usize {
             if let Some(event) = crate::irq::pop_key() {
                 break event;
             }
-            unsafe {
-                core::arch::asm!("hlt", options(nomem, nostack, preserves_flags));
-            }
+            crate::irq::idle_hlt();
         };
         match event {
             crate::irq::Key::Char(ch) => {
@@ -152,8 +169,10 @@ fn read_program_kbd(prog: &mut [Cmd]) -> usize {
                 echo_line(&buf[..len]);
             }
             crate::irq::Key::Enter => {
-                if commit_line(&buf[..len], line_no, prog, &mut count, &mut depth) {
-                    return count;
+                match commit_line(&buf[..len], line_no, prog, &mut count, &mut depth, true) {
+                    Ok(true) => return count,
+                    Ok(false) => {}
+                    Err(error) => fail(error.line, error.reason),
                 }
                 line_no = line_no.saturating_add(1);
                 len = 0;
@@ -162,39 +181,106 @@ fn read_program_kbd(prog: &mut [Cmd]) -> usize {
     }
 }
 
+/// Run one shell line as a task script. `;` separates segments outside
+/// double quotes. There is no `run` terminator: a segment that is `run` is
+/// `reason=syntax`. An open `repeat` at the end is `reason=unclosed` on the
+/// line after the last segment. `halt` stops the script and returns `Ok`.
+#[cfg(feature = "shell")]
+pub fn run_inline(src: &[u8], sink: &mut dyn Sink) -> Result<(), ScriptError> {
+    let mut prog = [Cmd::empty(); MAX_CMDS];
+    let mut count = 0usize;
+    let mut depth = 0u8;
+    let mut line_no = 1u32;
+    let mut start = 0usize;
+    let mut quoted = false;
+    let mut i = 0usize;
+    loop {
+        let at_end = i == src.len();
+        let split = !at_end && !quoted && src[i] == b';';
+        if !at_end && src[i] == b'"' {
+            quoted = !quoted;
+        }
+        if split || at_end {
+            let segment = &src[start..i];
+            if segment.len() > MAX_LINE {
+                return Err(ScriptError {
+                    line: line_no,
+                    reason: "limit",
+                });
+            }
+            commit_line(segment, line_no, &mut prog, &mut count, &mut depth, false)?;
+            line_no = line_no.saturating_add(1);
+            if at_end {
+                break;
+            }
+            start = i + 1;
+        }
+        i += 1;
+    }
+    if depth != 0 {
+        return Err(ScriptError {
+            line: line_no,
+            reason: "unclosed",
+        });
+    }
+    execute(&prog[..count], sink)
+}
+
 fn commit_line(
     raw: &[u8],
     line_no: u32,
     prog: &mut [Cmd],
     count: &mut usize,
     depth: &mut u8,
-) -> bool {
+    run_terminates: bool,
+) -> Result<bool, ScriptError> {
     if line_no > MAX_INPUT_LINES {
-        fail(line_no, "limit");
+        return Err(ScriptError {
+            line: line_no,
+            reason: "limit",
+        });
     }
     let kept = strip_comment(raw);
     let trimmed = trim(&raw[..kept]);
     if trimmed == b"run" {
-        if *depth != 0 {
-            fail(line_no, "unclosed");
+        if !run_terminates {
+            return Err(ScriptError {
+                line: line_no,
+                reason: "syntax",
+            });
         }
-        return true;
+        if *depth != 0 {
+            return Err(ScriptError {
+                line: line_no,
+                reason: "unclosed",
+            });
+        }
+        return Ok(true);
     }
     if !trimmed.is_empty() {
         if *count == MAX_CMDS {
-            fail(line_no, "limit");
+            return Err(ScriptError {
+                line: line_no,
+                reason: "limit",
+            });
         }
-        prog[*count] = parse_command(trimmed, line_no);
+        prog[*count] = parse_command(trimmed, line_no)?;
         match prog[*count].op {
             OP_REPEAT => {
                 if *depth == 1 {
-                    fail(line_no, "nested");
+                    return Err(ScriptError {
+                        line: line_no,
+                        reason: "nested",
+                    });
                 }
                 *depth = 1;
             }
             OP_END => {
                 if *depth == 0 {
-                    fail(line_no, "syntax");
+                    return Err(ScriptError {
+                        line: line_no,
+                        reason: "syntax",
+                    });
                 }
                 *depth = 0;
             }
@@ -202,7 +288,7 @@ fn commit_line(
         }
         *count += 1;
     }
-    false
+    Ok(false)
 }
 
 #[cfg(feature = "kbd-script")]
@@ -213,15 +299,23 @@ fn echo_line(text: &[u8]) {
     crate::vga::write_line(text);
 }
 
-fn parse_command(line: &[u8], line_no: u32) -> Cmd {
+fn parse_command(line: &[u8], line_no: u32) -> Result<Cmd, ScriptError> {
     let mut cmd = Cmd::empty();
     cmd.line = line_no;
     let mut words = Words::new(line);
-    let op = words.next().unwrap_or_else(|| fail(line_no, "syntax"));
+    let op = match words.next() {
+        Some(op) => op,
+        None => {
+            return Err(ScriptError {
+                line: line_no,
+                reason: "syntax",
+            })
+        }
+    };
     if op == b"say" {
         cmd.op = OP_SAY;
-        cmd.text_len = parse_say(words.rest(), line_no, &mut cmd.text);
-        return cmd;
+        cmd.text_len = parse_say(words.rest(), line_no, &mut cmd.text)?;
+        return Ok(cmd);
     }
     match op {
         b"set" => cmd.op = OP_SET,
@@ -231,63 +325,142 @@ fn parse_command(line: &[u8], line_no: u32) -> Cmd {
         b"repeat" => cmd.op = OP_REPEAT,
         b"end" => cmd.op = OP_END,
         b"halt" => cmd.op = OP_HALT,
-        _ => fail(line_no, "unknown"),
+        _ => {
+            return Err(ScriptError {
+                line: line_no,
+                reason: "unknown",
+            })
+        }
     }
     match cmd.op {
         OP_END | OP_HALT => {
             if words.next().is_some() {
-                fail(line_no, "syntax");
+                return Err(ScriptError {
+                    line: line_no,
+                    reason: "syntax",
+                });
             }
         }
         OP_PRINT => {
-            let name = words.next().unwrap_or_else(|| fail(line_no, "syntax"));
+            let name = match words.next() {
+                Some(name) => name,
+                None => {
+                    return Err(ScriptError {
+                        line: line_no,
+                        reason: "syntax",
+                    })
+                }
+            };
             if words.next().is_some() {
-                fail(line_no, "syntax");
+                return Err(ScriptError {
+                    line: line_no,
+                    reason: "syntax",
+                });
             }
-            store_name(name, line_no, &mut cmd.name, &mut cmd.name_len);
+            store_name(name, line_no, &mut cmd.name, &mut cmd.name_len)?;
         }
         OP_REPEAT => {
-            let n = words.next().unwrap_or_else(|| fail(line_no, "syntax"));
+            let n = match words.next() {
+                Some(n) => n,
+                None => {
+                    return Err(ScriptError {
+                        line: line_no,
+                        reason: "syntax",
+                    })
+                }
+            };
             if words.next().is_some() {
-                fail(line_no, "syntax");
+                return Err(ScriptError {
+                    line: line_no,
+                    reason: "syntax",
+                });
             }
-            cmd.imm = parse_i64(n, line_no);
+            cmd.imm = parse_i64(n, line_no)?;
             if cmd.imm < 0 {
-                fail(line_no, "syntax");
+                return Err(ScriptError {
+                    line: line_no,
+                    reason: "syntax",
+                });
             }
             if cmd.imm > MAX_REPEAT {
-                fail(line_no, "repeat");
+                return Err(ScriptError {
+                    line: line_no,
+                    reason: "repeat",
+                });
             }
         }
         OP_SET => {
-            let name = words.next().unwrap_or_else(|| fail(line_no, "syntax"));
-            let value = words.next().unwrap_or_else(|| fail(line_no, "syntax"));
+            let name = match words.next() {
+                Some(name) => name,
+                None => {
+                    return Err(ScriptError {
+                        line: line_no,
+                        reason: "syntax",
+                    })
+                }
+            };
+            let value = match words.next() {
+                Some(value) => value,
+                None => {
+                    return Err(ScriptError {
+                        line: line_no,
+                        reason: "syntax",
+                    })
+                }
+            };
             if words.next().is_some() {
-                fail(line_no, "syntax");
+                return Err(ScriptError {
+                    line: line_no,
+                    reason: "syntax",
+                });
             }
-            store_name(name, line_no, &mut cmd.name, &mut cmd.name_len);
-            cmd.imm = parse_i64(value, line_no);
+            store_name(name, line_no, &mut cmd.name, &mut cmd.name_len)?;
+            cmd.imm = parse_i64(value, line_no)?;
         }
         OP_ADD | OP_SUB => {
-            let name = words.next().unwrap_or_else(|| fail(line_no, "syntax"));
-            let operand = words.next().unwrap_or_else(|| fail(line_no, "syntax"));
+            let name = match words.next() {
+                Some(name) => name,
+                None => {
+                    return Err(ScriptError {
+                        line: line_no,
+                        reason: "syntax",
+                    })
+                }
+            };
+            let operand = match words.next() {
+                Some(operand) => operand,
+                None => {
+                    return Err(ScriptError {
+                        line: line_no,
+                        reason: "syntax",
+                    })
+                }
+            };
             if words.next().is_some() {
-                fail(line_no, "syntax");
+                return Err(ScriptError {
+                    line: line_no,
+                    reason: "syntax",
+                });
             }
-            store_name(name, line_no, &mut cmd.name, &mut cmd.name_len);
+            store_name(name, line_no, &mut cmd.name, &mut cmd.name_len)?;
             if is_name(operand) {
                 cmd.op_is_var = true;
-                store_name(operand, line_no, &mut cmd.op_var, &mut cmd.op_var_len);
+                store_name(operand, line_no, &mut cmd.op_var, &mut cmd.op_var_len)?;
             } else {
-                cmd.imm = parse_i64(operand, line_no);
+                cmd.imm = parse_i64(operand, line_no)?;
             }
         }
-        _ => fail(line_no, "syntax"),
+        _ => {
+            return Err(ScriptError {
+                line: line_no,
+                reason: "syntax",
+            })
+        }
     }
-    cmd
+    Ok(cmd)
 }
 
-fn execute(cmds: &[Cmd]) {
+fn execute(cmds: &[Cmd], sink: &mut dyn Sink) -> Result<(), ScriptError> {
     let mut vars = [Var {
         name: [0; MAX_NAME],
         name_len: 0,
@@ -302,16 +475,20 @@ fn execute(cmds: &[Cmd]) {
         let cmd = cmds[ip];
         match cmd.op {
             OP_SET => {
-                let slot = define(&mut vars, &cmd.name, cmd.name_len, cmd.line);
+                let slot = define(&mut vars, &cmd.name, cmd.name_len, cmd.line)?;
                 vars[slot].value = cmd.imm;
                 ip += 1;
             }
             OP_ADD | OP_SUB => {
-                let slot = lookup(&vars, &cmd.name, cmd.name_len)
-                    .unwrap_or_else(|| fail(cmd.line, "undefined"));
+                let slot = lookup(&vars, &cmd.name, cmd.name_len).ok_or(ScriptError {
+                    line: cmd.line,
+                    reason: "undefined",
+                })?;
                 let operand = if cmd.op_is_var {
-                    let src = lookup(&vars, &cmd.op_var, cmd.op_var_len)
-                        .unwrap_or_else(|| fail(cmd.line, "undefined"));
+                    let src = lookup(&vars, &cmd.op_var, cmd.op_var_len).ok_or(ScriptError {
+                        line: cmd.line,
+                        reason: "undefined",
+                    })?;
                     vars[src].value
                 } else {
                     cmd.imm
@@ -321,27 +498,31 @@ fn execute(cmds: &[Cmd]) {
                 } else {
                     vars[slot].value.checked_sub(operand)
                 };
-                vars[slot].value = next.unwrap_or_else(|| fail(cmd.line, "overflow"));
+                vars[slot].value = next.ok_or(ScriptError {
+                    line: cmd.line,
+                    reason: "overflow",
+                })?;
                 ip += 1;
             }
             OP_SAY => {
-                serial::write_str("R3ATH3_OUT ");
-                serial::write_bytes(&cmd.text[..cmd.text_len as usize]);
-                serial::write_str("\n");
+                sink.line(&cmd.text[..cmd.text_len as usize]);
                 ip += 1;
             }
             OP_PRINT => {
-                let slot = lookup(&vars, &cmd.name, cmd.name_len)
-                    .unwrap_or_else(|| fail(cmd.line, "undefined"));
-                serial::write_str("R3ATH3_OUT ");
-                serial::write_bytes(&cmd.name[..cmd.name_len as usize]);
-                serial::write_str("=");
-                write_i64(vars[slot].value);
-                serial::write_str("\n");
+                let slot = lookup(&vars, &cmd.name, cmd.name_len).ok_or(ScriptError {
+                    line: cmd.line,
+                    reason: "undefined",
+                })?;
+                let mut buf = [0u8; 40];
+                let n = format_print(&cmd.name[..cmd.name_len as usize], vars[slot].value, &mut buf);
+                sink.line(&buf[..n]);
                 ip += 1;
             }
             OP_REPEAT => {
-                let end = matching_end(cmds, ip).unwrap_or_else(|| fail(cmd.line, "unclosed"));
+                let end = matching_end(cmds, ip).ok_or(ScriptError {
+                    line: cmd.line,
+                    reason: "unclosed",
+                })?;
                 if cmd.imm == 0 {
                     active = false;
                     ip = end + 1;
@@ -354,7 +535,10 @@ fn execute(cmds: &[Cmd]) {
             }
             OP_END => {
                 if !active {
-                    fail(cmd.line, "syntax");
+                    return Err(ScriptError {
+                        line: cmd.line,
+                        reason: "syntax",
+                    });
                 }
                 left -= 1;
                 if left > 0 {
@@ -364,10 +548,16 @@ fn execute(cmds: &[Cmd]) {
                     ip += 1;
                 }
             }
-            OP_HALT => return,
-            _ => fail(cmd.line, "syntax"),
+            OP_HALT => return Ok(()),
+            _ => {
+                return Err(ScriptError {
+                    line: cmd.line,
+                    reason: "syntax",
+                })
+            }
         }
     }
+    Ok(())
 }
 
 fn matching_end(cmds: &[Cmd], repeat_at: usize) -> Option<usize> {
@@ -389,9 +579,9 @@ fn matching_end(cmds: &[Cmd], repeat_at: usize) -> Option<usize> {
     None
 }
 
-fn define(vars: &mut [Var], name: &[u8], name_len: u8, line: u32) -> usize {
+fn define(vars: &mut [Var], name: &[u8], name_len: u8, line: u32) -> Result<usize, ScriptError> {
     if let Some(slot) = lookup(vars, name, name_len) {
-        return slot;
+        return Ok(slot);
     }
     for (i, var) in vars.iter_mut().enumerate() {
         if !var.used {
@@ -399,10 +589,13 @@ fn define(vars: &mut [Var], name: &[u8], name_len: u8, line: u32) -> usize {
             var.name_len = name_len;
             var.name[..name_len as usize].copy_from_slice(&name[..name_len as usize]);
             var.value = 0;
-            return i;
+            return Ok(i);
         }
     }
-    fail(line, "limit");
+    Err(ScriptError {
+        line,
+        reason: "limit",
+    })
 }
 
 fn lookup(vars: &[Var], name: &[u8], name_len: u8) -> Option<usize> {
@@ -446,45 +639,67 @@ impl<'a> Words<'a> {
     }
 }
 
-fn parse_say(rest: &[u8], line: u32, dest: &mut [u8; MAX_TEXT]) -> u8 {
+fn parse_say(rest: &[u8], line: u32, dest: &mut [u8; MAX_TEXT]) -> Result<u8, ScriptError> {
     if rest.first() != Some(&b'"') {
-        fail(line, "syntax");
+        return Err(ScriptError {
+            line,
+            reason: "syntax",
+        });
     }
     let mut i = 1usize;
     let mut n = 0usize;
     while i < rest.len() && rest[i] != b'"' {
         if n == MAX_TEXT {
-            fail(line, "limit");
+            return Err(ScriptError {
+                line,
+                reason: "limit",
+            });
         }
         if !(0x20..=0x7E).contains(&rest[i]) {
-            fail(line, "char");
+            return Err(ScriptError {
+                line,
+                reason: "char",
+            });
         }
         dest[n] = rest[i];
         n += 1;
         i += 1;
     }
     if i >= rest.len() || rest[i] != b'"' {
-        fail(line, "syntax");
+        return Err(ScriptError {
+            line,
+            reason: "syntax",
+        });
     }
     let mut tail = i + 1;
     while tail < rest.len() {
         if !rest[tail].is_ascii_whitespace() {
-            fail(line, "syntax");
+            return Err(ScriptError {
+                line,
+                reason: "syntax",
+            });
         }
         tail += 1;
     }
-    n as u8
+    Ok(n as u8)
 }
 
-fn store_name(src: &[u8], line: u32, dest: &mut [u8; MAX_NAME], len: &mut u8) {
+fn store_name(src: &[u8], line: u32, dest: &mut [u8; MAX_NAME], len: &mut u8) -> Result<(), ScriptError> {
     if src.len() > MAX_NAME {
-        fail(line, "limit");
+        return Err(ScriptError {
+            line,
+            reason: "limit",
+        });
     }
     if !is_name(src) {
-        fail(line, "syntax");
+        return Err(ScriptError {
+            line,
+            reason: "syntax",
+        });
     }
     dest[..src.len()].copy_from_slice(src);
     *len = src.len() as u8;
+    Ok(())
 }
 
 fn is_name(src: &[u8]) -> bool {
@@ -500,9 +715,9 @@ fn is_name(src: &[u8]) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || *c == b'_')
 }
 
-fn parse_i64(src: &[u8], line: u32) -> i64 {
+fn parse_i64(src: &[u8], line: u32) -> Result<i64, ScriptError> {
     if src == b"-9223372036854775808" {
-        return i64::MIN;
+        return Ok(i64::MIN);
     }
     let (neg, digits) = if src.first() == Some(&b'-') {
         (true, &src[1..])
@@ -510,19 +725,29 @@ fn parse_i64(src: &[u8], line: u32) -> i64 {
         (false, src)
     };
     if digits.is_empty() || !digits.iter().all(|c| c.is_ascii_digit()) {
-        fail(line, "syntax");
+        return Err(ScriptError {
+            line,
+            reason: "syntax",
+        });
     }
     let mut n: i64 = 0;
     for &d in digits {
-        n = n.checked_mul(10).unwrap_or_else(|| fail(line, "overflow"));
-        n = n
-            .checked_add(i64::from(d - b'0'))
-            .unwrap_or_else(|| fail(line, "overflow"));
+        n = n.checked_mul(10).ok_or(ScriptError {
+            line,
+            reason: "overflow",
+        })?;
+        n = n.checked_add(i64::from(d - b'0')).ok_or(ScriptError {
+            line,
+            reason: "overflow",
+        })?;
     }
     if neg {
-        n.checked_neg().unwrap_or_else(|| fail(line, "overflow"))
+        n.checked_neg().ok_or(ScriptError {
+            line,
+            reason: "overflow",
+        })
     } else {
-        n
+        Ok(n)
     }
 }
 
@@ -560,6 +785,54 @@ fn read_byte() -> Option<u8> {
     None
 }
 
+fn format_print(name: &[u8], value: i64, dest: &mut [u8]) -> usize {
+    dest[..name.len()].copy_from_slice(name);
+    dest[name.len()] = b'=';
+    let wrote = format_i64(value, &mut dest[name.len() + 1..]);
+    name.len() + 1 + wrote
+}
+
+fn format_i64(value: i64, dest: &mut [u8]) -> usize {
+    if value == i64::MIN {
+        let text = b"-9223372036854775808";
+        dest[..text.len()].copy_from_slice(text);
+        return text.len();
+    }
+    let neg = value < 0;
+    let mut n = if neg { (-value) as u64 } else { value as u64 };
+    let mut tmp = [0u8; 20];
+    let mut i = tmp.len();
+    loop {
+        i -= 1;
+        tmp[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    let mut at = 0usize;
+    if neg {
+        dest[0] = b'-';
+        at = 1;
+    }
+    let digits = &tmp[i..];
+    dest[at..at + digits.len()].copy_from_slice(digits);
+    at + digits.len()
+}
+
+#[cfg(any(feature = "script", feature = "kbd-script"))]
+struct SerialSink;
+
+#[cfg(any(feature = "script", feature = "kbd-script"))]
+impl Sink for SerialSink {
+    fn line(&mut self, text: &[u8]) {
+        serial::write_str("R3ATH3_OUT ");
+        serial::write_bytes(text);
+        serial::write_str("\n");
+    }
+}
+
+#[cfg(any(feature = "script", feature = "kbd-script"))]
 fn fail(line: u32, reason: &str) -> ! {
     serial::write_str("R3ATH3_SCRIPT_ERROR line=");
     write_u32(line);
@@ -569,35 +842,9 @@ fn fail(line: u32, reason: &str) -> ! {
     qemu_exit::script_error();
 }
 
+#[cfg(any(feature = "script", feature = "kbd-script"))]
 fn write_u32(mut n: u32) {
     let mut buf = [0u8; 10];
-    let mut i = buf.len();
-    loop {
-        i -= 1;
-        buf[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-        if n == 0 {
-            break;
-        }
-    }
-    serial::write_bytes(&buf[i..]);
-}
-
-fn write_i64(n: i64) {
-    if n < 0 {
-        serial::write_str("-");
-        if n == i64::MIN {
-            serial::write_str("9223372036854775808");
-            return;
-        }
-        write_u64((-n) as u64);
-    } else {
-        write_u64(n as u64);
-    }
-}
-
-fn write_u64(mut n: u64) {
-    let mut buf = [0u8; 20];
     let mut i = buf.len();
     loop {
         i -= 1;

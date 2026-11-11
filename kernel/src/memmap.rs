@@ -127,6 +127,9 @@ pub fn init() -> Result<(), MemError> {
         return Err(MemError::MemMap);
     }
     let bytes = entries * ENTRY_SIZE;
+    if map == 0 {
+        return Err(MemError::MemMap);
+    }
     if map.checked_add(bytes).map_or(true, |end| end > GIB) {
         return Err(MemError::MemMap);
     }

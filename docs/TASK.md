@@ -14,6 +14,8 @@ The `script` build prints `R3ATH3_SCRIPT_READY`, then reads COM1 until a line wh
 
 The smoke harness waits for `R3ATH3_SCRIPT_READY`, then writes the script and a `run` line in small chunks so the 16-byte UART FIFO is not overrun.
 
+Scan code set 1 also maps `0x27` to `;` (Shift `:`) and `0x28` to `'` (Shift `"`). The `keys` and `kbd-script` cases do not use these keys, so their serial output is unchanged. The interpreter refactor (errors as `Result`, output through a sink, and `idle_hlt` instead of an `hlt` in this file) does not change `script` or `kbd-script` output. `script.rs` has no `unsafe`.
+
 ## Limits
 
 | Limit | Value |
@@ -65,3 +67,9 @@ Success ends with `R3ATH3_SCRIPT_OK lines=<n>` and QEMU status **161** (port `0x
 ## Smoke coverage
 
 `./scripts/smoke.sh` checks every `reason` above. `limit` is checked with 49 physical lines. `repeat` is checked both as the first command and after `halt`. The other limit forms (command count, variable count, name length, `say` length, and 72-byte lines) use the same `reason=limit` path and are not separate smoke scripts.
+
+## Shell `run`
+
+The `shell` build's `run` command passes the rest of the line to `run_inline`. Semicolons outside double quotes separate segments. Each segment is one task-language line, numbered from 1. `#` comments out the rest of that segment only. Blank and comment segments are skipped. A segment whose trimmed text is `run` is `reason=syntax`, because inline mode has no `run` terminator. An open `repeat` at the end of the input is `reason=unclosed`, and the line number is one past the segment count (the same number the COM1 path reports for the `run` line). Limits are the ones in the table above, including 24 commands, 8 variables, 72-byte segments, and 48 segments. `halt` stops the script only. The shell keeps running.
+
+Script output on the shell is the text plus a newline, on COM1 and VGA, with no `R3ATH3_OUT` prefix. On error the shell prints `error: script line=<n> reason=<word>` and does not exit. Details and the smoke cases are in `docs/SHELL.md`.

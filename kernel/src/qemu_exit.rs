@@ -12,6 +12,9 @@
 //! allocator ok `0x62` (197), frame exhaustion `0x63` (199). A memory
 //! initialisation error writes `0x64` (201). The heap-overflow panic proof
 //! reuses the panic status 35 on purpose.
+//! The shell writes `0x68` (exit ok → 209), `0x69` (command error → 211),
+//! `0x6A` (line overflow → 213), `0x6B` (script error → 215), or `0x6C`
+//! (halt → 217). `0x65`–`0x67` (203–207) stay unused.
 //! This device exists only in the emulator. Do not boot this image on hardware.
 
 use crate::port;
@@ -77,6 +80,31 @@ pub fn frames_oom_ok() -> ! {
 
 pub fn mem_error() -> ! {
     exit(0x64)
+}
+
+#[cfg(feature = "shell")]
+pub fn shell_exit_ok() -> ! {
+    exit(0x68)
+}
+
+#[cfg(feature = "shell")]
+pub fn shell_exit_cmd() -> ! {
+    exit(0x69)
+}
+
+#[cfg(feature = "shell")]
+pub fn shell_exit_overflow() -> ! {
+    exit(0x6A)
+}
+
+#[cfg(feature = "shell")]
+pub fn shell_exit_script() -> ! {
+    exit(0x6B)
+}
+
+#[cfg(feature = "shell")]
+pub fn shell_halt() -> ! {
+    exit(0x6C)
 }
 
 pub fn cpu_fault(vector: u64) -> ! {
