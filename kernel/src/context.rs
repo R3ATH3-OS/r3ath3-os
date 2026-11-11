@@ -143,7 +143,8 @@ pub fn prepare(slot: usize, entry: fn(usize), arg: usize) {
         frame.add(4).write(0);
         frame.add(5).write(0);
         frame.add(6).write(task_trampoline as usize as u64);
-        (*SAVED_RSP.0.get())[slot] = sp as u64;
+        // One slot, not a reference to the whole saved-RSP table.
+        core::ptr::addr_of_mut!((*SAVED_RSP.0.get())[slot]).write(sp as u64);
     }
 }
 
@@ -152,8 +153,9 @@ pub fn check_canary(slot: usize) {
     if slot == 0 || slot >= 8 {
         return;
     }
-    // SAFETY: `slot` is 1–7. The read is the first 8 bytes of that stack.
-    let value = unsafe { (stack_base(slot) as *const u64).read() };
+    // SAFETY: `slot` is 1–7. `read_volatile` loads the first 8 bytes of that
+    // stack, so a canary written by `prepare` cannot be reused from a register.
+    let value = unsafe { core::ptr::read_volatile(stack_base(slot) as *const u64) };
     if value != CANARY {
         panic!("task stack overflow id={slot}");
     }
@@ -163,13 +165,13 @@ pub fn check_canary(slot: usize) {
 pub fn switch(from: usize, to: usize) {
     debug_assert!(!interrupts_enabled(), "context switch with IF set");
     debug_assert!(from < 8 && to < 8 && from != to);
-    // SAFETY: caller holds IF clear and the indexes are inside the saved-RSP
-    // table. `switch_context` writes the current RSP through `old` and then
-    // resumes the stack stored in `new`.
+    // SAFETY: caller holds IF clear and both indexes are < 8. The pointers
+    // address two slots and do not form a reference to the whole table.
+    // `new` is loaded before `switch_context` writes through `old`.
     unsafe {
-        let table = &mut *SAVED_RSP.0.get();
-        let new = table[to];
-        let old = &mut table[from] as *mut u64;
+        let table = SAVED_RSP.0.get().cast::<u64>();
+        let new = core::ptr::read(table.add(to));
+        let old = table.add(from);
         switch_context(old, new);
     }
 }
@@ -192,6 +194,7 @@ fn interrupts_enabled() -> bool {
 /// # Safety
 /// `slot` is 1–7.
 unsafe fn stack_base(slot: usize) -> *mut u8 {
-    let pools = &mut *STACKS.0.get();
-    pools[slot - 1].bytes.as_mut_ptr()
+    // `TaskStack` is `#[repr(C)]`, so the element's address is its first byte.
+    // `addr_of_mut!` does not form a reference to the pool.
+    core::ptr::addr_of_mut!((*STACKS.0.get())[slot - 1]).cast()
 }

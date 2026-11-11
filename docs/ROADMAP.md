@@ -7,7 +7,7 @@
 ## Rules for every milestone
 - Docs are the spec. Each milestone starts with a design doc.
 - One bounded milestone at a time: one build, one clean-tree smoke run at the exact head, one focused review, and then John decides on the merge.
-- Every feature gets a smoke case with its own exit status.
+- A status names an outcome. A feature that can end its own run gets its own status; shell commands are judged by exact transcript under the shell's outcome statuses, and a swap self-test proves those cases cannot pass for each other.
 - Unsafe code is allowed only in driver files.
 - No speculative expansion.
 

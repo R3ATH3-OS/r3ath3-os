@@ -167,15 +167,18 @@ pub fn without_interrupts<R>(f: impl FnOnce() -> R) -> R {
     let flags = read_flags();
     // SAFETY: `cli` clears IF on this one CPU. The restore below sets IF
     // again only when `flags` says it was set. Nothing else runs the CPU.
+    // `nomem` is omitted so this asm is a compiler barrier: task-table
+    // writes cannot move out of the critical section.
     unsafe {
-        asm!("cli", options(nomem, nostack, preserves_flags));
+        asm!("cli", options(nostack, preserves_flags));
     }
     let result = f();
     if flags & 0x200 != 0 {
         // SAFETY: IF was set when this function was entered, so `sti` puts
-        // the caller back in that state. One CPU.
+        // the caller back in that state. One CPU. `nomem` is omitted so
+        // writes inside the critical section cannot move past this `sti`.
         unsafe {
-            asm!("sti", options(nomem, nostack, preserves_flags));
+            asm!("sti", options(nostack, preserves_flags));
         }
     }
     result
@@ -202,14 +205,14 @@ pub fn wait_ticks(n: u64) -> u64 {
     let start = ticks();
     loop {
         unsafe {
-            asm!("cli", options(nomem, nostack, preserves_flags));
+            asm!("cli", options(nostack, preserves_flags));
         }
         let got = ticks().wrapping_sub(start);
         if got >= n {
             return got;
         }
         unsafe {
-            asm!("sti; hlt", options(nomem, nostack));
+            asm!("sti; hlt", options(nostack, preserves_flags));
         }
     }
 }
