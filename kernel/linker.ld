@@ -3,6 +3,7 @@ ENTRY(_start)
 SECTIONS
 {
     . = 1M;
+    __kernel_start = .;
 
     .text ALIGN(4K) : {
         *(.text.boot)
@@ -23,7 +24,9 @@ SECTIONS
     .bss ALIGN(4K) : {
         *(.bss .bss.*)
         *(COMMON)
+        . = ALIGN(4K);
     }
+    __kernel_end = .;
 
     /DISCARD/ : {
         *(.eh_frame*)

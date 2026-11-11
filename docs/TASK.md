@@ -2,7 +2,7 @@
 
 Suggested wording, not a certification: "An authentic Human–AI co-op OS".
 
-This is a fixed-buffer interpreter in the QEMU kernel. It is not an AI runtime. There is no heap. The `script` build polls COM1. IRQ0 and IRQ1 are enabled for the timer and the keyboard.
+This is a fixed-buffer interpreter in the QEMU kernel. It is not an AI runtime. The interpreter does not allocate: it uses only fixed stack buffers, even though the kernel now has a bump heap (`docs/MEMORY.md`). Memory init runs before the interpreter, prints nothing on success, and does not change any output or status here. If it fails the kernel prints `R3ATH3_MEM_ERROR` and exits 201 before the interpreter starts. The `script` build polls COM1. IRQ0 and IRQ1 are enabled for the timer and the keyboard.
 
 ## Input
 

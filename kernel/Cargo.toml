@@ -24,6 +24,12 @@ script = []
 kbd-script = []
 ticks = []
 keys = []
+heap = []
+heap-oom = []
+heap-oom-panic = []
+frames = []
+frames-oom = []
+mem-badinfo = []
 
 [profile.dev]
 panic = "abort"

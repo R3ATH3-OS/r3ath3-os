@@ -8,6 +8,10 @@
 //! A COM1 task script writes `0x50` (ok → 161) or `0x51` (error → 163).
 //! Timer proof writes `0x58` (177). Keyboard echo writes `0x59` (179).
 //! A keyboard task script writes `0x5A` (181) on success.
+//! Allocator proofs: heap ok `0x60` (193), heap exhaustion `0x61` (195), frame
+//! allocator ok `0x62` (197), frame exhaustion `0x63` (199). A memory
+//! initialisation error writes `0x64` (201). The heap-overflow panic proof
+//! reuses the panic status 35 on purpose.
 //! This device exists only in the emulator. Do not boot this image on hardware.
 
 use crate::port;
@@ -49,6 +53,30 @@ pub fn ticks_ok() -> ! {
 #[cfg(feature = "keys")]
 pub fn keys_ok() -> ! {
     exit(0x59)
+}
+
+#[cfg(feature = "heap")]
+pub fn heap_ok() -> ! {
+    exit(0x60)
+}
+
+#[cfg(feature = "heap-oom")]
+pub fn heap_oom_ok() -> ! {
+    exit(0x61)
+}
+
+#[cfg(feature = "frames")]
+pub fn frames_ok() -> ! {
+    exit(0x62)
+}
+
+#[cfg(feature = "frames-oom")]
+pub fn frames_oom_ok() -> ! {
+    exit(0x63)
+}
+
+pub fn mem_error() -> ! {
+    exit(0x64)
 }
 
 pub fn cpu_fault(vector: u64) -> ! {

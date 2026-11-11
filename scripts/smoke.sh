@@ -5,6 +5,10 @@
 # CPU faults: #UD 0x31→99, #PF 0x33→103, #DF 0x34→105.
 # Any other vector writes 0x2F (status 95), outside timeout's 124–127.
 # Task scripts write 0x50 (ok → 161) or 0x51 (error → 163).
+# Timer proof 0x58 → 177. Keyboard echo 0x59 → 179. Keyboard script 0x5A → 181.
+# Allocator proofs: heap 0x60 → 193, heap exhaustion 0x61 → 195, frames 0x62 →
+# 197, frame exhaustion 0x63 → 199, memory init error 0x64 → 201. The heap
+# overflow panic case reuses the panic status 35 on purpose.
 # A triple-fault or silent reset does not print the fault line and does not
 # use those statuses (this QEMU build has exited 0 on triple fault).
 set -u
@@ -24,6 +28,19 @@ SCRIPT_ERR_STATUS=163
 TICKS_STATUS=177
 KEYS_STATUS=179
 KBD_SCRIPT_STATUS=181
+HEAP_STATUS=193
+HEAP_OOM_STATUS=195
+FRAMES_STATUS=197
+FRAMES_OOM_STATUS=199
+MEM_ERROR_STATUS=201
+RAM_BYTES=67108864
+HEAP_BYTES=1048576
+HEAP_LINE='R3ATH3_HEAP ok size=1048576 used=([0-9]+) align_max=4096'
+HEAP_OOM_LINE='R3ATH3_HEAP_OOM ok chunks=16 used=1048576'
+HEAP_PANIC_LINE='R3ATH3_PANIC .*memory allocation of 2097152 bytes failed'
+FRAMES_LINE='R3ATH3_FRAMES ok total=([0-9]+) free=([0-9]+) first=0x([0-9a-f]+) kernel_end=0x([0-9a-f]+)'
+FRAMES_OOM_LINE='R3ATH3_FRAMES_OOM ok allocated=([0-9]+) max=0x([0-9a-f]+)'
+MEM_ERROR_LINE='R3ATH3_MEM_ERROR reason=startinfo'
 TICKS_LINE='R3ATH3_TICKS ok count=300 hz=100 rtc=[34]'
 UD_LINE='R3ATH3_FAULT vector=6 name=ud error=none rip=0x[0-9a-f]+'
 PF_LINE='R3ATH3_FAULT vector=14 name=pf error=0x0 rip=0x[0-9a-f]+ cr2=0x40000000'
@@ -103,6 +120,77 @@ judge_ticks() {
   return 0
 }
 
+judge_heap() {
+  local status="$1" file="$2"
+  [[ "$status" -eq "$HEAP_STATUS" ]] || return 1
+  local line
+  line="$(grep -E -x -m1 "$HEAP_LINE" "$file")" || return 1
+  [[ "$line" =~ ^${HEAP_LINE}$ ]] || return 1
+  local used="${BASH_REMATCH[1]}"
+  (( used > 0 && used <= HEAP_BYTES )) || return 1
+  if grep -F -q "$MARKER" "$file"; then
+    return 1
+  fi
+  if grep -F -q "R3ATH3_PANIC" "$file"; then
+    return 1
+  fi
+  return 0
+}
+
+judge_heap_oom() { judge_fault "$1" "$2" "$HEAP_OOM_STATUS" "$HEAP_OOM_LINE"; }
+
+# The panic path is the proof, so this judge requires a panic line (status 35)
+# and rejects the boot marker.
+judge_heap_panic() {
+  local status="$1" file="$2"
+  [[ "$status" -eq "$FAIL_STATUS" ]] || return 1
+  grep -E -x -q "$HEAP_PANIC_LINE" "$file" || return 1
+  if grep -F -q "$MARKER" "$file"; then
+    return 1
+  fi
+  return 0
+}
+
+judge_frames() {
+  local status="$1" file="$2"
+  [[ "$status" -eq "$FRAMES_STATUS" ]] || return 1
+  local line
+  line="$(grep -E -x -m1 "$FRAMES_LINE" "$file")" || return 1
+  [[ "$line" =~ ^${FRAMES_LINE}$ ]] || return 1
+  local total="${BASH_REMATCH[1]}" free="${BASH_REMATCH[2]}"
+  local first=$((16#${BASH_REMATCH[3]})) kernel_end=$((16#${BASH_REMATCH[4]}))
+  (( total > 0 && free <= total )) || return 1
+  (( first >= kernel_end )) || return 1
+  (( total * 4096 <= RAM_BYTES )) || return 1
+  if grep -F -q "$MARKER" "$file"; then
+    return 1
+  fi
+  if grep -F -q "R3ATH3_PANIC" "$file"; then
+    return 1
+  fi
+  return 0
+}
+
+judge_frames_oom() {
+  local status="$1" file="$2"
+  [[ "$status" -eq "$FRAMES_OOM_STATUS" ]] || return 1
+  local line
+  line="$(grep -E -x -m1 "$FRAMES_OOM_LINE" "$file")" || return 1
+  [[ "$line" =~ ^${FRAMES_OOM_LINE}$ ]] || return 1
+  local allocated="${BASH_REMATCH[1]}" max=$((16#${BASH_REMATCH[2]}))
+  (( allocated > 0 )) || return 1
+  (( max + 4096 <= RAM_BYTES )) || return 1
+  if grep -F -q "$MARKER" "$file"; then
+    return 1
+  fi
+  if grep -F -q "R3ATH3_PANIC" "$file"; then
+    return 1
+  fi
+  return 0
+}
+
+judge_mem_badinfo() { judge_fault "$1" "$2" "$MEM_ERROR_STATUS" "$MEM_ERROR_LINE"; }
+
 judge_exact() {
   local status="$1" file="$2" expected_status="$3" expected_file="$4"
   [[ "$status" -eq "$expected_status" ]] || return 1
@@ -172,6 +260,48 @@ selftest_harness() {
   printf '%s\n' "R3ATH3_KBD_READY" "R3ATH3_SCRIPT_OK lines=2" >"$dir/kbd.log"
   judge_exact "$KBD_SCRIPT_STATUS" "$dir/kbd.log" "$KBD_SCRIPT_STATUS" "$dir/kbd.log" || ok=1
   if judge_exact "$SCRIPT_OK_STATUS" "$dir/kbd.log" "$KBD_SCRIPT_STATUS" "$dir/kbd.log"; then ok=1; fi
+
+  printf '%s\n' "R3ATH3_STAGE rust_main" "R3ATH3_HEAP ok size=1048576 used=400 align_max=4096" >"$dir/heap.log"
+  printf '%s\n' "R3ATH3_HEAP ok size=1048576 used=0 align_max=4096" >"$dir/heap-zero.log"
+  printf '%s\n' "R3ATH3_HEAP ok size=1048576 used=1048577 align_max=4096" >"$dir/heap-big.log"
+  printf '%s\n' "R3ATH3_HEAP ok size=1048576 used=400 align_max=8192" >"$dir/heap-bad.log"
+  printf '%s\n' "R3ATH3_HEAP_OOM ok chunks=16 used=1048576" >"$dir/heap-oom.log"
+  printf '%s\n' "R3ATH3_HEAP_OOM ok chunks=15 used=1048576" >"$dir/heap-oom-bad.log"
+  printf '%s\n' "R3ATH3_PANIC location=x.rs:1 message=memory allocation of 2097152 bytes failed" >"$dir/heap-panic.log"
+  printf '%s\n' "R3ATH3_PANIC location=x.rs:1 message=injected boot fault" >"$dir/heap-panic-bad.log"
+  judge_heap "$HEAP_STATUS" "$dir/heap.log" || ok=1
+  if judge_heap 0 "$dir/heap.log"; then ok=1; fi
+  if judge_heap "$FAIL_STATUS" "$dir/heap.log"; then ok=1; fi
+  if judge_heap "$HEAP_STATUS" "$dir/empty.log"; then ok=1; fi
+  if judge_heap "$HEAP_STATUS" "$dir/heap-zero.log"; then ok=1; fi
+  if judge_heap "$HEAP_STATUS" "$dir/heap-big.log"; then ok=1; fi
+  if judge_heap "$HEAP_STATUS" "$dir/heap-bad.log"; then ok=1; fi
+  judge_heap_oom "$HEAP_OOM_STATUS" "$dir/heap-oom.log" || ok=1
+  if judge_heap_oom "$HEAP_STATUS" "$dir/heap-oom.log"; then ok=1; fi
+  if judge_heap_oom "$HEAP_OOM_STATUS" "$dir/heap-oom-bad.log"; then ok=1; fi
+  judge_heap_panic "$FAIL_STATUS" "$dir/heap-panic.log" || ok=1
+  if judge_heap_panic "$PASS_STATUS" "$dir/heap-panic.log"; then ok=1; fi
+  if judge_heap_panic "$FAIL_STATUS" "$dir/heap-panic-bad.log"; then ok=1; fi
+
+  printf '%s\n' "R3ATH3_FRAMES ok total=15000 free=15000 first=0x300000 kernel_end=0x2a0000" >"$dir/frames.log"
+  printf '%s\n' "R3ATH3_FRAMES ok total=15000 free=15000 first=0x100000 kernel_end=0x2a0000" >"$dir/frames-low.log"
+  printf '%s\n' "R3ATH3_FRAMES ok total=20000 free=20000 first=0x300000 kernel_end=0x2a0000" >"$dir/frames-big.log"
+  printf '%s\n' "R3ATH3_FRAMES_OOM ok allocated=15000 max=0x3ffd000" >"$dir/frames-oom.log"
+  printf '%s\n' "R3ATH3_FRAMES_OOM ok allocated=15000 max=0x4000000" >"$dir/frames-oom-high.log"
+  printf '%s\n' "R3ATH3_MEM_ERROR reason=startinfo" >"$dir/mem-badinfo.log"
+  printf '%s\n' "R3ATH3_MEM_ERROR reason=memmap" >"$dir/mem-badinfo-wrong.log"
+  judge_frames "$FRAMES_STATUS" "$dir/frames.log" || ok=1
+  if judge_frames 0 "$dir/frames.log"; then ok=1; fi
+  if judge_frames "$HEAP_STATUS" "$dir/frames.log"; then ok=1; fi
+  if judge_frames "$FRAMES_STATUS" "$dir/empty.log"; then ok=1; fi
+  if judge_frames "$FRAMES_STATUS" "$dir/frames-low.log"; then ok=1; fi
+  if judge_frames "$FRAMES_STATUS" "$dir/frames-big.log"; then ok=1; fi
+  judge_frames_oom "$FRAMES_OOM_STATUS" "$dir/frames-oom.log" || ok=1
+  if judge_frames_oom "$FRAMES_STATUS" "$dir/frames-oom.log"; then ok=1; fi
+  if judge_frames_oom "$FRAMES_OOM_STATUS" "$dir/frames-oom-high.log"; then ok=1; fi
+  judge_mem_badinfo "$MEM_ERROR_STATUS" "$dir/mem-badinfo.log" || ok=1
+  if judge_mem_badinfo 0 "$dir/mem-badinfo.log"; then ok=1; fi
+  if judge_mem_badinfo "$MEM_ERROR_STATUS" "$dir/mem-badinfo-wrong.log"; then ok=1; fi
 
   if [[ "$ok" -eq 0 ]]; then
     log "[PASS] harness-selftest"
@@ -617,8 +747,17 @@ expect_case() {
   fi
 }
 
+git_report() {
+  local when="$1" head dirty
+  head="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+  dirty="$(git -C "$ROOT" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+  log "git $when head=$head dirty_entries=$dirty"
+}
+
 log "toolchain rustc=$(rustc --version)"
+log "toolchain cargo=$(cargo --version)"
 log "toolchain qemu=$(qemu-system-x86_64 --version | head -n 1)"
+git_report before
 
 selftest_harness
 
@@ -672,8 +811,27 @@ else
   if build_kernel kbd-script kbd-script; then
     expect_monitor kbd-script 8 "$OUT/kbd-script.elf" "R3ATH3_KBD_READY" "s e t spc n spc 1 ret p r i n t spc n ret r u n ret" "$OUT/task/kbd.expected" "$KBD_SCRIPT_STATUS"
   fi
+  if build_kernel heap heap; then
+    expect_case heap judge_heap 8
+  fi
+  if build_kernel heap-oom heap-oom; then
+    expect_case heap-oom judge_heap_oom 8
+  fi
+  if build_kernel heap-oom-panic heap-oom-panic; then
+    expect_case heap-oom-panic judge_heap_panic 8
+  fi
+  if build_kernel frames frames; then
+    expect_case frames judge_frames 8
+  fi
+  if build_kernel frames-oom frames-oom; then
+    expect_case frames-oom judge_frames_oom 20
+  fi
+  if build_kernel mem-badinfo mem-badinfo; then
+    expect_case mem-badinfo judge_mem_badinfo 8
+  fi
 fi
 
+git_report after
 if [[ "$FAILURES" -eq 0 ]]; then
   log "SMOKE PASS"
   exit 0

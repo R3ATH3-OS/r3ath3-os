@@ -1,15 +1,30 @@
 //! R3@TH3 OS boot milestone.
 //!
 //! Suggested wording, not a certification and not a claim that this image is that system: "An authentic Human–AI co-op OS".
-//! This binary boots, reports CPU exceptions on serial, and exits QEMU.
+//! This binary boots, reports CPU exceptions on serial, sets up a bump-allocated
+//! kernel heap and a physical frame allocator, and exits QEMU.
 //! No model, agent, or capability check runs in ring 0.
 
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 mod boot;
 mod exceptions;
+mod frames;
+mod heap;
 mod irq;
+mod mem;
+mod memmap;
+#[cfg(any(
+    feature = "heap",
+    feature = "heap-oom",
+    feature = "heap-oom-panic",
+    feature = "frames",
+    feature = "frames-oom"
+))]
+mod memtest;
 mod port;
 mod qemu_exit;
 #[cfg(any(feature = "script", feature = "kbd-script"))]
@@ -29,7 +44,13 @@ const _: () = {
         + cfg!(feature = "script") as u8
         + cfg!(feature = "kbd-script") as u8
         + cfg!(feature = "ticks") as u8
-        + cfg!(feature = "keys") as u8;
+        + cfg!(feature = "keys") as u8
+        + cfg!(feature = "heap") as u8
+        + cfg!(feature = "heap-oom") as u8
+        + cfg!(feature = "heap-oom-panic") as u8
+        + cfg!(feature = "frames") as u8
+        + cfg!(feature = "frames-oom") as u8
+        + cfg!(feature = "mem-badinfo") as u8;
     assert!(modes <= 1, "enable at most one test feature");
 };
 
@@ -41,6 +62,19 @@ pub extern "C" fn kernel_main() -> ! {
     serial::init();
     serial::write_str("R3ATH3_STAGE rust_main\n");
     exceptions::init();
+
+    #[cfg(feature = "mem-badinfo")]
+    memmap::corrupt_start_info_for_test();
+
+    if let Err(error) = mem::init() {
+        serial::write_str("R3ATH3_MEM_ERROR reason=");
+        serial::write_str(error.reason());
+        serial::write_str("\n");
+        qemu_exit::mem_error();
+    }
+
+    #[cfg(feature = "mem-badinfo")]
+    panic!("memory init accepted a zeroed start-info pointer");
 
     #[cfg(feature = "fault-panic")]
     panic!("injected boot fault");
@@ -72,6 +106,21 @@ pub extern "C" fn kernel_main() -> ! {
     #[cfg(feature = "keys")]
     irq::keys_demo();
 
+    #[cfg(feature = "heap")]
+    memtest::run_heap();
+
+    #[cfg(feature = "heap-oom")]
+    memtest::run_heap_oom();
+
+    #[cfg(feature = "heap-oom-panic")]
+    memtest::run_heap_oom_panic();
+
+    #[cfg(feature = "frames")]
+    memtest::run_frames();
+
+    #[cfg(feature = "frames-oom")]
+    memtest::run_frames_oom();
+
     #[cfg(not(any(
         feature = "fault-panic",
         feature = "fault-hang",
@@ -81,7 +130,13 @@ pub extern "C" fn kernel_main() -> ! {
         feature = "script",
         feature = "kbd-script",
         feature = "ticks",
-        feature = "keys"
+        feature = "keys",
+        feature = "heap",
+        feature = "heap-oom",
+        feature = "heap-oom-panic",
+        feature = "frames",
+        feature = "frames-oom",
+        feature = "mem-badinfo"
     )))]
     boot_ok();
 }
@@ -95,7 +150,13 @@ pub extern "C" fn kernel_main() -> ! {
     feature = "script",
     feature = "kbd-script",
     feature = "ticks",
-    feature = "keys"
+    feature = "keys",
+    feature = "heap",
+    feature = "heap-oom",
+    feature = "heap-oom-panic",
+    feature = "frames",
+    feature = "frames-oom",
+    feature = "mem-badinfo"
 )))]
 fn boot_ok() -> ! {
     serial::write_str(BOOT_MARKER);
