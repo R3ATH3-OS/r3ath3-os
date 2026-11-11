@@ -87,7 +87,7 @@ exit        leave the shell with the last status
 halt        stop the machine
 ```
 
-Startup, in order: serial-only `R3ATH3_SHELL_READY`, a VGA clear with no ANSI sequence, then `R3@TH3 shell. Type help for commands.` on both channels, then the prompt `r3> ` on both channels. `kernel_main` has already printed `R3ATH3_STAGE rust_main`.
+Startup, in order: serial-only `R3ATH3_SHELL_READY`, a VGA clear with no ANSI sequence, then `R3@TH3 shell. Type help for commands.` on both channels, then the prompt `r3> ` on both channels. `kernel_main` has already printed `R3ATH3_STAGE rust_main`. Keyboard init has already finished before this sequence: `exceptions::init` calls `irq::enable`, which unmasks IRQ1 and sets IF. The first `r3> ` is printed immediately before the shell reads the key ring. That prompt is the ready marker: keyboard input is live.
 
 ## 8. `run` and the task language
 
@@ -121,7 +121,7 @@ QEMU turns an `out` of `V` to port `0xF4` into status `(V << 1) | 1`.
 
 ## 12. Smoke cases
 
-`./scripts/smoke.sh` runs the previous 27 cases unchanged, then nine shell cases on `shell.elf`. The harness uses the same QEMU command line as the monitor cases (`-vga std`, serial file, monitor socket, `-m 64M`). Keys are `sendkey` 30 ms apart. After each input step except the last, it waits until the serial log contains one more `r3> ` than before, with a 5 second limit per step. A missed wait is status 124. The `xp` step reads the VGA buffer and does not produce a prompt, so it is not a prompt-wait step. Timeouts are 20 seconds for `shell-overflow` and `shell-screen`, and 12 seconds for the others.
+`./scripts/smoke.sh` runs the previous 27 cases unchanged, then nine shell cases on `shell.elf`. The harness uses the same QEMU command line as the monitor cases (`-vga std`, serial file, monitor socket, `-m 64M`). It deletes that case's serial log before starting QEMU. A log left by an earlier run does not count: QEMU truncates the file only after it has started, and a ready check that reads the old bytes injects keys while `init_keyboard` is still draining the controller. The harness injects no keys until this boot's log contains `R3ATH3_SHELL_READY` and the first `r3> ` prompt from section 7. Keys are `sendkey` 30 ms apart. After each input step except the last, it waits until the serial log contains one more `r3> ` than before, with a 5 second limit per step. A missed wait is status 124. The `xp` step reads the VGA buffer and does not produce a prompt, so it is not a prompt-wait step. Timeouts are 20 seconds for `shell-overflow` and `shell-screen`, and 12 seconds for the others.
 
 | Case | Status | What it checks |
 | --- | --- | --- |

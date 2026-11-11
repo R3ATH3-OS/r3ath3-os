@@ -795,11 +795,17 @@ expect_monitor() {
   local log_file="$OUT/$name.serial.log"
   local err_file="$OUT/$name.qemu.err"
   local sock="$OUT/$name.mon.sock"
-  rm -f "$sock"
+  rm -f "$sock" "$log_file"
   set +e
   timeout --foreground --kill-after=5s "$seconds" python3 - "$elf" "$log_file" "$err_file" "$seconds" "$ready" "$keys" "$sock" <<'PY'
 import os, select, socket, subprocess, sys, time
 elf, out_log, err_log, seconds, ready, keys, sock_path = sys.argv[1:]
+# A previous run's transcript must not satisfy the ready wait. QEMU truncates
+# the serial file only after it starts, and the first read can happen before that.
+try:
+    os.remove(out_log)
+except FileNotFoundError:
+    pass
 err_f = open(err_log, "wb")
 proc = subprocess.Popen(
     [
@@ -1142,12 +1148,18 @@ expect_shell() {
   local sock="$OUT/$name.mon.sock"
   local vga_file="$OUT/$name.vga"
   local elf="$OUT/shell.elf"
-  rm -f "$sock" "$vga_file"
+  rm -f "$sock" "$vga_file" "$log_file"
   set +e
   timeout --foreground --kill-after=5s "$seconds" python3 - \
     "$elf" "$log_file" "$err_file" "$seconds" "$steps" "$sock" "$vga_file" <<'PY'
 import os, re, signal, socket, subprocess, sys, time
 elf, out_log, err_log, seconds, steps_path, sock_path, vga_path = sys.argv[1:]
+# A previous run's transcript must not satisfy the ready wait. QEMU truncates
+# the serial file only after it starts, and the first read can happen before that.
+try:
+    os.remove(out_log)
+except FileNotFoundError:
+    pass
 err_f = open(err_log, "wb")
 proc = subprocess.Popen(
     [
