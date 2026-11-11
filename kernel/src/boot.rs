@@ -8,6 +8,11 @@
 //!
 //! `_start` builds a 1 GiB identity map with 2 MiB pages, enables long mode,
 //! and calls `kernel_main` on a 16 KiB stack. This stub leaves IF clear.
+//!
+//! QEMU's PVH entry passes the physical address of the `hvm_start_info`
+//! struct in `%ebx`. `_start` stores it, as its first action after `cli`, in
+//! the 4-byte `.bss.boot` symbol `pvh_start_info`. `memmap::init` reads and
+//! validates it. Nothing else in the stub uses or changes it.
 //! This stub's GDT has no TSS. `exceptions::init` loads the runtime GDT, TSS,
 //! and IDT, remaps the 8259 PIC, and runs `sti`, with only IRQ0 (timer) and
 //! IRQ1 (keyboard) unmasked. A fault before that init is a QEMU exit without
@@ -31,6 +36,7 @@ global_asm!(
     .global _start
     _start:
         cli
+        movl %ebx, pvh_start_info
         cld
         movw %ds, %ax
         movw %ax, %es
@@ -128,6 +134,10 @@ global_asm!(
     stack_bottom:
         .skip 16384
     stack_top:
+    .align 4
+    .global pvh_start_info
+    pvh_start_info:
+        .skip 4
     "#,
     options(att_syntax)
 );
