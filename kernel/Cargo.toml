@@ -30,7 +30,14 @@ heap-oom-panic = []
 frames = []
 frames-oom = []
 mem-badinfo = []
-shell = []
+# Internal. Not a test mode. Implied by `shell` and by every `sched-*` proof.
+sched = []
+sched-coop = ["sched"]
+sched-preempt = ["sched"]
+sched-sleep = ["sched"]
+sched-full = ["sched"]
+sched-exit = ["sched"]
+shell = ["sched"]
 
 [profile.dev]
 panic = "abort"

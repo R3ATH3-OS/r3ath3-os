@@ -1,0 +1,4 @@
+{
+  "name": "r3ath3-os",
+  "install": "sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y qemu-system-x86 python3 build-essential git curl ca-certificates && (command -v rustup >/dev/null 2>&1 || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none) && . \"$HOME/.cargo/env\" && rustup toolchain install 1.83.0 --profile minimal --target x86_64-unknown-none && rustup default 1.83.0 && rustc --version && qemu-system-x86_64 --version"
+}
