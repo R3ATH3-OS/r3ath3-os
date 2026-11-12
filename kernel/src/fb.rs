@@ -140,6 +140,7 @@ pub fn info() -> FbInfo {
 }
 
 /// Borrow the software buffer. `None` means a borrow is already in progress.
+#[must_use]
 pub fn with_bytes<R>(f: impl FnOnce(&mut [u8]) -> R) -> Option<R> {
     if BUSY.swap(true, Ordering::Acquire) {
         return None;
