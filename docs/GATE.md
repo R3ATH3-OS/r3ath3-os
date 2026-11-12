@@ -14,9 +14,9 @@ Honest limits, on purpose:
 
 - Agent names are self-asserted. The name in a request line is whatever the sender writes. Anyone who can write COM1 can claim any name. The gate still refuses a privileged action unless a human approves that exact request, and a name can ask only for what its badge allows.
 - Revocation does not stop a task an earlier approval already started. There is no `kill`, and revocation does not undo output.
-- Badges do not survive a reboot. There is no storage until milestone 10.
+- Badges do not survive a reboot, by design. Storage does not keep them. Trust is granted by the human in this boot.
 - There is no queue. One privileged request may wait. Another is `busy`.
-- The flight recorder (`docs/RECORDER.md`) appends every gate outcome in `report`. The record is RAM-only and is lost on reboot until milestone 10.
+- The flight recorder (`docs/RECORDER.md`) appends every gate outcome in `report`. Each entry is written through to the RAM disk (`docs/STORAGE.md`). A reboot erases both.
 - `next_rq` starts at 1 and uses wrapping addition. Wrapping is unreachable in a real session.
 
 ## 2. Scope
@@ -136,7 +136,7 @@ Order for each event: human lines, then `R3GATE data` lines for `read`, then the
 
 ## 6. Shell commands
 
-`help` is 19 lines. These five sit after `wait ID` and before `log`. The three recorder lines sit after `deny N` (`docs/RECORDER.md`, `docs/SHELL.md`):
+`help` is 24 lines. These five sit after `wait ID` and before `log`. The three recorder lines sit after `deny N`, and the five store lines sit after `selftest` (`docs/RECORDER.md`, `docs/STORAGE.md`, `docs/SHELL.md`):
 
 ```
 badges      list AI badges and the waiting request

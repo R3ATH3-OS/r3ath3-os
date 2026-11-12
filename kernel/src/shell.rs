@@ -7,7 +7,7 @@
 //! decides what an agent may do. Only `Decision::Run` and `Approved::Go` start
 //! an agent action. Every gate outcome and every finished human command is
 //! appended to the flight recorder, a module-private record in kernel memory.
-//! That record is RAM-only and is lost on reboot.
+//! Each entry is written through to a RAM disk. A reboot erases both.
 //!
 //! When the key ring is empty the shell calls `sched::yield_now`. With no
 //! other ready task that returns at once and the shell polls again, so a key
@@ -27,8 +27,10 @@ use crate::gate::{
 use crate::heap;
 use crate::irq::{self, Key};
 use crate::qemu_exit;
+use crate::ramdisk::RamDisk;
 use crate::recorder::{self, Recorder};
 use crate::sched::{self, SpawnError, WaitError};
+use crate::store::{self, Device};
 use crate::script::{self, ScriptError, Sink};
 use crate::selftest;
 use crate::serial;
@@ -38,12 +40,14 @@ const MAX_LINE: usize = 76;
 const PROMPT: &[u8] = b"r3> ";
 const GATE_TIMEOUT_TICKS: u64 = 6000;
 const LOG_CAP: usize = 128;
+const _: () = assert!(LOG_CAP <= 128);
 const AGENT_RESERVE: usize = 8;
 const FULL_NOTICE: &[u8] = b"log: flight recorder full; later entries are counted as lost\n";
 
 static LOG: IrqCell<Recorder<LOG_CAP>> = IrqCell::new(Recorder::new());
+static STORE: IrqCell<store::Mounted> = IrqCell::new(store::Mounted::UNMOUNTED);
 
-const HELP: [&str; 19] = [
+const HELP: [&str; 24] = [
     "help        list commands",
     "echo TEXT   print TEXT",
     "clear       clear the screen",
@@ -60,6 +64,11 @@ const HELP: [&str; 19] = [
     "log         newest flight-recorder entries and totals",
     "replay [N]  check the record and print it, or entry N",
     "selftest    run the feature checks and print a report card",
+    "store       storage device and what survives a reboot",
+    "boots [K]   list saved boot records, or print boot K",
+    "save N TEXT keep TEXT under name N",
+    "show [N]    list saved names, or the text saved as N",
+    "forget N    remove the text saved as N",
     "run SCRIPT  run a task script, lines separated by ;",
     "exit        leave the shell with the last status",
     "halt        stop the machine",
@@ -217,6 +226,12 @@ pub fn run() -> ! {
     vga::console_clear();
     let mut out = Out;
     out.both(b"R3@TH3 shell. Type help for commands.\n");
+    match store::mount(&mut RamDisk, Device::Ram) {
+        Ok(mounted) => STORE.with(|slot| *slot = mounted),
+        Err(error) => {
+            let _ = write!(out, "store: ram disk not usable ({})\n", error.word());
+        }
+    }
     out.both(PROMPT);
 
     let mut buf = [0u8; MAX_LINE];
@@ -375,6 +390,11 @@ fn dispatch(out: &mut Out, line: &[u8], last: &mut Last, gate: &mut Gate) {
         b"log" => log_cmd(out, rest, last),
         b"replay" => replay_cmd(out, rest, last),
         b"selftest" => selftest_cmd(out, rest, last),
+        b"store" => store_cmd(out, rest, last),
+        b"boots" => boots_cmd(out, rest, last),
+        b"save" => save_cmd(out, rest, last),
+        b"show" => show_cmd(out, rest, last),
+        b"forget" => forget_cmd(out, rest, last),
         b"run" => {
             let script = skip_spaces(rest);
             if script.is_empty() {
@@ -1290,18 +1310,28 @@ fn gate_event_body(
 /// A body that overflowed, or a tag or body `append` rejects, is counted lost.
 fn record(out: &mut Out, tag: &[u8], body: &[u8]) {
     let tick = irq::ticks();
-    let notice = LOG.with(|log| match log.append(tick, tag, body) {
-        Ok(n) => n as usize == log.capacity(),
-        Err(_) => false,
+    let outcome = LOG.with(|log| match log.append(tick, tag, body) {
+        Ok(n) => Ok((n, n as usize == log.capacity())),
+        Err(_) => Err(log.lost()),
     });
-    if notice {
-        out.both(FULL_NOTICE);
+    match outcome {
+        Ok((n, notice)) => {
+            persist_entry(out, n);
+            if notice {
+                out.both(FULL_NOTICE);
+            }
+        }
+        Err(lost) => persist_lost(out, lost),
     }
 }
 
 fn record_body(out: &mut Out, tag: &[u8], body: &recorder::Body) {
     if body.overflow() {
-        LOG.with(|log| log.note_lost());
+        let lost = LOG.with(|log| {
+            log.note_lost();
+            log.lost()
+        });
+        persist_lost(out, lost);
         return;
     }
     record(out, tag, body.as_bytes());
@@ -1379,7 +1409,11 @@ fn refuse_full(out: &mut Out, incoming: Incoming) {
         None,
         Some("log-full"),
     );
-    LOG.with(|log| log.note_lost());
+    let lost = LOG.with(|log| {
+        log.note_lost();
+        log.lost()
+    });
+    persist_lost(out, lost);
 }
 
 fn log_cmd(out: &mut Out, rest: &[u8], last: &mut Last) {
@@ -1487,8 +1521,16 @@ fn selftest_cmd(out: &mut Out, rest: &[u8], last: &mut Last) {
         return;
     }
     let heap_before = heap::used();
-    let live_ok = LOG.with(|log| log.verify()) == recorder::Verify::Ok;
-    let card = selftest::run(heap_before, live_ok);
+    let (live_ok, live_len, live_head) = LOG.with(|log| {
+        (
+            log.verify() == recorder::Verify::Ok,
+            log.len() as u32,
+            log.head(),
+        )
+    });
+    let mounted = STORE.with(|slot| *slot);
+    let store_ok = store::check_live(&mut RamDisk, &mounted, live_len, live_head);
+    let card = selftest::run(heap_before, live_ok, store_ok);
     selftest::write_card(out, &card);
     let ok = card.ok_count();
     let fail = card.fail_count();
@@ -1502,6 +1544,425 @@ fn selftest_body(ok: usize, fail: usize) -> [u8; 11] {
     body[3] = b'0' + ok as u8;
     body[10] = b'0' + fail as u8;
     body
+}
+
+fn persist_entry(out: &mut Out, n: u32) {
+    let mut mounted = STORE.with(|slot| *slot);
+    if !mounted.is_mounted() || mounted.this.is_none() || mounted.failed {
+        return;
+    }
+    let upto = mounted.saved_upto;
+    let failed = store::persist_entry(&mut RamDisk, &mut mounted, n, |i| LOG.with(|log| log.get(i))).is_err();
+    STORE.with(|slot| *slot = mounted);
+    if failed {
+        let _ = write!(
+            out,
+            "store: write failed after entry #{upto}; the rest of this boot is not saved\n"
+        );
+    }
+}
+
+fn persist_lost(out: &mut Out, lost: u32) {
+    let mut mounted = STORE.with(|slot| *slot);
+    if !mounted.is_mounted() || mounted.this.is_none() || mounted.failed {
+        return;
+    }
+    let upto = mounted.saved_upto;
+    let failed = store::persist_lost(&mut RamDisk, &mut mounted, lost).is_err();
+    STORE.with(|slot| *slot = mounted);
+    if failed {
+        let _ = write!(
+            out,
+            "store: write failed after entry #{upto}; the rest of this boot is not saved\n"
+        );
+    }
+}
+
+fn load_store() -> Option<store::Mounted> {
+    let mounted = STORE.with(|slot| *slot);
+    if mounted.is_mounted() {
+        Some(mounted)
+    } else {
+        None
+    }
+}
+
+fn read_failed(out: &mut Out, last: &mut Last) {
+    out.both(b"error: store read failed\n");
+    *last = Last::Cmd;
+}
+
+fn write_failed(out: &mut Out, last: &mut Last) {
+    out.both(b"error: store write failed\n");
+    *last = Last::Cmd;
+}
+
+fn store_cmd(out: &mut Out, rest: &[u8], last: &mut Last) {
+    if has_extra(rest) {
+        usage(out, b"store");
+        *last = Last::Cmd;
+        return;
+    }
+    let Some(mounted) = load_store() else {
+        read_failed(out, last);
+        return;
+    };
+    let census = match store::read_saved(&mut RamDisk) {
+        Ok(census) => census,
+        Err(_) => {
+            read_failed(out, last);
+            return;
+        }
+    };
+    let _ = write!(
+        out,
+        "store device={} blocks={} boots={} of {} saved={} of 16\n",
+        mounted.device.word(),
+        mounted.blocks,
+        mounted.used,
+        mounted.slots,
+        census.used
+    );
+    if mounted.failed {
+        let _ = write!(
+            out,
+            "store: write failed after entry #{}; the rest of this boot is not saved\n",
+            mounted.saved_upto
+        );
+    } else if let Some(k) = mounted.this {
+        match mounted.device {
+            Device::Ram => {
+                let _ = write!(
+                    out,
+                    "store: ram disk, erased by a reboot; this boot is boot {k}\n"
+                );
+            }
+            // This image never selects Nvme. The arm stays so the type is
+            // named, and it prints nothing: no sentence here claims a boot
+            // was saved.
+            Device::Nvme => {}
+        }
+    } else {
+        let _ = write!(
+            out,
+            "store: {} disk full ({} boots); this boot is not saved\n",
+            mounted.device.word(),
+            mounted.slots
+        );
+    }
+    *last = Last::Ok;
+}
+
+fn boots_cmd(out: &mut Out, rest: &[u8], last: &mut Last) {
+    let text = skip_spaces(rest);
+    if text.is_empty() {
+        boots_list(out, last);
+        return;
+    }
+    let mut end = 0usize;
+    while end < text.len() && text[end] != b' ' {
+        end += 1;
+    }
+    if !skip_spaces(&text[end..]).is_empty() {
+        usage(out, b"boots [K]");
+        *last = Last::Cmd;
+        return;
+    }
+    boots_one(out, &text[..end], last);
+}
+
+fn boots_list(out: &mut Out, last: &mut Last) {
+    let Some(mounted) = load_store() else {
+        read_failed(out, last);
+        return;
+    };
+    for k in 1..=mounted.slots {
+        let scan = match store::scan_boot(&mut RamDisk, &mounted, k) {
+            Ok(scan) => scan,
+            Err(_) => {
+                read_failed(out, last);
+                return;
+            }
+        };
+        if scan.free {
+            continue;
+        }
+        if !scan.header_ok {
+            let _ = write!(out, "boot {k} bad header\n");
+            continue;
+        }
+        let prev = match store::prev_word(&mut RamDisk, &mounted, k, &scan) {
+            Ok(word) => word,
+            Err(_) => {
+                read_failed(out, last);
+                return;
+            }
+        };
+        let _ = write!(out, "boot {k} entries={} lost={} head=", scan.entries, scan.lost);
+        write_hex16(out, scan.head);
+        match scan.broken_at {
+            None => {
+                let _ = write!(out, " chain=ok prev={prev}\n");
+            }
+            Some(at) => {
+                let _ = write!(out, " chain=#{at} prev={prev}\n");
+            }
+        }
+    }
+    if let Some(k) = mounted.this {
+        let _ = write!(
+            out,
+            "boots {} of {} used; this is boot {k}\n",
+            mounted.used, mounted.slots
+        );
+    } else {
+        let _ = write!(
+            out,
+            "boots {} of {} used; this boot is not saved\n",
+            mounted.used, mounted.slots
+        );
+    }
+    *last = Last::Ok;
+}
+
+fn boots_one(out: &mut Out, word: &[u8], last: &mut Last) {
+    let Some(mounted) = load_store() else {
+        read_failed(out, last);
+        return;
+    };
+    let Some(k) = parse_u32(word) else {
+        no_boot(out, word);
+        *last = Last::Cmd;
+        return;
+    };
+    if k == 0 || k > mounted.slots {
+        no_boot(out, word);
+        *last = Last::Cmd;
+        return;
+    }
+    let scan = store::walk_boot(&mut RamDisk, &mounted, k, &mut |entry| {
+        print_entry(out, entry);
+    });
+    let scan = match scan {
+        Ok(scan) => scan,
+        Err(_) => {
+            read_failed(out, last);
+            return;
+        }
+    };
+    if scan.free {
+        no_boot(out, word);
+        *last = Last::Cmd;
+        return;
+    }
+    if !scan.header_ok {
+        let _ = write!(out, "boot {k}: bad header\n");
+        *last = Last::Cmd;
+        return;
+    }
+    if let Some(at) = scan.broken_at {
+        let _ = write!(out, "boot {k}: chain broken at #{at}\n");
+        *last = Last::Cmd;
+        return;
+    }
+    let _ = write!(
+        out,
+        "boot {k} ok entries={} lost={} head=",
+        scan.entries, scan.lost
+    );
+    write_hex16(out, scan.head);
+    out.both(b"\n");
+    *last = Last::Ok;
+}
+
+fn no_boot(out: &mut Out, word: &[u8]) {
+    out.both(b"error: no boot ");
+    out.both(word);
+    out.both(b"\n");
+}
+
+fn save_cmd(out: &mut Out, rest: &[u8], last: &mut Last) {
+    let text = skip_spaces(rest);
+    if text.is_empty() {
+        usage(out, b"save NAME TEXT");
+        *last = Last::Cmd;
+        return;
+    }
+    let mut end = 0usize;
+    while end < text.len() && text[end] != b' ' {
+        end += 1;
+    }
+    let name = &text[..end];
+    let body = skip_spaces(&text[end..]);
+    if body.is_empty() {
+        usage(out, b"save NAME TEXT");
+        *last = Last::Cmd;
+        return;
+    }
+    if !valid_saved_name(name) {
+        out.both(b"error: bad saved name: ");
+        out.both(name);
+        out.both(b"\n");
+        *last = Last::Cmd;
+        return;
+    }
+    if body.len() > 58 {
+        out.both(b"error: saved text too long (max 58)\n");
+        *last = Last::Cmd;
+        return;
+    }
+    let Some(mounted) = load_store() else {
+        read_failed(out, last);
+        return;
+    };
+    match store::save_text(&mut RamDisk, name, body) {
+        Ok(()) => {
+            out.both(b"saved ");
+            out.both(name);
+            out.both(b" to ");
+            out.both(mounted.device.word().as_bytes());
+            out.both(b"\n");
+            *last = Last::Ok;
+        }
+        Err(store::TextError::Full) => {
+            out.both(b"error: saved data full (16 names)\n");
+            *last = Last::Cmd;
+        }
+        Err(store::TextError::Read) => read_failed(out, last),
+        Err(store::TextError::Write) => write_failed(out, last),
+        Err(store::TextError::Missing) => {
+            out.both(b"error: bad saved name: ");
+            out.both(name);
+            out.both(b"\n");
+            *last = Last::Cmd;
+        }
+    }
+}
+
+fn show_cmd(out: &mut Out, rest: &[u8], last: &mut Last) {
+    let text = skip_spaces(rest);
+    if text.is_empty() {
+        show_list(out, last);
+        return;
+    }
+    let mut end = 0usize;
+    while end < text.len() && text[end] != b' ' {
+        end += 1;
+    }
+    if !skip_spaces(&text[end..]).is_empty() {
+        usage(out, b"show [NAME]");
+        *last = Last::Cmd;
+        return;
+    }
+    show_one(out, &text[..end], last);
+}
+
+fn show_list(out: &mut Out, last: &mut Last) {
+    let Some(mounted) = load_store() else {
+        read_failed(out, last);
+        return;
+    };
+    let census = match store::read_saved(&mut RamDisk) {
+        Ok(census) => census,
+        Err(_) => {
+            read_failed(out, last);
+            return;
+        }
+    };
+    for (index, slot) in census.slots.iter().enumerate() {
+        match slot {
+            store::Slot::Used { name, name_len, .. } => {
+                out.both(b"saved ");
+                out.both(&name[..*name_len as usize]);
+                out.both(b"\n");
+            }
+            store::Slot::Bad => {
+                let n = index + 1;
+                let _ = write!(out, "saved slot {n} bad\n");
+            }
+            store::Slot::Empty => {}
+        }
+    }
+    let _ = write!(
+        out,
+        "saved {} of 16 on {}\n",
+        census.used,
+        mounted.device.word()
+    );
+    *last = Last::Ok;
+}
+
+fn show_one(out: &mut Out, name: &[u8], last: &mut Last) {
+    if load_store().is_none() {
+        read_failed(out, last);
+        return;
+    }
+    let census = match store::read_saved(&mut RamDisk) {
+        Ok(census) => census,
+        Err(_) => {
+            read_failed(out, last);
+            return;
+        }
+    };
+    for slot in &census.slots {
+        if let store::Slot::Used {
+            name: stored,
+            name_len,
+            text,
+            text_len,
+        } = slot
+        {
+            if &stored[..*name_len as usize] == name {
+                out.both(name);
+                out.both(b" = ");
+                out.both(&text[..*text_len as usize]);
+                out.both(b"\n");
+                *last = Last::Ok;
+                return;
+            }
+        }
+    }
+    out.both(b"error: no saved name ");
+    out.both(name);
+    out.both(b"\n");
+    *last = Last::Cmd;
+}
+
+fn forget_cmd(out: &mut Out, rest: &[u8], last: &mut Last) {
+    let Some(name) = single_word(rest) else {
+        usage(out, b"forget NAME");
+        *last = Last::Cmd;
+        return;
+    };
+    if load_store().is_none() {
+        read_failed(out, last);
+        return;
+    }
+    match store::forget_text(&mut RamDisk, name) {
+        Ok(()) => {
+            out.both(b"forgot ");
+            out.both(name);
+            out.both(b"\n");
+            *last = Last::Ok;
+        }
+        Err(store::TextError::Missing) => {
+            out.both(b"error: no saved name ");
+            out.both(name);
+            out.both(b"\n");
+            *last = Last::Cmd;
+        }
+        Err(store::TextError::Read) => read_failed(out, last),
+        Err(store::TextError::Write) => write_failed(out, last),
+        Err(store::TextError::Full) => write_failed(out, last),
+    }
+}
+
+fn valid_saved_name(name: &[u8]) -> bool {
+    !name.is_empty()
+        && name.len() <= 12
+        && name
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
 }
 
 fn print_entry(out: &mut Out, entry: &recorder::Entry) {

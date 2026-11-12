@@ -14,9 +14,9 @@
 # Scheduler: coop 0x70 → 225, preempt 0x71 → 227, sleep 0x72 → 229,
 # full 0x73 → 231, exit 0x74 → 233, reap 0x75 → 235.
 # Gate: core 0x78 → 241, expire 0x79 → 243.
-# Flight recorder: core 0x7A → 245. The shell's record is RAM-only and is lost
-# on reboot.
-# Unused odd statuses: 203–207, 219–223, 237–239, 247–255.
+# Flight recorder: core 0x7A → 245. Store: core 0x7B → 247. The shell writes
+# the live record through to a RAM disk. A reboot erases both.
+# Unused odd statuses: 203–207, 219–223, 237–239, 249, 251, 253, 255.
 # A triple-fault or silent reset does not print the fault line and does not
 # use those statuses (this QEMU build has exited 0 on triple fault).
 set -u
@@ -55,6 +55,7 @@ SCHED_REAP_STATUS=235
 GATE_CORE_STATUS=241
 GATE_EXPIRE_STATUS=243
 RECORDER_CORE_STATUS=245
+STORE_CORE_STATUS=247
 RAM_BYTES=67108864
 HEAP_BYTES=1048576
 HEAP_LINE='R3ATH3_HEAP ok size=1048576 used=([0-9]+) align_max=4096'
@@ -565,6 +566,263 @@ def fill_log(expected):
         index += 1
     return ("\n".join(out) + ("\n" if ends else "")).encode("ascii")
 
+EXP_BOOT_LIST = re.compile(r"^(boot [0-9]+ entries=([0-9]+) lost=[0-9]+ head=)H( chain=\S+ prev=\S+)$")
+EXP_BOOT_OK = re.compile(r"^(boot [0-9]+ ok entries=([0-9]+) lost=[0-9]+ head=)H$")
+BOOT_LIST = re.compile(
+    r"^boot ([0-9]+) entries=([0-9]+) lost=[0-9]+ head=([0-9a-f]{16}) "
+    r"chain=(?:ok|#[0-9]+) prev=(?:ok|bad|-)$"
+)
+BOOT_OK = re.compile(r"^boot ([0-9]+) ok entries=([0-9]+) lost=[0-9]+ head=([0-9a-f]{16})$")
+
+def mask_line(line):
+    line = re.sub(r"\bt=[0-9]+", "t=T", line)
+    line = re.sub(r"\blink=[0-9a-f]{16}", "link=L", line)
+    line = re.sub(r"\bhead=[0-9a-f]{16}", "head=H", line)
+    return line
+
+def mask_store_line(line):
+    # Same rule as judge_log: only header and summary lines. A body or a
+    # command line keeps t=, link=, and head= as written.
+    if (
+        LOG_HEADER.fullmatch(line)
+        or LOG_SUMMARY.fullmatch(line)
+        or REPLAY_SUMMARY.fullmatch(line)
+        or BOOT_LIST.fullmatch(line)
+        or BOOT_OK.fullmatch(line)
+    ):
+        return mask_line(line)
+    return line
+
+def parse_groups(lines):
+    groups = {}
+    current = None
+    index = 0
+    while index < len(lines):
+        command = re.fullmatch(r"r3> (.*)", lines[index])
+        if command:
+            cmd = command.group(1)
+            boot = re.fullmatch(r"boots ([0-9]+)", cmd)
+            if boot:
+                current = "s" + boot.group(1)
+            elif cmd == "log" or cmd == "replay" or cmd.startswith("replay "):
+                current = "live"
+            else:
+                current = None
+            index += 1
+            continue
+        header = LOG_HEADER.fullmatch(lines[index])
+        if header:
+            if current is None or index + 1 >= len(lines) or not lines[index + 1].startswith("  "):
+                return None
+            number = int(header.group(1))
+            record = (
+                int(header.group(2)),
+                header.group(3),
+                lines[index + 1][2:],
+                int(header.group(4), 16),
+            )
+            bucket = groups.setdefault(current, {})
+            if number in bucket and bucket[number] != record:
+                return None
+            bucket[number] = record
+            index += 2
+            continue
+        index += 1
+    return groups
+
+def check_chain(entries):
+    if not entries:
+        return True, {}
+    numbers = sorted(entries)
+    start, end = numbers[0], numbers[-1]
+    if numbers != list(range(start, end + 1)):
+        return False, {}
+    links = {}
+    prev = BASIS if start == 1 else None
+    for number in range(start, end + 1):
+        tick, tag, body, link = entries[number]
+        if number > start and tick < entries[number - 1][0]:
+            return False, {}
+        if prev is None:
+            links[number] = link
+            prev = link
+            continue
+        expect = fnv_link(prev, number, tick, tag.encode("ascii"), body.encode("ascii"))
+        if expect != link:
+            return False, {}
+        links[number] = expect
+        prev = expect
+    return True, links
+
+def judge_store(actual, expected, alias=None, ref=None):
+    if b"R3ATH3_PANIC" in actual or b"R3ATH3_BOOT_OK" in actual:
+        return False
+    try:
+        parsed = _ascii_lines(actual)
+        expected_text = expected.decode("ascii")
+    except UnicodeDecodeError:
+        return False
+    if parsed is None:
+        return False
+    lines, ends = parsed
+    rendered = "\n".join(mask_store_line(line) for line in lines) + ("\n" if ends else "")
+    if rendered != expected_text:
+        return False
+    groups = parse_groups(lines)
+    if groups is None:
+        return False
+    link_maps = {}
+    for name, entries in groups.items():
+        ok, links = check_chain(entries)
+        if not ok:
+            return False
+        link_maps[name] = links
+    for line in lines:
+        listed = BOOT_LIST.fullmatch(line)
+        if listed:
+            count = int(listed.group(2))
+            head = int(listed.group(3), 16)
+            group = link_maps.get("s" + listed.group(1), {})
+            if count == 0:
+                if head != BASIS:
+                    return False
+            elif count in group and head != group[count]:
+                return False
+            continue
+        ok_line = BOOT_OK.fullmatch(line)
+        if ok_line:
+            name = "s" + ok_line.group(1)
+            head = int(ok_line.group(3), 16)
+            entries = groups.get(name, {})
+            if not entries:
+                if head != BASIS:
+                    return False
+            elif head != link_maps[name][max(entries)]:
+                return False
+            continue
+        replay = REPLAY_SUMMARY.fullmatch(line)
+        if replay:
+            head = int(replay.group(2), 16)
+            entries = groups.get("live", {})
+            if not entries:
+                if head != BASIS:
+                    return False
+            elif head != link_maps["live"][max(entries)]:
+                return False
+            continue
+        summary = LOG_SUMMARY.fullmatch(line)
+        if summary:
+            count = int(summary.group(1))
+            head = int(summary.group(2), 16)
+            links = link_maps.get("live", {})
+            if count == 0:
+                if head != BASIS:
+                    return False
+            elif count in links and head != links[count]:
+                return False
+    if alias == "s1=live":
+        left = groups.get("s1", {})
+        right = groups.get("live", {})
+        for number in set(left) & set(right):
+            if left[number] != right[number]:
+                return False
+    if ref:
+        ref_parsed = _ascii_lines(ref)
+        if ref_parsed is None:
+            return False
+        ref_groups = parse_groups(ref_parsed[0])
+        if ref_groups is None:
+            return False
+        left = groups.get("s1", {})
+        right = ref_groups.get("live", {})
+        for number in set(left) & set(right):
+            if left[number] != right[number]:
+                return False
+    return True
+
+def fill_store(expected):
+    parsed = _ascii_lines(expected)
+    if parsed is None:
+        raise ValueError("expected store log is not ascii text")
+    lines, ends = parsed
+    info = {}
+    index = 0
+    while index < len(lines):
+        header = EXP_HEADER.fullmatch(lines[index])
+        if header:
+            number = int(header.group(1))
+            if index + 1 >= len(lines) or not lines[index + 1].startswith("  "):
+                raise ValueError("entry missing body")
+            body = lines[index + 1][2:]
+            pair = (header.group(2), body)
+            if number in info and info[number] != pair:
+                raise ValueError("inconsistent entry")
+            info[number] = pair
+            index += 2
+            continue
+        index += 1
+    max_n = max(info) if info else 0
+    prev = BASIS
+    chain = {}
+    ticks = {}
+    for number in range(1, max_n + 1):
+        tag, body = info[number]
+        ticks[number] = 10 * number
+        link = fnv_link(prev, number, ticks[number], tag.encode("ascii"), body.encode("ascii"))
+        chain[number] = link
+        prev = link
+
+    def head_for(count):
+        count = int(count)
+        return BASIS if count == 0 else chain[count]
+
+    out = []
+    index = 0
+    while index < len(lines):
+        header = EXP_HEADER.fullmatch(lines[index])
+        if header:
+            number = int(header.group(1))
+            out.append("#%d t=%d %s link=%016x" % (number, ticks[number], header.group(2), chain[number]))
+            out.append(lines[index + 1])
+            index += 2
+            continue
+        summary = EXP_LOG.fullmatch(lines[index]) or EXP_REPLAY.fullmatch(lines[index])
+        if summary:
+            out.append("%s%016x" % (summary.group(1), head_for(summary.group(2))))
+            index += 1
+            continue
+        boot_list = EXP_BOOT_LIST.fullmatch(lines[index])
+        if boot_list:
+            out.append("%s%016x%s" % (boot_list.group(1), head_for(boot_list.group(2)), boot_list.group(3)))
+            index += 1
+            continue
+        boot_ok = EXP_BOOT_OK.fullmatch(lines[index])
+        if boot_ok:
+            out.append("%s%016x" % (boot_ok.group(1), head_for(boot_ok.group(2))))
+            index += 1
+            continue
+        out.append(lines[index])
+        index += 1
+    return ("\n".join(out) + ("\n" if ends else "")).encode("ascii")
+
+def store_core_log():
+    return (
+        b"R3ATH3_STAGE rust_main\n"
+        b"R3ATH3_STORE_CORE step=1 blank formatted=yes blocks=512 slots=15 this=1\n"
+        b"R3ATH3_STORE_CORE step=2 persisted=6 boot1 entries=6 lost=1 head=68712f5597559a1a chain=ok\n"
+        b"R3ATH3_STORE_CORE step=3 remount formatted=no this=2 used=2 prev=ok\n"
+        b"R3ATH3_STORE_CORE step=4 saved=1 note=hello n2=gone\n"
+        b"R3ATH3_STORE_CORE step=5 tamper boot1 entries=2 head=4d9b4cc92b89320a broken=3 boot2 prev=bad restored=ok\n"
+        b"R3ATH3_STORE_CORE step=6 badcheck=superblock badversion=version restored=ok\n"
+        b"R3ATH3_STORE_CORE step=7 short=size small=small notblank=not-blank lba0=zero\n"
+        b"R3ATH3_STORE_CORE step=8 opened=15 sixteenth=none used=15\n"
+        b"R3ATH3_STORE_CORE step=9 writefail saved_upto=1 failed=yes writes_after=0\n"
+        b"R3ATH3_STORE_CORE step=10 encode=128 decode=1,10,human last=ok,help link=ebb95e48118d0282\n"
+        b"R3ATH3_STORE_CORE ok steps=10\n"
+    )
+
+def judge_store_core(text):
+    return text == store_core_log()
 def recorder_core_log():
     return (
         b"R3ATH3_STAGE rust_main\n"
@@ -577,7 +835,7 @@ def recorder_core_log():
         b"R3ATH3_RECORDER_CORE step=7 tamper=3 verify=broken at=3 upto2=ok\n"
         b"R3ATH3_RECORDER_CORE step=8 get0=none get7=none get1=10,human last=ok,help\n"
         b"R3ATH3_RECORDER_CORE step=9 card=selftest frames   FAIL no free frame\n"
-        b"R3ATH3_RECORDER_CORE step=10 card=selftest: 6 of 7 ok, 1 failed\n"
+        b"R3ATH3_RECORDER_CORE step=10 card=selftest: 7 of 8 ok, 1 failed\n"
         b"R3ATH3_RECORDER_CORE step=11 expired=ai1 halt seq=1 rq=4 denied reason=timeout|failed=ai1 spawn-spin seq=7 rq=5 failed reason=full\n"
         b"R3ATH3_RECORDER_CORE ok steps=11\n"
     )
@@ -653,6 +911,40 @@ judge_recorder_core() {
   local status="$1" file="$2"
   [[ "$status" -eq "$RECORDER_CORE_STATUS" ]] || return 1
   load_harness_py judge_recorder_core "$file"
+}
+
+judge_store_core() {
+  local status="$1" file="$2"
+  [[ "$status" -eq "$STORE_CORE_STATUS" ]] || return 1
+  load_harness_py judge_store_core "$file"
+}
+
+# Status must equal want. alias is "s1=live" or empty. ref is a log path or empty.
+judge_shell_store() {
+  local status="$1" file="$2" expected="$3" want="$4" alias="$5" ref="$6"
+  [[ "$status" -eq "$want" ]] || return 1
+  if grep -F -q "R3ATH3_PANIC" "$file"; then
+    return 1
+  fi
+  if grep -F -q "$MARKER" "$file"; then
+    return 1
+  fi
+  python3 - "$OUT/harness_py.py" "$file" "$expected" "$alias" "$ref" <<'PY'
+import importlib.util, sys
+path, actual, expected, alias, ref = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("harness_py", path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+alias = None if alias == "" else alias
+ref_bytes = None if ref == "" else open(ref, "rb").read()
+ok = mod.judge_store(
+    open(actual, "rb").read(),
+    open(expected, "rb").read(),
+    alias,
+    ref_bytes,
+)
+sys.exit(0 if ok else 1)
+PY
 }
 
 # Status must equal want. Masks t=, link=, and head= on header and summary
@@ -1110,6 +1402,30 @@ PY
   if judge_recorder_core "$RECORDER_CORE_STATUS" "$dir/recorder-core-swap.log"; then ok=1; fi
   if judge_recorder_core "$RECORDER_CORE_STATUS" "$dir/recorder-core-digit.log"; then ok=1; fi
 
+  python3 - "$OUT/harness_py.py" "$dir" <<'PY'
+import importlib.util, sys
+path, out = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("harness_py", path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+good = mod.store_core_log()
+open(out + "/store-core.log", "wb").write(good)
+lines = good.splitlines(True)
+open(out + "/store-core-short.log", "wb").write(b"".join(lines[:4] + lines[5:]))
+swapped = lines[:]
+swapped[4], swapped[5] = swapped[5], swapped[4]
+open(out + "/store-core-swap.log", "wb").write(b"".join(swapped))
+digit = bytearray(good)
+spot = digit.find(b"head=68712f5597559a1a")
+digit[spot + len(b"head=")] = ord("0") if digit[spot + len(b"head=")] != ord("0") else ord("1")
+open(out + "/store-core-digit.log", "wb").write(digit)
+PY
+  judge_store_core "$STORE_CORE_STATUS" "$dir/store-core.log" || ok=1
+  if judge_store_core "$RECORDER_CORE_STATUS" "$dir/store-core.log"; then ok=1; fi
+  if judge_store_core "$STORE_CORE_STATUS" "$dir/store-core-short.log"; then ok=1; fi
+  if judge_store_core "$STORE_CORE_STATUS" "$dir/store-core-swap.log"; then ok=1; fi
+  if judge_store_core "$STORE_CORE_STATUS" "$dir/store-core-digit.log"; then ok=1; fi
+
   if ! write_shell_cases; then
     ok=1
   else
@@ -1213,6 +1529,104 @@ PY
     if judge_shell_log "$SHELL_CMD_STATUS" "$OUT/task/log-record.filled" "$OUT/task/log-record.expected" "$SHELL_OK_STATUS"; then
       ok=1
     fi
+    if ! python3 - "$OUT/harness_py.py" "$OUT" <<'PY'
+import importlib.util, re, sys
+path, out = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("harness_py", path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+expected = open(out + "/task/store-ram.expected", "rb").read()
+filled = mod.fill_store(expected)
+open(out + "/task/store-ram.filled", "wb").write(filled)
+if not mod.judge_store(filled, expected, "s1=live"):
+    sys.exit(1)
+text = filled.decode("ascii")
+pos = text.index("r3> boots 1\n")
+rel = text.index("link=", pos)
+digit = text[rel + 5]
+flipped = text[: rel + 5] + ("0" if digit != "0" else "1") + text[rel + 6 :]
+if mod.judge_store(flipped.encode("ascii"), expected, "s1=live"):
+    sys.exit(1)
+rpos = text.index("r3> replay\n")
+bpos = text.index("\n  store\n", rpos)
+changed = text[: bpos + 3] + "S" + text[bpos + 4 :]
+if mod.judge_store(changed.encode("ascii"), expected, "s1=live"):
+    sys.exit(1)
+lines = text.splitlines()
+start = lines.index("r3> boots 1") + 1
+end = next(i for i, line in enumerate(lines) if line.startswith("boot 1 ok "))
+chunk = []
+index = start
+while index < end:
+    header = re.fullmatch(r"#([0-9]+) t=[0-9]+ (.+) link=[0-9a-f]{16}", lines[index])
+    chunk.append((int(header.group(1)), header.group(2), lines[index + 1][2:]))
+    index += 2
+prev = mod.BASIS
+new = []
+links = {}
+for number, tag, body in chunk:
+    tick = 1000 * number
+    link = mod.fnv_link(prev, number, tick, tag.encode("ascii"), body.encode("ascii"))
+    links[number] = link
+    new.append("#%d t=%d %s link=%016x" % (number, tick, tag, link))
+    new.append("  " + body)
+    prev = link
+rewritten = lines[:]
+listed = re.sub(r"head=[0-9a-f]{16}", "head=%016x" % links[10], lines[lines.index("r3> boots") + 1])
+rewritten[lines.index("r3> boots") + 1] = listed
+rewritten[start:end] = new
+rewritten[end] = re.sub(r"head=[0-9a-f]{16}", "head=%016x" % links[11], lines[end])
+rewritten_b = ("\n".join(rewritten) + "\n").encode("ascii")
+if not mod.judge_store(rewritten_b, expected, None):
+    sys.exit(1)
+if mod.judge_store(rewritten_b, expected, "s1=live"):
+    sys.exit(1)
+ninth = re.search(r"#9 t=\d+ human last=ok link=([0-9a-f]{16})", text).group(1)
+current = re.search(r"boot 1 entries=10 lost=0 head=([0-9a-f]{16})", text).group(1)
+replaced = text.replace("head=" + current, "head=" + ninth, 1)
+if mod.judge_store(replaced.encode("ascii"), expected, "s1=live"):
+    sys.exit(1)
+raw = filled.splitlines(True)
+gap = []
+skip = False
+armed = False
+for line in raw:
+    if line.startswith(b"r3> boots 1"):
+        armed = True
+    if armed and not skip and line.startswith(b"#5 t="):
+        skip = True
+        continue
+    if skip:
+        skip = False
+        armed = False
+        continue
+    gap.append(line)
+if mod.judge_store(b"".join(gap), expected, "s1=live"):
+    sys.exit(1)
+record = open(out + "/task/log-record.expected", "rb").read()
+if mod.judge_log(filled, record):
+    sys.exit(1)
+if mod.judge_store(filled, record, "s1=live"):
+    sys.exit(1)
+# A command line is not a summary. Masking head= there would hide a mismatch.
+loose_actual = filled.replace(
+    b"saved note to ram\n", b"saved note to ram head=0123456789abcdef\n", 1
+)
+loose_expected = expected.replace(b"saved note to ram\n", b"saved note to ram head=H\n", 1)
+if mod.judge_store(loose_actual, loose_expected, "s1=live"):
+    sys.exit(1)
+PY
+    then
+      ok=1
+    fi
+    judge_shell_store "$SHELL_OK_STATUS" "$OUT/task/store-ram.filled" "$OUT/task/store-ram.expected" "$SHELL_OK_STATUS" "s1=live" "" || ok=1
+    if judge_shell_store "$SHELL_CMD_STATUS" "$OUT/task/store-ram.filled" "$OUT/task/store-ram.expected" "$SHELL_OK_STATUS" "s1=live" ""; then
+      ok=1
+    fi
+    if judge_exact "$SHELL_CMD_STATUS" "$OUT/task/store-usage.expected" "$SHELL_CMD_STATUS" "$OUT/task/log-usage.expected"; then ok=1; fi
+    if judge_exact "$SHELL_CMD_STATUS" "$OUT/task/log-usage.expected" "$SHELL_CMD_STATUS" "$OUT/task/store-usage.expected"; then ok=1; fi
+    if judge_exact "$SHELL_CMD_STATUS" "$OUT/task/store-usage.expected" "$SHELL_CMD_STATUS" "$OUT/task/shell-usage.expected"; then ok=1; fi
+    if judge_exact "$SHELL_CMD_STATUS" "$OUT/task/shell-usage.expected" "$SHELL_CMD_STATUS" "$OUT/task/store-usage.expected"; then ok=1; fi
   fi
 
   if [[ "$ok" -eq 0 ]]; then
@@ -1676,6 +2090,11 @@ help_text = (
     "log         newest flight-recorder entries and totals\n"
     "replay [N]  check the record and print it, or entry N\n"
     "selftest    run the feature checks and print a report card\n"
+    "store       storage device and what survives a reboot\n"
+    "boots [K]   list saved boot records, or print boot K\n"
+    "save N TEXT keep TEXT under name N\n"
+    "show [N]    list saved names, or the text saved as N\n"
+    "forget N    remove the text saved as N\n"
     "run SCRIPT  run a task script, lines separated by ;\n"
     "exit        leave the shell with the last status\n"
     "halt        stop the machine\n"
@@ -2406,8 +2825,8 @@ write_bytes(
     prefix + "".join(typed(text, output) for text, output in usage_log) + "exit\n" + exit_cmd,
 )
 
-card_names = ["timer", "sched", "frames", "script", "gate", "recorder", "heap"]
-card = "selftest: 7 checks\n" + "".join("selftest %s ok\n" % name.ljust(8) for name in card_names) + "selftest: 7 of 7 ok"
+card_names = ["timer", "sched", "frames", "script", "gate", "recorder", "store", "heap"]
+card = "selftest: 8 checks\n" + "".join("selftest %s ok\n" % name.ljust(8) for name in card_names) + "selftest: 8 of 8 ok"
 write_text(
     "shell-selftest.steps",
     "line grant ai1 read\nline selftest\nline badges\nline ps\nline exit\n",
@@ -2424,6 +2843,106 @@ write_bytes(
     + typed("ps", ps_two[:-1])
     + "exit\n"
     + exit_ok,
+)
+store_records = [
+    (1, "human last=ok", "store"),
+    (2, "human last=ok", "save note hello there"),
+    (3, "human last=ok", "show"),
+    (4, "human last=ok", "show note"),
+    (5, "gate", "grant ai1 say"),
+    (6, "human last=ok", "grant ai1 say"),
+    (7, "agent ai1", "say seq=1 done text=hi"),
+    (8, "agent ai1", "- seq=2 bad reason=verb"),
+    (9, "human last=ok", "forget note"),
+    (10, "human last=ok", "show"),
+    (11, "human last=ok", "boots"),
+    (12, "human last=ok", "boots 1"),
+]
+
+def store_entries(nums):
+    return "".join(
+        "#%d t=T %s link=L\n  %s\n" % (n, store_records[n - 1][1], store_records[n - 1][2])
+        for n in nums
+    )
+
+write_text(
+    "store-ram.steps",
+    "line store\n"
+    "line save note hello there\n"
+    "line show\n"
+    "line show note\n"
+    "line grant ai1 say\n"
+    "ai R3GATE ASK ai1 1 say hi\n"
+    "ai R3GATE ASK ai1 2 save x y\n"
+    "line forget note\n"
+    "line show\n"
+    "line boots\n"
+    "line boots 1\n"
+    "line replay\n"
+    "line exit\n",
+)
+write_bytes(
+    "store-ram.expected",
+    prefix
+    + typed(
+        "store",
+        "store device=ram blocks=512 boots=1 of 15 saved=0 of 16\n"
+        "store: ram disk, erased by a reboot; this boot is boot 1",
+    )
+    + typed("save note hello there", "saved note to ram")
+    + typed("show", "saved note\nsaved 1 of 16 on ram")
+    + typed("show note", "note = hello there")
+    + typed("grant ai1 say", "granted ai1 say")
+    + "\n"
+    + "ai1 says: hi\n"
+    + "R3GATE reply agent=ai1 seq=1 verb=say result=done\n"
+    + p
+    + bad_line("verb", "ai1", "2", "-")
+    + typed("forget note", "forgot note")
+    + typed("show", "saved 0 of 16 on ram")
+    + "boots\n"
+    + "boot 1 entries=10 lost=0 head=H chain=ok prev=-\n"
+    + "boots 1 of 15 used; this is boot 1\n"
+    + p
+    + "boots 1\n"
+    + store_entries(range(1, 12))
+    + "boot 1 ok entries=11 lost=0 head=H\n"
+    + p
+    + "replay\n"
+    + store_entries(range(1, 13))
+    + "replay ok entries=12 lost=0 head=H\n"
+    + p
+    + "exit\n"
+    + exit_ok,
+)
+
+long_text = "x" * 69
+if len("save a " + long_text) != 76:
+    raise SystemExit("store-usage line length")
+usage_store = [
+    ("store x", "error: usage: store"),
+    ("boots 1 2", "error: usage: boots [K]"),
+    ("boots x", "error: no boot x"),
+    ("boots 0", "error: no boot 0"),
+    ("boots 2", "error: no boot 2"),
+    ("save", "error: usage: save NAME TEXT"),
+    ("save a", "error: usage: save NAME TEXT"),
+    ("save A hi", "error: bad saved name: A"),
+    ("save abcdefghijklm hi", "error: bad saved name: abcdefghijklm"),
+    ("save a " + long_text, "error: saved text too long (max 58)"),
+    ("show x y", "error: usage: show [NAME]"),
+    ("show zz", "error: no saved name zz"),
+    ("forget", "error: usage: forget NAME"),
+    ("forget zz", "error: no saved name zz"),
+]
+for n in range(1, 17):
+    usage_store.append(("save k%d v" % n, "saved k%d to ram" % n))
+usage_store.append(("save k1 w", "saved k1 to ram"))
+usage_store.append(("save k17 v", "error: saved data full (16 names)"))
+write_text("store-usage.steps", "".join("line " + cmd + "\n" for cmd, _ in usage_store) + "line exit\n")
+write_bytes(
+    "store-usage.expected",
+    prefix + "".join(typed(cmd, output) for cmd, output in usage_store) + "exit\n" + exit_cmd,
 )
 PY
 }
@@ -2987,6 +3506,16 @@ PY
         passed=1
       fi
       ;;
+    store)
+      if judge_shell_store "$status" "$log_file" "$expected" "$want" "" ""; then
+        passed=1
+      fi
+      ;;
+    store:s1)
+      if judge_shell_store "$status" "$log_file" "$expected" "$want" "s1=live" ""; then
+        passed=1
+      fi
+      ;;
     *)
       log "[FAIL] $name unknown judge $kind"
       FAILURES=$((FAILURES + 1))
@@ -3134,6 +3663,9 @@ else
   if build_kernel recorder-core recorder-core; then
     expect_case recorder-core judge_recorder_core 12
   fi
+  if build_kernel store-core store-core; then
+    expect_case store-core judge_store_core 12
+  fi
   if build_kernel shell shell; then
     if write_shell_cases; then
       expect_shell shell-basic 12 "$OUT/task/shell-basic.steps" "$OUT/task/shell-basic.expected" "$SHELL_OK_STATUS" exact
@@ -3161,6 +3693,8 @@ else
       expect_shell log-usage 12 "$OUT/task/log-usage.steps" "$OUT/task/log-usage.expected" "$SHELL_CMD_STATUS" exact
       expect_shell shell-selftest 12 "$OUT/task/shell-selftest.steps" "$OUT/task/shell-selftest.expected" "$SHELL_OK_STATUS" exact
       expect_shell shell-sched-args 12 "$OUT/task/shell-sched-args.steps" "$OUT/task/shell-sched-args.expected" "$SHELL_CMD_STATUS" exact
+      expect_gate store-ram 20 "$OUT/task/store-ram.steps" "$OUT/task/store-ram.expected" "$SHELL_OK_STATUS" store:s1
+      expect_shell store-usage 40 "$OUT/task/store-usage.steps" "$OUT/task/store-usage.expected" "$SHELL_CMD_STATUS" exact
     else
       log "[FAIL] write shell cases"
       FAILURES=$((FAILURES + 1))

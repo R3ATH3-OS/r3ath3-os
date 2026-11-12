@@ -1,9 +1,9 @@
 //! On-machine checks and the report card. See `docs/RECORDER.md`.
 //!
 //! Safe code only. No statics and no allocation. This module never sees the
-//! live flight recorder or the live gate. The shell passes `live_ok`. The
-//! seven checks run only in the shell build. `recorder-core` uses the card
-//! formatters. A normal check never panics.
+//! live flight recorder or the live gate. The shell passes `live_ok` and the
+//! store result. The eight checks run only in the shell build. `recorder-core`
+//! uses the card formatters. A normal check never panics.
 #![allow(dead_code)]
 
 use core::fmt::Write;
@@ -23,9 +23,9 @@ use crate::sched::{self, State};
 #[cfg(feature = "shell")]
 use crate::script::{self, Sink};
 
-pub const CHECKS: usize = 7;
+pub const CHECKS: usize = 8;
 pub const NAMES: [&str; CHECKS] = [
-    "timer", "sched", "frames", "script", "gate", "recorder", "heap",
+    "timer", "sched", "frames", "script", "gate", "recorder", "store", "heap",
 ];
 
 #[cfg(feature = "shell")]
@@ -82,7 +82,7 @@ pub fn write_card(out: &mut impl Write, card: &Card) {
 }
 
 #[cfg(feature = "shell")]
-pub fn run(heap_before: usize, live_ok: bool) -> Card {
+pub fn run(heap_before: usize, live_ok: bool, store: Result<(), &'static str>) -> Card {
     let timer = check_timer();
     let sched = check_sched(timer.is_ok());
     let frames = check_frames();
@@ -91,7 +91,7 @@ pub fn run(heap_before: usize, live_ok: bool) -> Card {
     let recorder = check_recorder(live_ok);
     let heap = check_heap(heap_before);
     Card {
-        results: [timer, sched, frames, script, gate, recorder, heap],
+        results: [timer, sched, frames, script, gate, recorder, store, heap],
     }
 }
 
