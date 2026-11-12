@@ -56,6 +56,10 @@ nvme-core = ["nvme"]
 wasm = []
 wasm-core = ["wasm"]
 wasm-glue = ["wasm"]
+# Internal. Not a test mode, and not part of the "at most one" assert.
+# Smoke turns it on for the shell image after `scripts/build-apps.sh`.
+# `include_bytes!` of `glue_duty.wasm` is behind this feature and `wasm-glue`.
+glue-baked = []
 shell = ["sched", "gate", "recorder", "store", "nvme", "wasm"]
 
 [profile.dev]

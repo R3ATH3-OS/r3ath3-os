@@ -389,6 +389,15 @@ impl<'a> Exec<'a> {
         if base + locals > VALUE_CAP {
             return Err(Trap::Stack);
         }
+        // Parameters are the caller's values. Every other local is cleared
+        // here, and each of those clears costs one fuel unit, charged before
+        // the loop. A long local list cannot be wiped for a single unit.
+        let extra = (locals as u32).saturating_sub(params as u32);
+        if self.fuel < extra {
+            self.fuel = 0;
+            return Err(Trap::Fuel);
+        }
+        self.fuel -= extra;
         for slot in &mut self.arena.values[base + params..base + locals] {
             *slot = 0;
         }

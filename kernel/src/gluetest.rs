@@ -53,7 +53,7 @@ pub fn run() -> ! {
                 Ok(frame) => frame,
                 Err(trap) => fail(n, trap.word()),
             };
-            let (summary, summary_len) = match summary_text(&mut inst) {
+            let (summary, summary_len) = match crate::apps::read_summary(&mut inst) {
                 Ok(text) => text,
                 Err(trap) => fail(n, trap.word()),
             };
@@ -62,7 +62,11 @@ pub fn run() -> ! {
                     serial::Writer,
                     "R3ATH3_WASM_GLUE step={n} state={state} frame={frame:016x} "
                 );
-                serial::write_bytes(&summary[..summary_len]);
+                let mut filtered = [0u8; 60];
+                for i in 0..summary_len {
+                    filtered[i] = crate::apps::printable(summary[i]);
+                }
+                serial::write_bytes(&filtered[..summary_len]);
                 serial::write_str("\n");
                 prev = state;
             }
@@ -82,47 +86,10 @@ fn grid_fnv(inst: &mut wasm::Instance<'_, '_>) -> Result<u64, Trap> {
         Err(trap) => return Err(trap),
     };
     let memory = inst.memory();
-    let Some(start) = offset_of(offset, memory.len(), 2000) else {
+    let Some(start) = crate::apps::offset_of(offset, memory.len(), 2000) else {
         return Err(Trap::Memory);
     };
     Ok(fnv64(&memory[start..start + 2000]))
-}
-
-fn summary_text(inst: &mut wasm::Instance<'_, '_>) -> Result<([u8; 60], usize), Trap> {
-    let offset = match inst.call("r3_summary", &[]) {
-        Ok(Some(value)) => value,
-        Ok(None) => return Err(Trap::Memory),
-        Err(trap) => return Err(trap),
-    };
-    let memory = inst.memory();
-    let Some(start) = offset_of(offset, memory.len(), 1) else {
-        return Err(Trap::Memory);
-    };
-    let len = memory[start] as usize;
-    if len > 60 {
-        return Err(Trap::Memory);
-    }
-    let mut text = [0u8; 60];
-    if len == 0 {
-        return Ok((text, 0));
-    }
-    let Some(body) = offset_of(offset + 1, memory.len(), len) else {
-        return Err(Trap::Memory);
-    };
-    text[..len].copy_from_slice(&memory[body..body + len]);
-    Ok((text, len))
-}
-
-fn offset_of(offset: i64, len: usize, span: usize) -> Option<usize> {
-    if offset < 0 {
-        return None;
-    }
-    let start = offset as usize;
-    if start.checked_add(span).map(|end| end <= len) != Some(true) {
-        None
-    } else {
-        Some(start)
-    }
 }
 
 fn fnv64(data: &[u8]) -> u64 {
@@ -133,30 +100,34 @@ fn fnv64(data: &[u8]) -> u64 {
     hash
 }
 
-/// Keys applied before step `n`. Keep this in step with `replay.rs`.
+/// One packed key code per step. The same file drives `replay.rs`.
+const PROOF_KEYS: &[u8] = include_bytes!("../../apps/glue-duty/proof-keys.bin");
+
+/// Keys applied before step `n`. Codes: 0 none, 1 space, 2 a, 3 d,
+/// 4 w+a, 5 w+d, 6 s+a, 7 s+d, 8 w, 9 s.
 fn proof_keys(n: u32, out: &mut [u8; 4]) -> usize {
-    let mut len = 0;
-    if n == 1 || n == 1001 {
-        out[len] = b' ';
-        len += 1;
+    if PROOF_KEYS.len() != STEPS as usize || n == 0 || n as usize > PROOF_KEYS.len() {
+        fail(n, "keys");
     }
-    if (2..=740).contains(&n) || (1002..=1400).contains(&n) {
-        if n % 60 == 0 {
-            out[len] = if (n / 60) % 2 == 0 { b'w' } else { b's' };
-            len += 1;
-        }
-        if n % 150 == 75 {
-            out[len] = b' ';
-            len += 1;
-        }
-        if n == 300 || n == 310 {
-            out[len] = b'p';
-            len += 1;
-        }
-        out[len] = if n % 2 == 0 { b'a' } else { b'd' };
-        len += 1;
+    let keys: &[u8] = match PROOF_KEYS[(n - 1) as usize] {
+        0 => b"",
+        1 => b" ",
+        2 => b"a",
+        3 => b"d",
+        4 => b"wa",
+        5 => b"wd",
+        6 => b"sa",
+        7 => b"sd",
+        8 => b"w",
+        9 => b"s",
+        _ => fail(n, "keys"),
+    };
+    let mut i = 0;
+    while i < keys.len() {
+        out[i] = keys[i];
+        i += 1;
     }
-    len
+    keys.len()
 }
 
 fn fail(step: u32, detail: &str) -> ! {

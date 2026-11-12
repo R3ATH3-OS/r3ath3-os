@@ -439,3 +439,100 @@ pub fn fnv64(data: &[u8]) -> u64 {
     }
     hash
 }
+
+#[cfg(test)]
+mod proof_table {
+    use super::*;
+
+    /// The committed key table must stay the policy in `docs/WASM.md`.
+    #[test]
+    fn matches_policy() {
+        let file = include_bytes!("../proof-keys.bin");
+        assert_eq!(file.len(), 2000);
+        let mut game = Game::fresh();
+        game.init(1);
+        let mut saw_done = None;
+        let mut saw_next = None;
+        for n in 1u32..=2000 {
+            let code = policy_code(n, &game);
+            assert_eq!(file[(n - 1) as usize], code, "step {n}");
+            apply(code, &mut game);
+            let state = game.step();
+            if state == SHIFT_DONE && saw_done.is_none() {
+                saw_done = Some(n);
+            }
+            if matches!(saw_done, Some(at) if n > at) && state == PLAYING && saw_next.is_none()
+            {
+                saw_next = Some((n, game.shift));
+            }
+        }
+        assert_eq!(saw_done, Some(750));
+        assert_eq!(saw_next, Some((751, 2)));
+    }
+
+    fn apply(code: u8, game: &mut Game) {
+        let keys: &[u8] = match code {
+            0 => &[],
+            1 => &[b' '],
+            2 => &[b'a'],
+            3 => &[b'd'],
+            4 => &[b'w', b'a'],
+            5 => &[b'w', b'd'],
+            6 => &[b's', b'a'],
+            7 => &[b's', b'd'],
+            8 => &[b'w'],
+            9 => &[b's'],
+            _ => panic!("code {code}"),
+        };
+        for &key in keys {
+            game.key(key);
+        }
+    }
+
+    fn policy_code(n: u32, game: &Game) -> u8 {
+        if n == 1 || game.state == SHIFT_DONE {
+            return 1;
+        }
+        if game.state != PLAYING {
+            return 0;
+        }
+        let mut best: Option<(i32, u8)> = None;
+        let mut i = 0;
+        while i < game.blob_count as usize {
+            let blob = game.blobs[i];
+            let urgency = 72 * 16 - blob.x16;
+            if urgency > 0 {
+                let take = match best {
+                    Some((prev, _)) => urgency < prev,
+                    None => true,
+                };
+                if take {
+                    best = Some((urgency, blob.lane));
+                }
+            }
+            i += 1;
+        }
+        let mut keys = [0u8; 2];
+        let mut len = 0;
+        if let Some((_, lane)) = best {
+            if lane < game.lane {
+                keys[len] = b'w';
+                len += 1;
+            } else if lane > game.lane {
+                keys[len] = b's';
+                len += 1;
+            }
+        }
+        keys[len] = if n % 2 == 0 { b'a' } else { b'd' };
+        len += 1;
+        match &keys[..len] {
+            [b'a'] => 2,
+            [b'd'] => 3,
+            [b'w', b'a'] => 4,
+            [b'w', b'd'] => 5,
+            [b's', b'a'] => 6,
+            [b's', b'd'] => 7,
+            other => panic!("unpacked {other:?}"),
+        }
+    }
+}

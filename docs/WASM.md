@@ -128,7 +128,7 @@ pub fn with_instance<R>(
 
 `with_instance` returns `None` when the arena is already taken. That does not happen in this milestone: one shell, one app. A load failure is `Some(Err(_))`. The module slice lives as long as the call. Baked apps are `'static`. The flip test in `wasm-core` passes a stack copy. `call_metered` returns that result and the fuel used (`budget` minus what remains). `wasm-glue` calls `r3_step` through it and fails the proof with `detail=fuel-budget` when one step uses more than 250,000. Nothing about fuel is printed. `None` from `call` means the export returns no value. `Some` is an `i32` or `i64` result. An `i32` result is the sign-extended low 32 bits, as the operand-floor paragraph describes.
 
-Fuel is 1 per opcode, counted before the opcode runs. `br_table` then charges one more unit for each of its `n` label immediates, before those immediates are read. If fewer than `n` units remain, fuel goes to 0 and the trap is `fuel`. The default label is one extra LEB and is not charged beyond the opcode, the same as `br`. A huge table cannot be decoded for a single fuel unit. Running out is `fuel`, which stops the instance. There is no resume. A module that wants to keep going must return and be called again. The shell build preempts on the timer tick. With only the shell and the idle task, the scheduler keeps running the shell, so a long call is not switched away from, and the tick counter still advances. At the assumed 2 million instructions per second the fuel budget is about half a second. Spike W1, on this QEMU TCG host, measured well above that floor: a counted loop of 3,600,004 opcodes (`result` equal to the iteration count) printed `ips=18000020` at `ticks=20` and `hz=100` on the saved run, and `ips=16363654` at `ticks=22` on the run before it. Both are above 2,000,000 per second. The logs are in the pull request. Spike W2's `app spin` printed `stopped: trap fuel` in under a fifth of a second after the command was entered, inside the 2 second bound.
+Fuel is 1 per opcode, counted before the opcode runs. `br_table` then charges one more unit for each of its `n` label immediates, before those immediates are read. If fewer than `n` units remain, fuel goes to 0 and the trap is `fuel`. The default label is one extra LEB and is not charged beyond the opcode, the same as `br`. A huge table cannot be decoded for a single fuel unit. Entering a call charges one more unit for each local that is not a parameter, before those locals are cleared. Parameters are the caller's values and are not cleared. If fewer units remain than that count, fuel goes to 0 and the trap is `fuel`. A call cannot wipe a long local list for a single fuel unit. The `call` opcode's own unit is separate and is counted in the interpreter loop. Running out is `fuel`, which stops the instance. There is no resume. A module that wants to keep going must return and be called again. The shell build preempts on the timer tick. With only the shell and the idle task, the scheduler keeps running the shell, so a long call is not switched away from, and the tick counter still advances. At the assumed 2 million instructions per second the fuel budget is about half a second. Spike W1, on this QEMU TCG host, measured well above that floor: a counted loop of 3,600,004 opcodes (`result` equal to the iteration count) printed `ips=18000020` at `ticks=20` and `hz=100` on the saved run, and `ips=16363654` at `ticks=22` on the run before it. Both are above 2,000,000 per second. The logs are in the pull request. Spike W2's `app spin` printed `stopped: trap fuel` in under a fifth of a second after the command was entered, inside the 2 second bound.
 
 ## 7. The `r3app` ABI v1
 
@@ -191,10 +191,10 @@ Status 251, port byte `0x7D`, `qemu_exit::wasm_core_ok`. A failed check prints `
 R3ATH3_STAGE rust_main
 R3ATH3_WASM_CORE start
 R3ATH3_WASM_CORE step=1 add=42
-R3ATH3_WASM_CORE step=2 fac64=2432902008176640000 ext8=-1
+R3ATH3_WASM_CORE step=2 fac64=2432902008176640000 ext8=-1 bend=-1
 R3ATH3_WASM_CORE step=3 fib=6765 pick=10,20,99 ind=7,8
 R3ATH3_WASM_CORE step=4 mem=305419896 grow=1,-1 size=2
-R3ATH3_WASM_CORE step=5 traps=unreachable,memory,div-zero,overflow,indirect,stack,fuel
+R3ATH3_WASM_CORE step=5 traps=unreachable,memory,div-zero,overflow,indirect,stack,fuel brtable=fuel
 R3ATH3_WASM_CORE step=6 after-trap=dead fresh=42
 R3ATH3_WASM_CORE step=7 fresh-memory=0
 R3ATH3_WASM_CORE step=8 refused=magic,version,truncated,section,opcode,float,import,limits
@@ -205,10 +205,10 @@ R3ATH3_WASM_CORE ok steps=11
 ```
 
 1. `add(40, 2)` in `i32`.
-2. `fac64(20)` is 20! = 2432902008176640000. `ext8(0xFF)` is `i32.extend8_s` and returns −1. `wide` is typed `-> i32` and its body is `i64.const` of `i64::MAX` (9223372036854775807). The host result is −1, not that raw `i64`.
+2. `fac64(20)` is 20! = 2432902008176640000. `ext8(0xFF)` is `i32.extend8_s` and returns −1. `wide` is typed `-> i32` and its body is `i64.const` of `i64::MAX` (9223372036854775807). The host result is −1, not that raw `i64`. `bend` is also `-> i32`. Its body is a void block containing `i64.const` of that same `i64::MAX` and `br 1`, then `i32.const 1`. `br 1` from inside the one block targets the function end (`depth` equal to the open-block count). The return is −1, sign-narrowed. Taking the block's own end instead would return 1.
 3. Recursive `fib(20)` is 6765, through arena frames. `pick` is `br_table` with empty blocks: index 0 returns 10, index 1 returns 20, an index past the table returns 99. `ind` is `call_indirect` through table slots 0 and 1 and returns 7 and 8.
 4. Store `0x12345678` and load it back (305419896). `memory.grow(1)` from 1 page with maximum 2 returns 1. A second grow returns −1. `memory.size` is 2.
-5. Seven separate instances, one trap each, in that word order. The same step then loads a module whose caller stores 222 at offset 0 and calls a function with argument 333. That function stores the parameter at offset 4 and a local 111 at offset 8, then executes `i32.add` on an empty operand stack, keeps the sum, and `i32.store`s it at offset 12 (`i32.const 12` is the address, and the sum is the value). The add traps `stack`. The three stored words stay, and offset 12 stays 0. The same step also loads a caller that sets a local and, with an empty operand stack, calls a one-parameter function. That call traps `stack`.
+5. Seven separate instances, one trap each, in that word order. The same step then calls a `br_table` of 4096 labels with fuel 10. The opcode costs 1, so 9 units remain, which cannot pay for 4096 labels. The trap is `fuel`, before those labels are read (`brtable=fuel`). The same step then loads a module whose caller stores 222 at offset 0 and calls a function with argument 333. That function stores the parameter at offset 4 and a local 111 at offset 8, then executes `i32.add` on an empty operand stack, keeps the sum, and `i32.store`s it at offset 12 (`i32.const 12` is the address, and the sum is the value). The add traps `stack`. The three stored words stay, and offset 12 stays 0. The same step also loads a caller that sets a local and, with an empty operand stack, calls a one-parameter function. That call traps `stack`.
 6. After `unreachable`, the next call on that instance is `dead`. A new load of `add` returns 42.
 7. A module writes 99, and the next load reads 0 at the same address.
 8. Eight malformed modules, refused with those words: bad magic, version 2, a section id with no size, a start section, opcode `0x06`, `f32.const`, one import, memory maximum 5.
@@ -218,7 +218,7 @@ R3ATH3_WASM_CORE ok steps=11
 
 ## 10. Smoke
 
-`./scripts/smoke.sh` runs 75 cases and 32 builds. Part A added the build `wasm-core` and the cases `wasm-core` (251), `app-hello` (209), `app-spin` (209), `app-usage` (211), and `app-gate` (209). Part B adds the builds `glue-duty-wasm`, `glue-duty-replay`, and `wasm-glue`, and the cases `wasm-glue` (253) and `app-glue` (209). `build_app` runs `scripts/build-apps.sh` before `wasm-glue` and `shell`, because those images bake `build/apps/glue_duty.wasm`. `wasm-core` does not bake it. `help_text` is unchanged. The `app` list in `app-spin` grows by the `glue-duty` line.
+`./scripts/smoke.sh` runs 75 cases and 32 builds. Part A added the build `wasm-core` and the cases `wasm-core` (251), `app-hello` (209), `app-spin` (209), `app-usage` (211), and `app-gate` (209). Part B adds the builds `glue-duty-wasm`, `glue-duty-replay`, and `wasm-glue`, and the cases `wasm-glue` (253) and `app-glue` (209). `build_app` runs `scripts/build-apps.sh` before `wasm-glue` and before the shell image built with `--features "shell glue-baked"`, because those images bake `build/apps/glue_duty.wasm`. `include_bytes!` of that file is behind the `glue-baked` feature and `wasm-glue`, so `cargo build --features shell` alone does not need the file and does not list `glue-duty`. If `build_app` fails, smoke still builds `--features shell` and runs every shell case that does not execute Glue Duty. It logs `[SKIP]` for `wasm-glue`, `app-glue`, and `app-spin` (`app-spin`'s app list names `glue-duty`). A successful glue build still runs all 75 cases. `wasm-core` does not bake the module. `help_text` is unchanged. The `app` list in `app-spin` grows by the `glue-duty` line.
 
 The harness self-test rejects a `wasm-core` log with `add=41`, a log missing the `ok` line, and the good log judged at status 249. It rejects an `app-hello` VGA dump with one cell changed, an `app-spin` log that says `trap stack`, and an `app-gate` log that inserts `R3ATH3_APP_READY` after the agent's `say`. It rejects a `wasm-glue` replay whose `frame=` differs, a golden whose `frame=` differs, a truncated kernel log, and an `app-glue` title dump with one cell changed. After `nvme-core` and `wasm-core` have both run, each log fails the other proof's judge at the wrong status and again at the right status, so a matching body cannot hide behind the status check. `wasm-glue`'s log judged as `wasm-core` fails. Those checks do not print their own `[PASS]` lines.
 
@@ -230,7 +230,7 @@ The game is one Rust source under `apps/glue-duty/`. `logic.rs` and `text.rs` ar
 
 `scripts/build-apps.sh` changes to `apps/glue-duty` before `cargo build`. Cargo reads `.cargo/config.toml` from that directory and passes `-zstack-size=32768`, `--initial-memory=131072`, and `--max-memory=262144`. The module's memory is 2 pages initial and 4 pages maximum. There is no import section. Block types in this module are `0x40` only. Spike W3's report is in the pull request. The module is 15,797 bytes.
 
-The rules are the integer port in `logic.rs`: three lanes, a 72-column belt, a scraper fixed at belt column 8, shifts of 750 steps, at most 24 blobs, xorshift32, and no floats. `text.rs` paints the 80×25 grid. Every store goes through `store_byte`, which is `#[inline(never)]`, so the module does not emit `memory.fill` or `memory.copy`. `q` is never delivered. Pixels and sound are milestone 12.
+The rules are the integer port in `logic.rs`: three lanes, a 72-column belt, a scraper fixed at belt column 8, shifts of 750 steps, at most 24 blobs, xorshift32, and no floats. `text.rs` paints the 80×25 grid. Grid bytes, summary bytes, and log bytes go through `store_byte`, which is `#[inline(never)]`, so those stores do not become `memory.fill` or `memory.copy`. Other writes are ordinary assignments. `q` is never delivered. Pixels and sound are milestone 12.
 
 The title grid, after `r3_init(1)`, is the `app-glue` VGA golden (`apps/glue-duty/golden/app-glue.vga`). Attribute `0x0A`. The text is:
 
@@ -273,11 +273,14 @@ R3ATH3_WASM_GLUE ok steps=2000
 
 A checkpoint is printed every 100 steps and on every state change. `frame` is FNV-1a 64 over the raw grid (basis `0xcbf29ce484222325`, prime `0x100000001b3`), a checksum for comparing two outputs, not a security check. The summary is `shift k score n cleaned c gum-up p%` with `p = jam / 100`.
 
-Seed is 1. Keys are applied before step `n` (`n` from 1), in `replay.rs` and again in `gluetest.rs`:
+Seed is 1. Keys are applied before step `n` (`n` from 1). `apps/glue-duty/proof-keys.bin` is one byte per step, 2000 bytes. `replay.rs` and `gluetest.rs` both include that file. The codes are 0 none, 1 Space, 2 `a`, 3 `d`, 4 `w` then `a`, 5 `w` then `d`, 6 `s` then `a`, 7 `s` then `d`, 8 `w`, 9 `s`. A test in `logic.rs` checks the file against this policy, which is what was recorded:
 
-- `n = 1` and `n = 1001`: Space.
-- For `2 ≤ n ≤ 740` and `1002 ≤ n ≤ 1400`, in this order: `w` when `n % 60 == 0` and `(n/60) % 2 == 0`, else `s` when `n % 60 == 0`; Space when `n % 150 == 75`; `p` when `n` is 300 or 310; then `a` when `n` is even, else `d`.
-- No keys otherwise.
+- `n = 1`: Space, which leaves the title.
+- State `SHIFT_DONE`: Space, which calls `next_shift`.
+- Any other state that is not playing: no keys.
+- While playing: if a blob has not reached the discharge, one `w` or `s` toward the lane of the blob closest to the discharge (the smallest `72 * 16 - x16` among blobs where that value is positive), then `a` when `n` is even and `d` when `n` is odd.
+
+On seed 1 that reaches `SHIFT_DONE` at step 750 (shift 1) and `next_shift` at step 751 (shift 2, jam cleared by the shift bonus). Shift 2 later reaches `GAME_OVER`. The step count stays 2000. The game rules are unchanged.
 
 Each `r3_step` is given the full 1,000,000 fuel budget and must use at most 250,000. The proof does not print the fuel count.
 

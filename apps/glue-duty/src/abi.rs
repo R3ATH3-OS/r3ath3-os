@@ -1,6 +1,7 @@
 //! Wasm exports for the r3app ABI. One state cell. Two privileged lines.
-//! The panic path calls `unreachable`. If that function is not safe on
-//! rustc 1.83, the third line is the block around the call.
+//! This file is guest code: it compiles to wasm32 and runs inside the
+//! sandbox. The panic path calls `core::arch::wasm32::unreachable()`, a
+//! safe function on rustc 1.83.0.
 
 use core::cell::UnsafeCell;
 
@@ -8,12 +9,16 @@ use super::logic::Game;
 
 struct Slot(UnsafeCell<Game>);
 
-// One wasm thread. The exports do not re-enter.
+// SAFETY: One wasm32 thread. The six exports do not call each other, so
+// `with_game` is not re-entered. `GAME` is the only alias of this cell.
 unsafe impl Sync for Slot {}
 
 static GAME: Slot = Slot(UnsafeCell::new(Game::fresh()));
 
 fn with_game<R>(f: impl FnOnce(&mut Game) -> R) -> R {
+    // SAFETY: `GAME` is that cell. Each export borrows it as `&mut Game`
+    // for one call and does not hold the borrow across another export.
+    // No other thread exists on wasm32, so the borrow is exclusive.
     f(unsafe { &mut *GAME.0.get() })
 }
 

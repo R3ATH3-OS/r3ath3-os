@@ -45,37 +45,48 @@ fn main() {
     print!("R3ATH3_WASM_GLUE ok steps=2000\n");
 }
 
-fn summary_text(raw: &[u8]) -> &str {
+/// Same rule as `kernel/src/apps.rs` `printable`: `0x00` is a space, bytes
+/// outside `0x20..=0x7E` are `?`.
+fn summary_text(raw: &[u8]) -> String {
     if raw.is_empty() {
-        return "";
+        return String::new();
     }
     let len = raw[0] as usize;
     let end = (1 + len).min(raw.len());
-    core::str::from_utf8(&raw[1..end]).unwrap_or("")
+    let mut out = String::new();
+    for &byte in &raw[1..end] {
+        let glyph = if byte == 0x00 {
+            b' '
+        } else if (0x20..=0x7E).contains(&byte) {
+            byte
+        } else {
+            b'?'
+        };
+        out.push(glyph as char);
+    }
+    out
 }
 
-/// Keys applied before step `n`. Keep this in step with `gluetest.rs`.
+/// One packed key code per step. The same file drives `gluetest.rs`.
+const PROOF_KEYS: &[u8] = include_bytes!("../../proof-keys.bin");
+
+/// Keys applied before step `n`. Codes: 0 none, 1 space, 2 a, 3 d,
+/// 4 w+a, 5 w+d, 6 s+a, 7 s+d, 8 w, 9 s.
 fn proof_keys(n: u32, out: &mut [u8; 4]) -> usize {
-    let mut len = 0;
-    if n == 1 || n == 1001 {
-        out[len] = b' ';
-        len += 1;
-    }
-    if (2..=740).contains(&n) || (1002..=1400).contains(&n) {
-        if n % 60 == 0 {
-            out[len] = if (n / 60) % 2 == 0 { b'w' } else { b's' };
-            len += 1;
-        }
-        if n % 150 == 75 {
-            out[len] = b' ';
-            len += 1;
-        }
-        if n == 300 || n == 310 {
-            out[len] = b'p';
-            len += 1;
-        }
-        out[len] = if n % 2 == 0 { b'a' } else { b'd' };
-        len += 1;
-    }
-    len
+    assert_eq!(PROOF_KEYS.len(), 2000);
+    let keys: &[u8] = match PROOF_KEYS[(n - 1) as usize] {
+        0 => b"",
+        1 => b" ",
+        2 => b"a",
+        3 => b"d",
+        4 => b"wa",
+        5 => b"wd",
+        6 => b"sa",
+        7 => b"sd",
+        8 => b"w",
+        9 => b"s",
+        other => panic!("key code {other}"),
+    };
+    out[..keys.len()].copy_from_slice(keys);
+    keys.len()
 }

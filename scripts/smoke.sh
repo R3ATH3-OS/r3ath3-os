@@ -1899,6 +1899,62 @@ build_app() {
   log "[PASS] build glue-duty-replay"
 }
 
+# Shell cases. glue=1 runs app-glue and app-spin on the image that baked
+# Glue Duty. glue=0 logs those two as skipped: the bare shell has no
+# glue-duty line, so app-spin's expected app list would not match, and
+# app-glue would have nothing to launch. Every other case still runs.
+run_shell_cases() {
+  local glue="$1"
+  expect_shell shell-basic 12 "$OUT/task/shell-basic.steps" "$OUT/task/shell-basic.expected" "$SHELL_OK_STATUS" exact
+  expect_shell shell-backspace 12 "$OUT/task/shell-backspace.steps" "$OUT/task/shell-backspace.expected" "$SHELL_OK_STATUS" exact
+  expect_shell shell-unknown 12 "$OUT/task/shell-unknown.steps" "$OUT/task/shell-unknown.expected" "$SHELL_CMD_STATUS" exact
+  expect_shell shell-overflow 20 "$OUT/task/shell-overflow.steps" "$OUT/task/shell-overflow.expected" "$SHELL_OVERFLOW_STATUS" exact
+  expect_shell shell-run 12 "$OUT/task/shell-run.steps" "$OUT/task/shell-run.expected" "$SHELL_OK_STATUS" exact
+  expect_shell shell-run-error 12 "$OUT/task/shell-run-error.steps" "$OUT/task/shell-run-error.expected" "$SHELL_SCRIPT_STATUS" exact
+  expect_shell shell-mem 12 "$OUT/task/shell-mem.steps" "$OUT/task/shell-mem.expected" "$SHELL_OK_STATUS" mem
+  expect_shell shell-halt 12 "$OUT/task/shell-halt.steps" "$OUT/task/shell-halt.expected" "$SHELL_HALT_STATUS" exact
+  expect_shell shell-screen 20 "$OUT/task/shell-screen.steps" "$OUT/task/shell-screen.expected" "$SHELL_OK_STATUS" screen
+  expect_shell shell-ps 12 "$OUT/task/shell-ps.steps" "$OUT/task/shell-ps.expected" "$SHELL_OK_STATUS" exact
+  expect_shell shell-wait 12 "$OUT/task/shell-wait.steps" "$OUT/task/shell-wait.expected" "$SHELL_OK_STATUS" exact
+  expect_shell shell-sched-error 20 "$OUT/task/shell-sched-error.steps" "$OUT/task/shell-sched-error.expected" "$SHELL_CMD_STATUS" exact
+  expect_shell shell-usage 12 "$OUT/task/shell-usage.steps" "$OUT/task/shell-usage.expected" "$SHELL_CMD_STATUS" exact
+  expect_shell shell-edge 20 "$OUT/task/shell-edge.steps" "$OUT/task/shell-edge.expected" "$SHELL_OVERFLOW_STATUS" exact
+  expect_gate gate-approve 12 "$OUT/task/gate-approve.steps" "$OUT/task/gate-approve.expected" "$SHELL_OK_STATUS"
+  expect_gate gate-noperm 12 "$OUT/task/gate-noperm.steps" "$OUT/task/gate-noperm.expected" "$SHELL_OK_STATUS"
+  expect_gate gate-revoke 12 "$OUT/task/gate-revoke.steps" "$OUT/task/gate-revoke.expected" "$SHELL_OK_STATUS"
+  expect_gate gate-sneak 12 "$OUT/task/gate-sneak.steps" "$OUT/task/gate-sneak.expected" "$SHELL_CMD_STATUS"
+  expect_gate gate-halt 12 "$OUT/task/gate-halt.steps" "$OUT/task/gate-halt.expected" "$SHELL_HALT_STATUS"
+  expect_gate gate-usage 20 "$OUT/task/gate-usage.steps" "$OUT/task/gate-usage.expected" "$SHELL_CMD_STATUS"
+  expect_gate log-record 20 "$OUT/task/log-record.steps" "$OUT/task/log-record.expected" "$SHELL_OK_STATUS" log
+  expect_gate log-full 60 "$OUT/task/log-full.steps" "$OUT/task/log-full.expected" "$SHELL_OK_STATUS" log
+  expect_shell log-usage 12 "$OUT/task/log-usage.steps" "$OUT/task/log-usage.expected" "$SHELL_CMD_STATUS" exact
+  expect_shell shell-selftest 12 "$OUT/task/shell-selftest.steps" "$OUT/task/shell-selftest.expected" "$SHELL_OK_STATUS" exact
+  expect_shell shell-sched-args 12 "$OUT/task/shell-sched-args.steps" "$OUT/task/shell-sched-args.expected" "$SHELL_CMD_STATUS" exact
+  expect_gate store-ram 20 "$OUT/task/store-ram.steps" "$OUT/task/store-ram.expected" "$SHELL_OK_STATUS" store:s1
+  expect_shell store-usage 40 "$OUT/task/store-usage.steps" "$OUT/task/store-usage.expected" "$SHELL_CMD_STATUS" exact
+  expect_reboot store-reboot \
+    "$OUT/task/store-reboot.boot1.steps" "$OUT/task/store-reboot.boot1.expected" "$SHELL_OK_STATUS" \
+    none \
+    "$OUT/task/store-reboot.boot2.steps" "$OUT/task/store-reboot.boot2.expected" "$SHELL_OK_STATUS"
+  expect_reboot store-tamper \
+    "$OUT/task/store-reboot.boot1.steps" "$OUT/task/store-reboot.boot1.expected" "$SHELL_OK_STATUS" \
+    flip:4914 \
+    "$OUT/task/store-tamper.boot2.steps" "$OUT/task/store-tamper.boot2.expected" "$SHELL_CMD_STATUS"
+  expect_baddisk
+  expect_shell app-hello 20 "$OUT/task/app-hello.steps" "$OUT/task/app-hello.expected" "$SHELL_OK_STATUS" apphello
+  if [[ "$glue" -eq 1 ]]; then
+    expect_shell app-glue 20 "$OUT/task/app-glue.steps" "$OUT/task/app-glue.expected" "$SHELL_OK_STATUS" appglue
+    expect_shell app-spin 20 "$OUT/task/app-spin.steps" "$OUT/task/app-spin.expected" "$SHELL_OK_STATUS" exact
+  else
+    log "[SKIP] app-glue (glue-duty did not build)"
+    FAILURES=$((FAILURES + 1))
+    log "[SKIP] app-spin (app list includes glue-duty)"
+    FAILURES=$((FAILURES + 1))
+  fi
+  expect_shell app-usage 12 "$OUT/task/app-usage.steps" "$OUT/task/app-usage.expected" "$SHELL_CMD_STATUS" exact
+  expect_gate app-gate 20 "$OUT/task/app-gate.steps" "$OUT/task/app-gate.expected" "$SHELL_OK_STATUS"
+}
+
 run_qemu() {
   local name="$1"
   local seconds="$2"
@@ -3314,10 +3370,10 @@ wasm_core = (
     "R3ATH3_STAGE rust_main\n"
     "R3ATH3_WASM_CORE start\n"
     "R3ATH3_WASM_CORE step=1 add=42\n"
-    "R3ATH3_WASM_CORE step=2 fac64=2432902008176640000 ext8=-1\n"
+    "R3ATH3_WASM_CORE step=2 fac64=2432902008176640000 ext8=-1 bend=-1\n"
     "R3ATH3_WASM_CORE step=3 fib=6765 pick=10,20,99 ind=7,8\n"
     "R3ATH3_WASM_CORE step=4 mem=305419896 grow=1,-1 size=2\n"
-    "R3ATH3_WASM_CORE step=5 traps=unreachable,memory,div-zero,overflow,indirect,stack,fuel\n"
+    "R3ATH3_WASM_CORE step=5 traps=unreachable,memory,div-zero,overflow,indirect,stack,fuel brtable=fuel\n"
     "R3ATH3_WASM_CORE step=6 after-trap=dead fresh=42\n"
     "R3ATH3_WASM_CORE step=7 fresh-memory=0\n"
     "R3ATH3_WASM_CORE step=8 refused=magic,version,truncated,section,opcode,float,import,limits\n"
@@ -4480,57 +4536,28 @@ else
     expect_wasm_core
   fi
   if build_app; then
-  if build_kernel wasm-glue wasm-glue; then
-    expect_wasm_glue
-  fi
-  if build_kernel shell shell; then
-    if write_shell_cases; then
-      expect_shell shell-basic 12 "$OUT/task/shell-basic.steps" "$OUT/task/shell-basic.expected" "$SHELL_OK_STATUS" exact
-      expect_shell shell-backspace 12 "$OUT/task/shell-backspace.steps" "$OUT/task/shell-backspace.expected" "$SHELL_OK_STATUS" exact
-      expect_shell shell-unknown 12 "$OUT/task/shell-unknown.steps" "$OUT/task/shell-unknown.expected" "$SHELL_CMD_STATUS" exact
-      expect_shell shell-overflow 20 "$OUT/task/shell-overflow.steps" "$OUT/task/shell-overflow.expected" "$SHELL_OVERFLOW_STATUS" exact
-      expect_shell shell-run 12 "$OUT/task/shell-run.steps" "$OUT/task/shell-run.expected" "$SHELL_OK_STATUS" exact
-      expect_shell shell-run-error 12 "$OUT/task/shell-run-error.steps" "$OUT/task/shell-run-error.expected" "$SHELL_SCRIPT_STATUS" exact
-      expect_shell shell-mem 12 "$OUT/task/shell-mem.steps" "$OUT/task/shell-mem.expected" "$SHELL_OK_STATUS" mem
-      expect_shell shell-halt 12 "$OUT/task/shell-halt.steps" "$OUT/task/shell-halt.expected" "$SHELL_HALT_STATUS" exact
-      expect_shell shell-screen 20 "$OUT/task/shell-screen.steps" "$OUT/task/shell-screen.expected" "$SHELL_OK_STATUS" screen
-      expect_shell shell-ps 12 "$OUT/task/shell-ps.steps" "$OUT/task/shell-ps.expected" "$SHELL_OK_STATUS" exact
-      expect_shell shell-wait 12 "$OUT/task/shell-wait.steps" "$OUT/task/shell-wait.expected" "$SHELL_OK_STATUS" exact
-      expect_shell shell-sched-error 20 "$OUT/task/shell-sched-error.steps" "$OUT/task/shell-sched-error.expected" "$SHELL_CMD_STATUS" exact
-      expect_shell shell-usage 12 "$OUT/task/shell-usage.steps" "$OUT/task/shell-usage.expected" "$SHELL_CMD_STATUS" exact
-      expect_shell shell-edge 20 "$OUT/task/shell-edge.steps" "$OUT/task/shell-edge.expected" "$SHELL_OVERFLOW_STATUS" exact
-      expect_gate gate-approve 12 "$OUT/task/gate-approve.steps" "$OUT/task/gate-approve.expected" "$SHELL_OK_STATUS"
-      expect_gate gate-noperm 12 "$OUT/task/gate-noperm.steps" "$OUT/task/gate-noperm.expected" "$SHELL_OK_STATUS"
-      expect_gate gate-revoke 12 "$OUT/task/gate-revoke.steps" "$OUT/task/gate-revoke.expected" "$SHELL_OK_STATUS"
-      expect_gate gate-sneak 12 "$OUT/task/gate-sneak.steps" "$OUT/task/gate-sneak.expected" "$SHELL_CMD_STATUS"
-      expect_gate gate-halt 12 "$OUT/task/gate-halt.steps" "$OUT/task/gate-halt.expected" "$SHELL_HALT_STATUS"
-      expect_gate gate-usage 20 "$OUT/task/gate-usage.steps" "$OUT/task/gate-usage.expected" "$SHELL_CMD_STATUS"
-      expect_gate log-record 20 "$OUT/task/log-record.steps" "$OUT/task/log-record.expected" "$SHELL_OK_STATUS" log
-      expect_gate log-full 60 "$OUT/task/log-full.steps" "$OUT/task/log-full.expected" "$SHELL_OK_STATUS" log
-      expect_shell log-usage 12 "$OUT/task/log-usage.steps" "$OUT/task/log-usage.expected" "$SHELL_CMD_STATUS" exact
-      expect_shell shell-selftest 12 "$OUT/task/shell-selftest.steps" "$OUT/task/shell-selftest.expected" "$SHELL_OK_STATUS" exact
-      expect_shell shell-sched-args 12 "$OUT/task/shell-sched-args.steps" "$OUT/task/shell-sched-args.expected" "$SHELL_CMD_STATUS" exact
-      expect_gate store-ram 20 "$OUT/task/store-ram.steps" "$OUT/task/store-ram.expected" "$SHELL_OK_STATUS" store:s1
-      expect_shell store-usage 40 "$OUT/task/store-usage.steps" "$OUT/task/store-usage.expected" "$SHELL_CMD_STATUS" exact
-      expect_reboot store-reboot \
-        "$OUT/task/store-reboot.boot1.steps" "$OUT/task/store-reboot.boot1.expected" "$SHELL_OK_STATUS" \
-        none \
-        "$OUT/task/store-reboot.boot2.steps" "$OUT/task/store-reboot.boot2.expected" "$SHELL_OK_STATUS"
-      expect_reboot store-tamper \
-        "$OUT/task/store-reboot.boot1.steps" "$OUT/task/store-reboot.boot1.expected" "$SHELL_OK_STATUS" \
-        flip:4914 \
-        "$OUT/task/store-tamper.boot2.steps" "$OUT/task/store-tamper.boot2.expected" "$SHELL_CMD_STATUS"
-      expect_baddisk
-      expect_shell app-hello 20 "$OUT/task/app-hello.steps" "$OUT/task/app-hello.expected" "$SHELL_OK_STATUS" apphello
-      expect_shell app-glue 20 "$OUT/task/app-glue.steps" "$OUT/task/app-glue.expected" "$SHELL_OK_STATUS" appglue
-      expect_shell app-spin 20 "$OUT/task/app-spin.steps" "$OUT/task/app-spin.expected" "$SHELL_OK_STATUS" exact
-      expect_shell app-usage 12 "$OUT/task/app-usage.steps" "$OUT/task/app-usage.expected" "$SHELL_CMD_STATUS" exact
-      expect_gate app-gate 20 "$OUT/task/app-gate.steps" "$OUT/task/app-gate.expected" "$SHELL_OK_STATUS"
-    else
-      log "[FAIL] write shell cases"
-      FAILURES=$((FAILURES + 1))
+    if build_kernel wasm-glue wasm-glue; then
+      expect_wasm_glue
     fi
-  fi
+    if build_kernel shell shell glue-baked; then
+      if write_shell_cases; then
+        run_shell_cases 1
+      else
+        log "[FAIL] write shell cases"
+        FAILURES=$((FAILURES + 1))
+      fi
+    fi
+  else
+    log "[SKIP] wasm-glue (glue-duty did not build)"
+    FAILURES=$((FAILURES + 1))
+    if build_kernel shell shell; then
+      if write_shell_cases; then
+        run_shell_cases 0
+      else
+        log "[FAIL] write shell cases"
+        FAILURES=$((FAILURES + 1))
+      fi
+    fi
   fi
 fi
 

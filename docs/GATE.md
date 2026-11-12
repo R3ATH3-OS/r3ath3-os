@@ -219,7 +219,10 @@ The exact `gate-approve` transcript is the one in the smoke harness. The other f
 Build the shell and run QEMU with a display and `-serial stdio`. Type human commands in the QEMU window. Type `R3GATE ASK …` lines in the terminal, as the agent:
 
 ```sh
-cd kernel && cargo build --release --features shell
+# From the repo root. The shell image includes Glue Duty, so this wasm
+# file must exist or the kernel build fails on include_bytes!.
+./scripts/build-apps.sh
+cd kernel && cargo build --release --features "shell glue-baked"
 qemu-system-x86_64 -machine pc,accel=tcg -cpu qemu64 -m 64M -smp 1 \
   -kernel target/x86_64-unknown-none/release/r3ath3 \
   -nic none -serial stdio -no-reboot \
