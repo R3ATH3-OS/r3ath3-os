@@ -74,6 +74,8 @@ Run-time `Trap` words: `unreachable`, `memory`, `div-zero`, `overflow`, `indirec
 | Open labels | 2,048 |
 | Fuel | 1,000,000 instructions per `call`. `call_with_fuel` can pass a smaller budget |
 
+`pop` and `peek` stop at the operand floor. That floor is the end of the current frame's locals (`locals_base + local_count`). When a label is open, the floor is the greater of that end and the top label's `stack_base`. A function or a block that pops more than it pushed traps `stack`. It does not read its locals or the caller's slots. The return pop and the block-end pop run while that frame or label is still the top, so the same floor applies. A returned `i32` is the low 32 bits of the slot, sign-extended back into the `i64`. A function typed `-> i32` cannot hand the host a raw `i64` such as `i64::MAX`.
+
 After any trap the instance is dead: every later `call` returns `dead`. A missing export, or the wrong number of arguments, is also `dead` or `stack` from that call, and the instance is then dead. Integer division or remainder by zero is `div-zero`. `i32.div_s` and `i64.div_s` of the minimum value divided by −1 are `overflow`. The matching remainder is 0. Shifts and rotates use wrapping shifts, so the count is masked the way Rust masks it.
 
 A memory address is `(addr as u32 as u64) + offset as u64`. If the end of the access is past the current size, the trap is `memory`. `memory.grow` returns the old page count, or −1 when the result would pass the declared maximum or 4 pages, and it zeros the new range. `i32` values are stored sign-extended in an `i64` slot. `i64.clz`, `i64.ctz`, and `i64.popcnt` push an `i32`.
@@ -119,7 +121,7 @@ pub fn with_instance<R>(
 ) -> Option<R>;
 ```
 
-`with_instance` returns `None` when the arena is already taken. That does not happen in this milestone: one shell, one app. A load failure is `Some(Err(_))`. The module slice lives as long as the call. Baked apps are `'static`. The flip test in `wasm-core` passes a stack copy. `None` from `call` means the export returns no value. `Some` is an `i32` or `i64` result, with `i32` sign-extended.
+`with_instance` returns `None` when the arena is already taken. That does not happen in this milestone: one shell, one app. A load failure is `Some(Err(_))`. The module slice lives as long as the call. Baked apps are `'static`. The flip test in `wasm-core` passes a stack copy. `None` from `call` means the export returns no value. `Some` is an `i32` or `i64` result. An `i32` result is the sign-extended low 32 bits, as the operand-floor paragraph describes.
 
 Fuel is 1 per opcode, counted before the opcode runs. Running out is `fuel`, which stops the instance. There is no resume. A module that wants to keep going must return and be called again. The shell build preempts on the timer tick. With only the shell and the idle task, the scheduler keeps running the shell, so a long call is not switched away from, and the tick counter still advances. At the assumed 2 million instructions per second the fuel budget is about half a second. Spike W1, on this QEMU TCG host, measured well above that floor: a counted loop of 3,600,004 opcodes (`result` equal to the iteration count) printed `ips=18000020` at `ticks=20` and `hz=100` on the saved run, and `ips=16363654` at `ticks=22` on the run before it. Both are above 2,000,000 per second. The logs are in the pull request. Spike W2's `app spin` printed `stopped: trap fuel` in under a fifth of a second after the command was entered, inside the 2 second bound.
 
@@ -197,10 +199,10 @@ R3ATH3_WASM_CORE ok steps=11
 ```
 
 1. `add(40, 2)` in `i32`.
-2. `fac64(20)` is 20! = 2432902008176640000. `ext8(0xFF)` is `i32.extend8_s` and returns −1.
+2. `fac64(20)` is 20! = 2432902008176640000. `ext8(0xFF)` is `i32.extend8_s` and returns −1. `wide` is typed `-> i32` and its body is `i64.const` of `i64::MAX` (9223372036854775807). The host result is −1, not that raw `i64`.
 3. Recursive `fib(20)` is 6765, through arena frames. `pick` is `br_table` with empty blocks: index 0 returns 10, index 1 returns 20, an index past the table returns 99. `ind` is `call_indirect` through table slots 0 and 1 and returns 7 and 8.
 4. Store `0x12345678` and load it back (305419896). `memory.grow(1)` from 1 page with maximum 2 returns 1. A second grow returns −1. `memory.size` is 2.
-5. Seven separate instances, one trap each, in that word order.
+5. Seven separate instances, one trap each, in that word order. The same step then loads a module whose caller stores 222 at offset 0 and calls a function with argument 333. That function stores the parameter at offset 4 and a local 111 at offset 8, then executes `i32.add` on an empty operand stack and would store the sum at offset 12. The call traps `stack`. The three stored words stay, and offset 12 stays 0.
 6. After `unreachable`, the next call on that instance is `dead`. A new load of `add` returns 42.
 7. A module writes 99, and the next load reads 0 at the same address.
 8. Eight malformed modules, refused with those words: bad magic, version 2, a section id with no size, a start section, opcode `0x06`, `f32.const`, one import, memory maximum 5.

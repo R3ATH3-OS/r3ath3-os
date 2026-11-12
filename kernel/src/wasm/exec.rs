@@ -2,7 +2,7 @@
 //! Every stack, memory, and fuel failure is a `Trap`.
 
 use super::arena::{
-    Arena, Frame, Label, EMPTY_FUNC, FRAME_CAP, KIND_LOOP, LABEL_CAP, VALUE_CAP,
+    Arena, Frame, Label, EMPTY_FUNC, FRAME_CAP, KIND_LOOP, LABEL_CAP, TY_I32, VALUE_CAP,
 };
 use super::decode::{self, find_side, KIND_FUNC};
 use super::Trap;
@@ -389,13 +389,21 @@ impl<'a> Exec<'a> {
         if self.frame_sp == 0 {
             return Err(Trap::Stack);
         }
-        self.frame_sp -= 1;
-        let frame = self.arena.frames[self.frame_sp];
+        let frame = self.arena.frames[self.frame_sp - 1];
         let result = if frame.results == 1 {
-            Some(self.pop()?)
+            let raw = self.pop()?;
+            let ty = self
+                .arena
+                .funcs
+                .get(frame.func as usize)
+                .map(|info| info.result_ty)
+                .unwrap_or(0);
+            let value = if ty == TY_I32 { raw as i32 as i64 } else { raw };
+            Some(value)
         } else {
             None
         };
+        self.frame_sp -= 1;
         self.sp = frame.locals_base as usize;
         self.label_sp = frame.label_base as usize;
         if frame.return_pc == HOST_RETURN {
@@ -500,13 +508,13 @@ impl<'a> Exec<'a> {
         if self.label_sp == 0 {
             return Err(Trap::Stack);
         }
-        self.label_sp -= 1;
-        let label = self.arena.labels[self.label_sp];
+        let label = self.arena.labels[self.label_sp - 1];
         let result = if label.results == 1 {
             Some(self.pop()?)
         } else {
             None
         };
+        self.label_sp -= 1;
         self.sp = label.stack_base as usize;
         if let Some(value) = result {
             self.push(value)?;
@@ -646,9 +654,32 @@ impl<'a> Exec<'a> {
         self.push(value as i64)
     }
 
+    /// End of the locals, or the top label's stack base when that is higher.
+    /// `pop` and `peek` stop at this index so a short operand stack cannot
+    /// read a local or a caller's slot.
+    fn operand_floor(&self) -> usize {
+        let Some(frame) = self.arena.frames.get(self.frame_sp.wrapping_sub(1)) else {
+            return 0;
+        };
+        let locals = self
+            .arena
+            .funcs
+            .get(frame.func as usize)
+            .map(|info| info.local_count as usize)
+            .unwrap_or(0);
+        let mut floor = frame.locals_base as usize + locals;
+        if self.label_sp > frame.label_base as usize {
+            let top = self.arena.labels[self.label_sp - 1].stack_base as usize;
+            if top > floor {
+                floor = top;
+            }
+        }
+        floor
+    }
+
     #[inline(always)]
     fn pop(&mut self) -> Result<i64, Trap> {
-        if self.sp == 0 {
+        if self.sp <= self.operand_floor() {
             return Err(Trap::Stack);
         }
         self.sp -= 1;
@@ -661,7 +692,7 @@ impl<'a> Exec<'a> {
     }
 
     fn peek(&self) -> Result<i64, Trap> {
-        if self.sp == 0 {
+        if self.sp <= self.operand_floor() {
             return Err(Trap::Stack);
         }
         Ok(self.arena.values[self.sp - 1])

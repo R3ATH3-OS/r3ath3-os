@@ -51,6 +51,11 @@ fn step2() {
     if ext != -1 {
         fail_i64(2, "ext8", ext);
     }
+    // -> i32 that leaves i64::MAX must come back sign-narrowed, not raw.
+    let wide = must_call(2, WIDE, "wide", &[], wasm::FUEL_PER_CALL);
+    if wide != -1 {
+        fail_i64(2, "wide", wide);
+    }
     let _ = write!(
         serial::Writer,
         "R3ATH3_WASM_CORE step=2 fac64=2432902008176640000 ext8=-1\n"
@@ -143,10 +148,39 @@ fn step5() {
             None => fail(5, "arena"),
         }
     }
+    if !underflow_keeps_slots() {
+        fail(5, "underflow");
+    }
     let _ = write!(
         serial::Writer,
         "R3ATH3_WASM_CORE step=5 traps=unreachable,memory,div-zero,overflow,indirect,stack,fuel\n"
     );
+}
+
+/// `go` stores 222, then `bad` stores its parameter 333 and local 111, then
+/// `i32.add` on an empty operand stack. The trap must happen before that add
+/// can store a stolen value at offset 12, and the three earlier words stay.
+fn underflow_keeps_slots() -> bool {
+    let kept = wasm::with_instance(UNDER, |loaded| {
+        let mut inst = match loaded {
+            Ok(inst) => inst,
+            Err(_) => return false,
+        };
+        if !matches!(inst.call("go", &[]), Err(Trap::Stack)) {
+            return false;
+        }
+        let mem = inst.memory();
+        mem_word(mem, 0) == Some(222)
+            && mem_word(mem, 4) == Some(333)
+            && mem_word(mem, 8) == Some(111)
+            && mem_word(mem, 12) == Some(0)
+    });
+    kept == Some(true)
+}
+
+fn mem_word(mem: &[u8], off: usize) -> Option<i32> {
+    let bytes = mem.get(off..off + 4)?;
+    Some(i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
 fn step6() {
@@ -321,6 +355,9 @@ fn fail_i64(step: u32, what: &str, got: i64) -> ! {
 // FAC: fac64 is a loop multiplying 2..=n; ext8 is i32.extend8_s.
 // FIB: recursive fib, br_table pick, call_indirect ind through a two-slot table.
 // MEM: store 0x12345678, memory.grow, memory.size. Memory min 1 max 2.
+// WIDE: (func (export "wide") (result i32) (i64.const 9223372036854775807))
+// UNDER: caller stores 222 at 0 and calls bad(333). bad stores the parameter
+// at 4 and local 111 at 8, then i32.add on an empty stack and would store at 12.
 // Traps: unreachable, load at 65536, div_u by 0, div_s(MIN,-1),
 // call_indirect of an empty slot, unbounded call, (loop (br 0)).
 // FRESH: write 99, then a new load reads 0.
@@ -370,6 +407,24 @@ static MEM: &[u8] = &[
     0x03, 0x12, 0x00, 0x41, 0x00, 0x41, 0xF8, 0xAC, 0xD1, 0x91, 0x01, 0x36,
     0x02, 0x00, 0x41, 0x00, 0x28, 0x02, 0x00, 0x0B, 0x06, 0x00, 0x41, 0x01,
     0x40, 0x00, 0x0B, 0x04, 0x00, 0x3F, 0x00, 0x0B,
+];
+
+static WIDE: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60,
+    0x00, 0x01, 0x7F, 0x03, 0x02, 0x01, 0x00, 0x07, 0x08, 0x01, 0x04, 0x77,
+    0x69, 0x64, 0x65, 0x00, 0x00, 0x0A, 0x0F, 0x01, 0x0D, 0x00, 0x42, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x0B,
+];
+
+static UNDER: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x60,
+    0x01, 0x7F, 0x00, 0x60, 0x00, 0x00, 0x03, 0x03, 0x02, 0x00, 0x01, 0x05,
+    0x04, 0x01, 0x01, 0x01, 0x01, 0x07, 0x06, 0x01, 0x02, 0x67, 0x6F, 0x00,
+    0x01, 0x0A, 0x2F, 0x02, 0x1D, 0x01, 0x01, 0x7F, 0x41, 0x04, 0x20, 0x00,
+    0x36, 0x02, 0x00, 0x41, 0xEF, 0x00, 0x21, 0x01, 0x41, 0x08, 0x20, 0x01,
+    0x36, 0x02, 0x00, 0x6A, 0x41, 0x0C, 0x36, 0x02, 0x00, 0x0B, 0x0F, 0x00,
+    0x41, 0x00, 0x41, 0xDE, 0x01, 0x36, 0x02, 0x00, 0x41, 0xCD, 0x02, 0x10,
+    0x00, 0x0B,
 ];
 
 static T_UNREACH: &[u8] = &[
