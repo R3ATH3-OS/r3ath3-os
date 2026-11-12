@@ -183,9 +183,10 @@ pub fn copy_from(src: &[u8]) -> bool {
     with_bytes(|dst| dst.copy_from_slice(src)).is_some()
 }
 
-/// Copy the software buffer to `0xA0000`. A busy buffer is left unblitted.
-pub fn blit() {
-    let _ = with_bytes(|src| {
+/// Copy the software buffer to `0xA0000`. `false` means the buffer was
+/// already borrowed and nothing was copied.
+pub fn blit() -> bool {
+    with_bytes(|src| {
         // SAFETY: `0xA0000` is the VGA window inside the identity map. `src`
         // is the 64,000-byte software buffer, so every index stays inside
         // that 64 KiB window. One CPU, main context only.
@@ -195,7 +196,8 @@ pub fn blit() {
                 hw.add(index).write_volatile(*byte);
             }
         }
-    });
+    })
+    .is_some()
 }
 
 pub fn hw_byte(index: usize) -> Option<u8> {

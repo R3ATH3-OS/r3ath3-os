@@ -1214,7 +1214,7 @@ R3ATH3_SHELL_EXIT last=ok
 EOF
   judge_shell_mem "$SHELL_OK_STATUS" "$dir/shell-mem.log" "$dir/shell-mem.expected" || ok=1
   if judge_shell_mem "$SHELL_CMD_STATUS" "$dir/shell-mem.log" "$dir/shell-mem.expected"; then ok=1; fi
-  printf '%s\n' "mem heap_used=100 heap_size=1048576 frames_total=15749 frames_free=15749" >"$dir/frames-bound-ok.log"
+  printf '%s\n' "mem heap_used=100 heap_size=1048576 frames_total=15746 frames_free=15746" >"$dir/frames-bound-ok.log"
   printf '%s\n' "mem heap_used=100 heap_size=1048576 frames_total=15740 frames_free=15740" >"$dir/frames-bound-low.log"
   printf '%s\n' "mem heap_used=100 heap_size=1048576 frames_total=15758 frames_free=15758" >"$dir/frames-bound-high.log"
   shell_frames_in_bound "$dir/frames-bound-ok.log" || ok=1

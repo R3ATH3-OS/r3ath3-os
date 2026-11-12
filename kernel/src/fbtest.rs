@@ -62,7 +62,9 @@ pub fn run() -> ! {
     if filled.is_none() {
         fail(2, "busy");
     }
-    fb::blit();
+    if !fb::blit() {
+        fail(2, "blit");
+    }
     if fb::hardware_sum() != DIRECT_SUM
         || fb::hw_byte(0) != Some(direct_byte(0))
         || fb::hw_byte(319) != Some(direct_byte(319))
@@ -122,7 +124,12 @@ pub fn run() -> ! {
     );
 
     fb::enter_graphics();
-    fb::blit();
+    if !fb::blit() {
+        fail(6, "blit");
+    }
+    if fb::hardware_sum() != GUEST_SUM {
+        fail_sum(6, fb::hardware_sum(), GUEST_SUM);
+    }
     apps::finish_for_proof();
     if !finish_restored(font_before, dac07, dac3a, dac3f) {
         fail_restore(6, font_before, dac07, dac3a, dac3f);

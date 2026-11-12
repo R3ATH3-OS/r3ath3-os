@@ -29,10 +29,10 @@ pub fn enter_graphics();
 pub fn enter_text();
 pub fn in_graphics() -> bool;
 pub fn copy_from(src: &[u8]) -> bool;
-pub fn blit();
+pub fn blit() -> bool;
 ```
 
-`info` is the view milestone 13 can retarget. `base` points at the software buffer. For this backend, `width` is 320, `height` is 200, `stride` is 320, and `format` is `Indexed8`. `with_bytes` is the only borrow of that buffer. It returns `None` when a borrow is already in progress, the same shape as the WebAssembly arena's `with_instance`. `copy_from` accepts a slice of exactly 64,000 bytes and returns `false` when the buffer is busy. `enter_graphics` programs mode 13h and the palette below. The first call also saves the plane-2 font and DAC entries 0–63. It does not clear the buffer. `enter_text` programs VGA text mode 3 (80×25), writes that font and those DAC entries back, and does not clear the text cells. `blit` copies the software buffer to `0xA0000`. A later paint does not call `enter_graphics` again while graphics mode is already on.
+`info` is the view milestone 13 can retarget. `base` points at the software buffer. For this backend, `width` is 320, `height` is 200, `stride` is 320, and `format` is `Indexed8`. `with_bytes` is the only borrow of that buffer. It returns `None` when a borrow is already in progress, the same shape as the WebAssembly arena's `with_instance`. `copy_from` accepts a slice of exactly 64,000 bytes and returns `false` when the buffer is busy. `enter_graphics` programs mode 13h and the palette below. The first call also saves the plane-2 font and DAC entries 0–63. It does not clear the buffer. `enter_text` programs VGA text mode 3 (80×25), writes that font and those DAC entries back, and does not clear the text cells. `blit` copies the software buffer to `0xA0000` and returns `false` when the buffer is already borrowed, in which case nothing is copied. A later paint does not call `enter_graphics` again while graphics mode is already on.
 
 The proof also reads the backend back through `hw_byte`, `hardware_sum`, `dac`, `gc`, `crtc`, and `text_cell_roundtrip`. Those stay in `fb.rs`.
 
@@ -50,7 +50,7 @@ Index 0 is `0,0,0`. Index 1 is `0,0,21`. Index 255 is `63,63,63`. The proof read
 
 After `enter_graphics`, graphics-controller register 6 is `0x05` and CRTC register 9 is `0x41`. After `enter_text`, they are `0x0E` and `0x4F`. The text-mode check then writes `0x0A41` at `0xB8000` and reads it back. Register tables are the mode 13h and mode 3 sets in `fb.rs` (misc, sequencer, CRTC, graphics, attribute).
 
-Chain-4 writes at `0xA0000` overwrite plane 2, which is the font the text renderer reads. The graphics palette overwrites DAC entries the text attributes use: attribute `0x0A` selects DAC `0x3A` (light green) and white selects DAC `0x3F`. On the first `enter_graphics` the driver saves the 8 KiB font (256 glyphs, 32 bytes each) and DAC entries 0–63 into `.bss`. `enter_text` writes both back. Plane-2 access sets sequencer 2 to `0x04`, sequencer 4 to `0x06`, graphics-controller 4 to `0x02`, 5 to `0x00`, and 6 to `0x05`, then restores those five registers. The proof's font checksum is FNV-1a of those 8192 bytes, `c8dbddd1` on this QEMU. DAC `0x07` is `42,42,42`, `0x3A` is `21,63,21`, and `0x3F` is `63,63,63`. Step 6 repeats the check through `apps::finish`, the shell's exit path.
+Chain-4 writes at `0xA0000` overwrite plane 2, which is the font the text renderer reads. The graphics palette overwrites DAC entries the text attributes use: attribute `0x0A` selects DAC `0x3A` (light green) and white selects DAC `0x3F`. On the first `enter_graphics` the driver saves the 8 KiB font (256 glyphs, 32 bytes each) and DAC entries 0–63 into `.bss`. `enter_text` writes both back. Plane-2 access sets sequencer 2 to `0x04`, sequencer 4 to `0x06`, graphics-controller 4 to `0x02`, 5 to `0x00`, and 6 to `0x05`, then restores those five registers. The proof's font checksum is FNV-1a of those 8192 bytes, `c8dbddd1` on this QEMU. A QEMU upgrade, or a SeaBIOS font change, changes that hash and the expected log must be updated with it. DAC `0x07` is `42,42,42`, `0x3A` is `21,63,21`, and `0x3F` is `63,63,63`. Step 6 repeats the check through `apps::finish`, the shell's exit path. Before `finish` it requires `hardware_sum` to equal the guest sum, so a blit that did not run cannot pass.
 
 ## Optional `r3_pixels`
 
@@ -78,7 +78,7 @@ R3ATH3_FB_CORE step=7 heap=same frames=same
 R3ATH3_FB_CORE ok
 ```
 
-Step 2 fills the software buffer with `(i * 3 + 1) as u8` and blits. The sum and the three samples are read from `0xA0000`. Step 4 is the guest fixture. `absent=ok` is `hello`, which has no `r3_pixels`. Step 5 is `enter_text`: the font checksum and DAC `0x07`, `0x3A`, and `0x3F` match the values sampled before graphics mode. Step 6 enters graphics again, blits (which overwrites plane 2), then calls `apps::finish`. That prints `app pixels: quit` and must leave the same font and DAC. Step 7 is `heap::used` and the free-frame count unchanged. The direct sum is 8160000. The guest sum is 7999385.
+Step 2 fills the software buffer with `(i * 3 + 1) as u8` and blits. The sum and the three samples are read from `0xA0000`. Step 4 is the guest fixture. `absent=ok` is `hello`, which has no `r3_pixels`. Step 5 is `enter_text`: the font checksum and DAC `0x07`, `0x3A`, and `0x3F` match the values sampled before graphics mode. Step 6 enters graphics again, blits, and requires the hardware sum to equal the guest sum before `apps::finish`. That sum is the chain-4 write that overwrites plane 2. `finish` prints `app pixels: quit` and must leave the same font and DAC. Step 7 is `heap::used` and the free-frame count unchanged. The direct sum is 8160000. The guest sum is 7999385.
 
 ## Frames
 

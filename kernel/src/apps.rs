@@ -386,7 +386,9 @@ pub fn blit_exported(inst: &mut Instance<'_, '_>) -> Result<bool, Trap> {
     if !crate::fb::copy_from(&memory[start..start + crate::fb::LEN]) {
         return Err(Trap::Memory);
     }
-    crate::fb::blit();
+    if !crate::fb::blit() {
+        return Err(Trap::Memory);
+    }
     Ok(true)
 }
 
