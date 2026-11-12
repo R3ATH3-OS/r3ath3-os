@@ -4,7 +4,8 @@
 //! `init` runs once, before any other serial write, with interrupts disabled.
 //! Bytes are written only after the transmitter-holding-register bit is set.
 //! `try_recv` polls the data-ready bit and never waits. There is no
-//! interrupt-driven RX/TX and no second UART.
+//! interrupt-driven RX/TX and no second UART. In the shell build, COM1 RX
+//! is the gate channel as well as the judged output.
 
 use core::fmt;
 
@@ -35,7 +36,7 @@ pub fn write_bytes(bytes: &[u8]) {
 }
 
 /// One received byte, or `None` when the receive buffer is empty.
-#[cfg(feature = "script")]
+#[cfg(any(feature = "script", feature = "shell"))]
 pub fn try_recv() -> Option<u8> {
     let ready = unsafe { port::inb(COM1 + 5) } & 0x01 != 0;
     if ready {

@@ -14,9 +14,12 @@
 //! reuses the panic status 35 on purpose.
 //! The shell writes `0x68` (exit ok → 209), `0x69` (command error → 211),
 //! `0x6A` (line overflow → 213), `0x6B` (script error → 215), or `0x6C`
-//! (halt → 217). `0x65`–`0x67` (203–207) and `0x6D`–`0x6F` (219–223) stay
-//! unused. Scheduler proofs write `0x70` (coop → 225), `0x71` (preempt → 227),
-//! `0x72` (sleep → 229), `0x73` (full → 231), and `0x74` (exit → 233).
+//! (halt → 217). Scheduler proofs write `0x70` (coop → 225), `0x71`
+//! (preempt → 227), `0x72` (sleep → 229), `0x73` (full → 231), `0x74`
+//! (exit → 233), and `0x75` (reap → 235). The gate proofs write `0x78`
+//! (core → 241) and `0x79` (expire → 243). Unused odd statuses: `0x65`–`0x67`
+//! (203–207), `0x6D`–`0x6F` (219–223), `0x76`–`0x77` (237–239), and
+//! `0x7A`–`0x7F` (245–255).
 //! This device exists only in the emulator. Do not boot this image on hardware.
 
 use crate::port;
@@ -132,6 +135,21 @@ pub fn sched_full_ok() -> ! {
 #[cfg(feature = "sched-exit")]
 pub fn sched_exit_ok() -> ! {
     exit(0x74)
+}
+
+#[cfg(feature = "sched-reap")]
+pub fn sched_reap_ok() -> ! {
+    exit(0x75)
+}
+
+#[cfg(feature = "gate-core")]
+pub fn gate_core_ok() -> ! {
+    exit(0x78)
+}
+
+#[cfg(feature = "gate-expire")]
+pub fn gate_expire_ok() -> ! {
+    exit(0x79)
 }
 
 pub fn cpu_fault(vector: u64) -> ! {

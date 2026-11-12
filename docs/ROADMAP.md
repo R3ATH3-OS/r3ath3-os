@@ -18,10 +18,10 @@
 4. PIC/PIT timer + PS/2 keyboard
 5. Heap + frame allocator
 6. Interactive shell. Merged in PR #6 at 4de4b2a (36/36 smoke cases).
+7. Scheduler. Merged in PR #7 at f1d2a3d (46/46 smoke cases).
 
 ## Next, in order
-7. **Scheduler.** Cooperative first, then preemptive tasks, so several things can run at once. In progress: docs/SCHEDULER.md.
-8. **Human gate.** AI agents hold limited, revocable permissions (for example, "may read work orders, may not run commands"). Every privileged action needs a human's approval, and a revocation takes effect immediately. Each action shows a plain-words explanation before the gate opens.
+8. **Human gate.** AI agents hold limited, revocable permissions (for example, "may read work orders, may not run commands"). Every privileged action needs a human's approval, and a revocation takes effect immediately. Each action shows a plain-words explanation before the gate opens. In progress: docs/GATE.md.
 9. **Flight recorder + selftest.**
    - An append-only audit log of every human and AI action, which can be replayed step by step.
    - A `selftest` command that runs the feature checks on the machine and prints a report card.

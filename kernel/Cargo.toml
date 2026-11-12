@@ -37,7 +37,12 @@ sched-preempt = ["sched"]
 sched-sleep = ["sched"]
 sched-full = ["sched"]
 sched-exit = ["sched"]
-shell = ["sched"]
+sched-reap = ["sched"]
+# Internal. Not a test mode. Implied by `shell`, `gate-core`, and `gate-expire`.
+gate = []
+gate-core = ["gate"]
+gate-expire = ["gate", "sched"]
+shell = ["sched", "gate"]
 
 [profile.dev]
 panic = "abort"
