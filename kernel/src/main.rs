@@ -5,7 +5,9 @@
 //! kernel heap and a physical frame allocator, and exits QEMU. The `shell`
 //! feature reads the keyboard instead of taking that exit.
 //! The model stays outside ring 0. The human gate, when the shell is built,
-//! checks agent requests inside the kernel.
+//! checks agent requests inside the kernel. The shell also keeps a flight
+//! recorder: an append-only record in kernel memory. That record is RAM-only
+//! and is lost on reboot.
 
 #![no_std]
 #![no_main]
@@ -35,6 +37,10 @@ mod memmap;
 mod memtest;
 mod port;
 mod qemu_exit;
+#[cfg(feature = "recorder")]
+mod recorder;
+#[cfg(feature = "recorder-core")]
+mod recordertest;
 #[cfg(feature = "sched")]
 mod sched;
 #[cfg(any(
@@ -48,6 +54,8 @@ mod sched;
 mod schedtest;
 #[cfg(any(feature = "script", feature = "kbd-script", feature = "shell"))]
 mod script;
+#[cfg(any(feature = "shell", feature = "recorder-core"))]
+mod selftest;
 mod serial;
 #[cfg(feature = "shell")]
 mod shell;
@@ -80,6 +88,7 @@ const _: () = {
         + cfg!(feature = "sched-reap") as u8
         + cfg!(feature = "gate-core") as u8
         + cfg!(feature = "gate-expire") as u8
+        + cfg!(feature = "recorder-core") as u8
         + cfg!(feature = "shell") as u8;
     assert!(modes <= 1, "enable at most one test feature");
 };
@@ -187,6 +196,9 @@ pub extern "C" fn kernel_main() -> ! {
     #[cfg(feature = "gate-expire")]
     gatetest::run_expire();
 
+    #[cfg(feature = "recorder-core")]
+    recordertest::run_core();
+
     #[cfg(feature = "shell")]
     shell::run();
 
@@ -214,6 +226,7 @@ pub extern "C" fn kernel_main() -> ! {
         feature = "sched-reap",
         feature = "gate-core",
         feature = "gate-expire",
+        feature = "recorder-core",
         feature = "shell"
     )))]
     boot_ok();
@@ -243,6 +256,7 @@ pub extern "C" fn kernel_main() -> ! {
     feature = "sched-reap",
     feature = "gate-core",
     feature = "gate-expire",
+    feature = "recorder-core",
     feature = "shell"
 )))]
 fn boot_ok() -> ! {

@@ -17,9 +17,11 @@
 //! (halt → 217). Scheduler proofs write `0x70` (coop → 225), `0x71`
 //! (preempt → 227), `0x72` (sleep → 229), `0x73` (full → 231), `0x74`
 //! (exit → 233), and `0x75` (reap → 235). The gate proofs write `0x78`
-//! (core → 241) and `0x79` (expire → 243). Unused odd statuses: `0x65`–`0x67`
-//! (203–207), `0x6D`–`0x6F` (219–223), `0x76`–`0x77` (237–239), and
-//! `0x7A`–`0x7F` (245–255).
+//! (core → 241) and `0x79` (expire → 243). The flight-recorder proof writes
+//! `0x7A` (core → 245). The record that proof checks is local; the shell's
+//! flight recorder is RAM-only and is lost on reboot. Unused odd statuses:
+//! `0x65`–`0x67` (203–207), `0x6D`–`0x6F` (219–223), `0x76`–`0x77` (237–239),
+//! and `0x7B`–`0x7F` (247–255).
 //! This device exists only in the emulator. Do not boot this image on hardware.
 
 use crate::port;
@@ -150,6 +152,11 @@ pub fn gate_core_ok() -> ! {
 #[cfg(feature = "gate-expire")]
 pub fn gate_expire_ok() -> ! {
     exit(0x79)
+}
+
+#[cfg(feature = "recorder-core")]
+pub fn recorder_core_ok() -> ! {
+    exit(0x7A)
 }
 
 pub fn cpu_fault(vector: u64) -> ! {

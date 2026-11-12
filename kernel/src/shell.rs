@@ -1,10 +1,13 @@
-//! Line-editing shell. See `docs/SHELL.md` and `docs/GATE.md`.
+//! Line-editing shell. See `docs/SHELL.md`, `docs/GATE.md`, and `docs/RECORDER.md`.
 //!
-//! Safe code only. The shell, `run`, and the gate make no heap allocation.
-//! The keyboard is the human input. COM1 RX is the agent channel. Agent bytes
-//! never enter the keyboard ring, the line editor, or `dispatch`. The model
-//! stays outside the kernel. The gate in this task decides what an agent may
-//! do. Only `Decision::Run` and `Approved::Go` start an agent action.
+//! Safe code only. The shell, `run`, the gate, and the flight recorder make no
+//! heap allocation. The keyboard is the human input. COM1 RX is the agent
+//! channel. Agent bytes never enter the keyboard ring, the line editor, or
+//! `dispatch`. The model stays outside the kernel. The gate in this task
+//! decides what an agent may do. Only `Decision::Run` and `Approved::Go` start
+//! an agent action. Every gate outcome and every finished human command is
+//! appended to the flight recorder, a module-private record in kernel memory.
+//! That record is RAM-only and is lost on reboot.
 //!
 //! When the key ring is empty the shell calls `sched::yield_now`. With no
 //! other ready task that returns at once and the shell polls again, so a key
@@ -15,6 +18,7 @@ use core::fmt::Write;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use crate::context::IrqCell;
 use crate::frames;
 use crate::gate::{
     self, Action, Approved, BadLine, DecideError, Decision, Demo, Gate, GrantError, Name, Pending,
@@ -23,16 +27,23 @@ use crate::gate::{
 use crate::heap;
 use crate::irq::{self, Key};
 use crate::qemu_exit;
+use crate::recorder::{self, Recorder};
 use crate::sched::{self, SpawnError, WaitError};
 use crate::script::{self, ScriptError, Sink};
+use crate::selftest;
 use crate::serial;
 use crate::vga;
 
 const MAX_LINE: usize = 76;
 const PROMPT: &[u8] = b"r3> ";
 const GATE_TIMEOUT_TICKS: u64 = 6000;
+const LOG_CAP: usize = 128;
+const AGENT_RESERVE: usize = 8;
+const FULL_NOTICE: &[u8] = b"log: flight recorder full; later entries are counted as lost\n";
 
-const HELP: [&str; 16] = [
+static LOG: IrqCell<Recorder<LOG_CAP>> = IrqCell::new(Recorder::new());
+
+const HELP: [&str; 19] = [
     "help        list commands",
     "echo TEXT   print TEXT",
     "clear       clear the screen",
@@ -46,6 +57,9 @@ const HELP: [&str; 16] = [
     "revoke A P  take permission P (or all) from agent A",
     "approve N   let gate request N run",
     "deny N      refuse gate request N",
+    "log         newest flight-recorder entries and totals",
+    "replay [N]  check the record and print it, or entry N",
+    "selftest    run the feature checks and print a report card",
     "run SCRIPT  run a task script, lines separated by ;",
     "exit        leave the shell with the last status",
     "halt        stop the machine",
@@ -153,12 +167,14 @@ enum GateEvent<'a> {
         seq: u32,
         verb: &'static str,
         explain: &'static str,
+        action: Action,
     },
     Refused {
         agent: &'a Name,
         seq: u32,
         verb: &'static str,
         refusal: Refusal,
+        action: Action,
     },
     Bad {
         reason: &'static str,
@@ -234,10 +250,12 @@ pub fn run() -> ! {
                     if overflow {
                         out.both(b"error: line too long (max 76)\n");
                         last = Last::Overflow;
+                        record_human(&mut out, trim_spaces(&buf[..len]), last);
                     } else {
                         let line = trim_spaces(&buf[..len]);
                         if !line.is_empty() {
                             dispatch(&mut out, line, &mut last, &mut gate);
+                            record_human(&mut out, line, last);
                         }
                     }
                     len = 0;
@@ -354,6 +372,9 @@ fn dispatch(out: &mut Out, line: &[u8], last: &mut Last, gate: &mut Gate) {
         b"revoke" => revoke_cmd(out, rest, last, gate),
         b"approve" => approve_cmd(out, rest, last, gate),
         b"deny" => deny_cmd(out, rest, last, gate),
+        b"log" => log_cmd(out, rest, last),
+        b"replay" => replay_cmd(out, rest, last),
+        b"selftest" => selftest_cmd(out, rest, last),
         b"run" => {
             let script = skip_spaces(rest);
             if script.is_empty() {
@@ -396,6 +417,10 @@ fn dispatch(out: &mut Out, line: &[u8], last: &mut Last, gate: &mut Gate) {
 }
 
 fn handle_agent_line(out: &mut Out, gate: &mut Gate, incoming: Incoming) {
+    if !LOG.with(|log| log.admits_agent(AGENT_RESERVE)) {
+        refuse_full(out, incoming);
+        return;
+    }
     let parsed = match incoming {
         Incoming::TooLong => Err((BadLine::TooLong, None)),
         Incoming::Line(buf, len) => gate::parse_request(&buf[..len]),
@@ -427,6 +452,7 @@ fn handle_agent_line(out: &mut Out, gate: &mut Gate, incoming: Incoming) {
                         seq,
                         verb,
                         refusal,
+                        action: req.action,
                     },
                 ),
                 Decision::Run(action) => report(
@@ -450,6 +476,7 @@ fn handle_agent_line(out: &mut Out, gate: &mut Gate, incoming: Incoming) {
                             seq,
                             verb,
                             explain,
+                            action: req.action,
                         },
                     );
                 }
@@ -576,6 +603,11 @@ fn approve_cmd(out: &mut Out, rest: &[u8], last: &mut Last, gate: &mut Gate) {
         return;
     };
     note_expiry(out, gate);
+    if LOG.with(|log| log.is_full()) {
+        out.both(b"error: flight recorder full: approve refused\n");
+        *last = Last::Cmd;
+        return;
+    }
     let Some(rq) = parse_u32(word) else {
         no_pending(out, word);
         *last = Last::Cmd;
@@ -672,6 +704,7 @@ fn report(out: &mut Out, ev: &GateEvent<'_>) {
             seq,
             verb,
             explain,
+            action,
         } => {
             let _ = write!(out, "gate: request {rq} from ");
             out.both(agent.as_bytes());
@@ -689,12 +722,27 @@ fn report(out: &mut Out, ev: &GateEvent<'_>) {
                 None,
                 None,
             );
+            record_agent(
+                out,
+                Some(agent),
+                recorder::event_body(
+                    None,
+                    action_word(*action),
+                    Some(*seq),
+                    Some(*rq),
+                    "pending",
+                    None,
+                    None,
+                    None,
+                ),
+            );
         }
         GateEvent::Refused {
             agent,
             seq,
             verb,
             refusal,
+            action,
         } => {
             out.both(b"gate: refused ");
             out.both(agent.as_bytes());
@@ -716,12 +764,31 @@ fn report(out: &mut Out, ev: &GateEvent<'_>) {
                 None,
                 Some(refusal.as_str()),
             );
+            record_agent(
+                out,
+                Some(agent),
+                recorder::event_body(
+                    None,
+                    action_word(*action),
+                    Some(*seq),
+                    None,
+                    "denied",
+                    None,
+                    Some(refusal.as_str()),
+                    None,
+                ),
+            );
         }
         GateEvent::Bad { reason, agent, seq } => {
             out.both(b"gate: ignored a bad request line (");
             out.both(reason.as_bytes());
             out.both(b")\n");
             reply(*agent, *seq, None, "bad", None, None, Some(reason));
+            record_agent(
+                out,
+                *agent,
+                recorder::event_body(None, "-", *seq, None, "bad", None, Some(reason), None),
+            );
         }
         GateEvent::Ran { agent, seq, action } => match action {
             Action::Read => {
@@ -741,6 +808,11 @@ fn report(out: &mut Out, ev: &GateEvent<'_>) {
                     None,
                     None,
                 );
+                record_agent(
+                    out,
+                    Some(agent),
+                    recorder::event_body(None, "read", Some(*seq), None, "done", None, None, None),
+                );
             }
             Action::Say { text, len } => {
                 out.both(agent.as_bytes());
@@ -756,6 +828,20 @@ fn report(out: &mut Out, ev: &GateEvent<'_>) {
                     None,
                     None,
                 );
+                record_agent(
+                    out,
+                    Some(agent),
+                    recorder::event_body(
+                        None,
+                        "say",
+                        Some(*seq),
+                        None,
+                        "done",
+                        None,
+                        None,
+                        Some(&text[..*len as usize]),
+                    ),
+                );
             }
             Action::Spawn(_) | Action::Halt => {}
         },
@@ -769,6 +855,10 @@ fn report(out: &mut Out, ev: &GateEvent<'_>) {
                         demo.as_str()
                     );
                     reply_pending(pending, "done", Some(*id), None);
+                    record_gate(
+                        out,
+                        gate_event_body(pending, "done", Some(*id), None),
+                    );
                 }
             }
             Action::Halt => {
@@ -778,6 +868,7 @@ fn report(out: &mut Out, ev: &GateEvent<'_>) {
                     pending.rq
                 );
                 reply_pending(pending, "done", None, None);
+                record_gate(out, gate_event_body(pending, "done", None, None));
             }
             Action::Read | Action::Say { .. } => {}
         },
@@ -788,10 +879,12 @@ fn report(out: &mut Out, ev: &GateEvent<'_>) {
                 pending.rq
             );
             reply_pending(pending, "failed", None, Some("full"));
+            record_gate(out, gate_event_body(pending, "failed", None, Some("full")));
         }
         GateEvent::Denied { pending } => {
             let _ = write!(out, "gate: request {} denied\n", pending.rq);
             reply_pending(pending, "denied", None, Some("human"));
+            record_gate(out, gate_event_body(pending, "denied", None, Some("human")));
         }
         GateEvent::Cancelled { pending } => {
             let _ = write!(out, "gate: request {} cancelled: ", pending.rq);
@@ -800,6 +893,10 @@ fn report(out: &mut Out, ev: &GateEvent<'_>) {
             out.both(pending.action.perm().as_str().as_bytes());
             out.both(b"\n");
             reply_pending(pending, "denied", None, Some("revoked"));
+            record_gate(
+                out,
+                gate_event_body(pending, "denied", None, Some("revoked")),
+            );
         }
         GateEvent::Expired { pending } => {
             let _ = write!(
@@ -808,6 +905,10 @@ fn report(out: &mut Out, ev: &GateEvent<'_>) {
                 pending.rq
             );
             reply_pending(pending, "denied", None, Some("timeout"));
+            record_gate(
+                out,
+                gate_event_body(pending, "denied", None, Some("timeout")),
+            );
         }
         GateEvent::Granted { agent, perm } => {
             out.both(b"granted ");
@@ -815,6 +916,7 @@ fn report(out: &mut Out, ev: &GateEvent<'_>) {
             out.both(b" ");
             out.both(perm.as_bytes());
             out.both(b"\n");
+            record_words(out, b"grant ", agent.as_bytes(), perm.as_bytes());
         }
         GateEvent::Revoked { agent, what } => {
             out.both(b"revoked ");
@@ -822,6 +924,7 @@ fn report(out: &mut Out, ev: &GateEvent<'_>) {
             out.both(b" ");
             out.both(what.as_bytes());
             out.both(b"\n");
+            record_words(out, b"revoke ", agent.as_bytes(), what.as_bytes());
         }
     }
 }
@@ -923,13 +1026,17 @@ fn no_pending(out: &mut Out, word: &[u8]) {
     out.both(b"\n");
 }
 
-fn leave(last: Last) -> ! {
-    let word = match last {
+fn last_word(last: Last) -> &'static str {
+    match last {
         Last::Ok => "ok",
         Last::Cmd => "cmd",
         Last::Overflow => "overflow",
         Last::Script => "script",
-    };
+    }
+}
+
+fn leave(last: Last) -> ! {
+    let word = last_word(last);
     serial::write_str("R3ATH3_SHELL_EXIT last=");
     serial::write_str(word);
     serial::write_str("\n");
@@ -1148,4 +1255,271 @@ fn trim_spaces(src: &[u8]) -> &[u8] {
         end -= 1;
     }
     &src[start..end]
+}
+
+fn action_word(action: Action) -> &'static str {
+    match action {
+        Action::Read => "read",
+        Action::Say { .. } => "say",
+        Action::Spawn(Demo::Nap) => "spawn-nap",
+        Action::Spawn(Demo::Spin) => "spawn-spin",
+        Action::Halt => "halt",
+    }
+}
+
+fn gate_event_body(
+    pending: &Pending,
+    result: &str,
+    id: Option<usize>,
+    reason: Option<&str>,
+) -> recorder::Body {
+    recorder::event_body(
+        Some(pending.agent.as_bytes()),
+        action_word(pending.action),
+        Some(pending.seq),
+        Some(pending.rq),
+        result,
+        id,
+        reason,
+        None,
+    )
+}
+
+/// Append one entry. Samples the tick, then appends inside `LOG.with`.
+/// Prints the full notice after the closure when this append filled the record.
+/// A body that overflowed, or a tag or body `append` rejects, is counted lost.
+fn record(out: &mut Out, tag: &[u8], body: &[u8]) {
+    let tick = irq::ticks();
+    let notice = LOG.with(|log| match log.append(tick, tag, body) {
+        Ok(n) => n as usize == log.capacity(),
+        Err(_) => false,
+    });
+    if notice {
+        out.both(FULL_NOTICE);
+    }
+}
+
+fn record_body(out: &mut Out, tag: &[u8], body: &recorder::Body) {
+    if body.overflow() {
+        LOG.with(|log| log.note_lost());
+        return;
+    }
+    record(out, tag, body.as_bytes());
+}
+
+fn record_agent(out: &mut Out, agent: Option<&Name>, body: recorder::Body) {
+    let (tag, len) = agent_tag(agent);
+    record_body(out, &tag[..len], &body);
+}
+
+fn record_gate(out: &mut Out, body: recorder::Body) {
+    record_body(out, b"gate", &body);
+}
+
+fn record_words(out: &mut Out, kind: &[u8], agent: &[u8], what: &[u8]) {
+    let mut buf = [0u8; 32];
+    let mut n = 0usize;
+    for &byte in kind.iter().chain(agent).chain(b" ".iter()).chain(what) {
+        buf[n] = byte;
+        n += 1;
+    }
+    record(out, b"gate", &buf[..n]);
+}
+
+fn record_human(out: &mut Out, line: &[u8], last: Last) {
+    let (tag, len) = human_tag(last);
+    record(out, &tag[..len], line);
+}
+
+fn human_tag(last: Last) -> ([u8; recorder::TAG_MAX], usize) {
+    let word = last_word(last).as_bytes();
+    let mut tag = [0u8; recorder::TAG_MAX];
+    let prefix = b"human last=";
+    tag[..prefix.len()].copy_from_slice(prefix);
+    tag[prefix.len()..prefix.len() + word.len()].copy_from_slice(word);
+    (tag, prefix.len() + word.len())
+}
+
+fn agent_tag(agent: Option<&Name>) -> ([u8; recorder::TAG_MAX], usize) {
+    let mut tag = [0u8; recorder::TAG_MAX];
+    tag[..6].copy_from_slice(b"agent ");
+    match agent {
+        Some(name) => {
+            let bytes = name.as_bytes();
+            tag[6..6 + bytes.len()].copy_from_slice(bytes);
+            (tag, 6 + bytes.len())
+        }
+        None => {
+            tag[6] = b'-';
+            (tag, 7)
+        }
+    }
+}
+
+fn refuse_full(out: &mut Out, incoming: Incoming) {
+    let (agent, seq, verb) = match incoming {
+        Incoming::TooLong => (None, None, None),
+        Incoming::Line(buf, len) => match gate::parse_request(&buf[..len]) {
+            Ok(req) => (
+                Some(req.agent),
+                Some(req.seq),
+                Some(req.action.perm().as_str()),
+            ),
+            Err((_, Some((name, seq)))) => (Some(name), Some(seq), None),
+            Err((_, None)) => (None, None, None),
+        },
+    };
+    out.both(b"gate: ignored an agent line: flight recorder full\n");
+    reply(
+        agent.as_ref(),
+        seq,
+        verb,
+        "denied",
+        None,
+        None,
+        Some("log-full"),
+    );
+    LOG.with(|log| log.note_lost());
+}
+
+fn log_cmd(out: &mut Out, rest: &[u8], last: &mut Last) {
+    if has_extra(rest) {
+        usage(out, b"log");
+        *last = Last::Cmd;
+        return;
+    }
+    let (len, lost, head) = LOG.with(|log| (log.len(), log.lost(), log.head()));
+    let _ = write!(out, "log entries={len} of {LOG_CAP} lost={lost} head=");
+    write_hex16(out, head);
+    out.both(b"\n");
+    let start = len.saturating_sub(5);
+    for n in (start + 1)..=len {
+        if let Some(entry) = LOG.with(|log| log.get(n as u32)) {
+            print_entry(out, &entry);
+        }
+    }
+    *last = Last::Ok;
+}
+
+fn replay_cmd(out: &mut Out, rest: &[u8], last: &mut Last) {
+    let text = skip_spaces(rest);
+    if text.is_empty() {
+        replay_all(out, last);
+        return;
+    }
+    let mut end = 0usize;
+    while end < text.len() && text[end] != b' ' {
+        end += 1;
+    }
+    if !skip_spaces(&text[end..]).is_empty() {
+        usage(out, b"replay [N]");
+        *last = Last::Cmd;
+        return;
+    }
+    replay_one(out, &text[..end], last);
+}
+
+fn replay_all(out: &mut Out, last: &mut Last) {
+    match LOG.with(|log| log.verify()) {
+        recorder::Verify::Broken { at } => {
+            for n in 1..at {
+                if let Some(entry) = LOG.with(|log| log.get(n)) {
+                    print_entry(out, &entry);
+                }
+            }
+            let _ = write!(out, "replay: chain broken at #{at}\n");
+            *last = Last::Cmd;
+        }
+        recorder::Verify::Ok => {
+            let len = LOG.with(|log| log.len());
+            for n in 1..=len {
+                if let Some(entry) = LOG.with(|log| log.get(n as u32)) {
+                    print_entry(out, &entry);
+                }
+            }
+            let (len, lost, head) = LOG.with(|log| (log.len(), log.lost(), log.head()));
+            let _ = write!(out, "replay ok entries={len} lost={lost} head=");
+            write_hex16(out, head);
+            out.both(b"\n");
+            *last = Last::Ok;
+        }
+    }
+}
+
+fn replay_one(out: &mut Out, word: &[u8], last: &mut Last) {
+    let len = LOG.with(|log| log.len());
+    let Some(n) = parse_u32(word) else {
+        no_entry(out, word);
+        *last = Last::Cmd;
+        return;
+    };
+    if n == 0 || n as usize > len {
+        no_entry(out, word);
+        *last = Last::Cmd;
+        return;
+    }
+    match LOG.with(|log| log.verify_upto(n)) {
+        recorder::Verify::Broken { at } => {
+            let _ = write!(out, "replay: chain broken at #{at}\n");
+            *last = Last::Cmd;
+        }
+        recorder::Verify::Ok => {
+            if let Some(entry) = LOG.with(|log| log.get(n)) {
+                print_entry(out, &entry);
+            }
+            let len = LOG.with(|log| log.len());
+            let _ = write!(out, "replay step {n} of {len} ok\n");
+            *last = Last::Ok;
+        }
+    }
+}
+
+fn no_entry(out: &mut Out, word: &[u8]) {
+    out.both(b"error: no log entry ");
+    out.both(word);
+    out.both(b"\n");
+}
+
+fn selftest_cmd(out: &mut Out, rest: &[u8], last: &mut Last) {
+    if has_extra(rest) {
+        usage(out, b"selftest");
+        *last = Last::Cmd;
+        return;
+    }
+    let heap_before = heap::used();
+    let live_ok = LOG.with(|log| log.verify()) == recorder::Verify::Ok;
+    let card = selftest::run(heap_before, live_ok);
+    selftest::write_card(out, &card);
+    let ok = card.ok_count();
+    let fail = card.fail_count();
+    let body = selftest_body(ok, fail);
+    record(out, b"selftest", &body);
+    *last = if fail == 0 { Last::Ok } else { Last::Cmd };
+}
+
+fn selftest_body(ok: usize, fail: usize) -> [u8; 11] {
+    let mut body = *b"ok=0 fail=0";
+    body[3] = b'0' + ok as u8;
+    body[10] = b'0' + fail as u8;
+    body
+}
+
+fn print_entry(out: &mut Out, entry: &recorder::Entry) {
+    let _ = write!(out, "#{} t={} ", entry.n(), entry.tick());
+    out.both(entry.tag());
+    out.both(b" link=");
+    write_hex16(out, entry.link());
+    out.both(b"\n  ");
+    out.both(entry.body());
+    out.both(b"\n");
+}
+
+fn write_hex16(out: &mut Out, value: u64) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut buf = [0u8; 16];
+    for index in 0..16 {
+        let shift = (15 - index) * 4;
+        buf[index] = HEX[((value >> shift) & 0xf) as usize];
+    }
+    out.both(&buf);
 }

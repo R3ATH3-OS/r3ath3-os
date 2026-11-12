@@ -42,7 +42,10 @@ sched-reap = ["sched"]
 gate = []
 gate-core = ["gate"]
 gate-expire = ["gate", "sched"]
-shell = ["sched", "gate"]
+# Internal. Not a test mode. Implied by `shell` and `recorder-core`.
+recorder = []
+recorder-core = ["recorder"]
+shell = ["sched", "gate", "recorder"]
 
 [profile.dev]
 panic = "abort"
