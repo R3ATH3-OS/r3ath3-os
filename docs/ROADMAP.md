@@ -22,13 +22,10 @@
 8. Human gate. Merged in PR #8 at 64d7225 from tested head 92abe8c (56/56 smoke cases).
 9. Flight recorder + selftest. Merged in PR #9 at 08a4bc6 from tested head 9ce5596 (61/61 smoke cases).
 10. **Storage (QEMU-emulated).** RAM disk merged in PR #10; emulated NVMe merged in PR #11 at `3ac0fe5` from tested head `ac0f38a`. Official smoke on the tested head `ac0f38a` was 68/68, 28 builds, harness-selftest PASS, smoke_exit=0, dirty 0, rustc 1.83.0, QEMU 8.2.2. Saved data survives a reboot only inside the emulated disk image. Without a disk the RAM disk is erased by a reboot.
+11. **WebAssembly runtime.** A sandbox for apps and for AI tools, running under the gate's permissions. Game logic is written once and runs on R3@TH3 and on the web. Merged in PR #13 at `3036b6b` from tested head `c9c778f`. Official smoke on that tested head was 75/75. Glue Duty runs in text mode. Later native apps, not started: Watch Mechanic, The Movement (a system monitor), the shop terminal, and a Patterns trainer.
 
 ## Next, in order
-11. **WebAssembly runtime.** A sandbox for apps and for AI tools, running under the gate's permissions. Game logic is written once and runs on R3@TH3 and on the web.
-    In progress: `docs/WASM.md` (part B: Glue Duty in text mode).
-    - The first native app is Glue Duty.
-    - Then Watch Mechanic, The Movement (a system monitor), the shop terminal, and a Patterns trainer.
-12. **Framebuffer graphics + PC speaker sound.**
+12. **Framebuffer graphics + PC speaker sound.** In progress. Part A is 320×200 VGA mode 13h and the PC speaker (`docs/FRAMEBUFFER.md`, `docs/SPEAKER.md`). Higher resolution and other upgrades come later, not in this part and not in part B. Part B, after part A is on main, is Glue Duty in pixels and sound.
 13. **Real hardware.** USB keyboard and booting on a mini PC or a Raspberry Pi, leading to the instant-boot, offline shop appliance.
 
 ## Editions (later)

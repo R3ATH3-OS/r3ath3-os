@@ -8,7 +8,7 @@
 use crate::wasm::{Instance, ValType};
 #[cfg(feature = "shell")]
 use crate::wasm::LoadError;
-#[cfg(any(feature = "shell", feature = "wasm-glue"))]
+#[cfg(any(feature = "shell", feature = "wasm-glue", feature = "fb-core"))]
 use crate::wasm::Trap;
 
 #[cfg(feature = "shell")]
@@ -257,11 +257,15 @@ fn present(inst: &mut Instance<'_, '_>) -> Result<(), Trap> {
         None => return Err(Trap::Memory),
     };
     vga::present(&memory[start..start + 2000]);
+    blit_exported(inst)?;
     Ok(())
 }
 
 #[cfg(feature = "shell")]
 fn finish(name: &str, end: End) {
+    if crate::fb::in_graphics() {
+        crate::fb::enter_text();
+    }
     vga::console_clear();
     match end {
         End::NotLoaded(error) => {
@@ -353,7 +357,32 @@ pub(crate) fn printable(byte: u8) -> u8 {
     }
 }
 
-#[cfg(any(feature = "shell", feature = "wasm-glue"))]
+/// Copy an exported `r3_pixels` buffer into the framebuffer and blit it.
+/// `Ok(false)` means the module does not export `r3_pixels`. Apps without
+/// that export stay on the text path.
+#[cfg(any(feature = "shell", feature = "fb-core"))]
+pub fn blit_exported(inst: &mut Instance<'_, '_>) -> Result<bool, Trap> {
+    if !inst.func_matches("r3_pixels", &[], Some(ValType::I32)) {
+        return Ok(false);
+    }
+    let offset = match inst.call("r3_pixels", &[]) {
+        Ok(Some(value)) => value,
+        Ok(None) => return Err(Trap::Memory),
+        Err(trap) => return Err(trap),
+    };
+    let memory = inst.memory();
+    let Some(start) = offset_of(offset, memory.len(), crate::fb::LEN) else {
+        return Err(Trap::Memory);
+    };
+    crate::fb::enter_graphics();
+    if !crate::fb::copy_from(&memory[start..start + crate::fb::LEN]) {
+        return Err(Trap::Memory);
+    }
+    crate::fb::blit();
+    Ok(true)
+}
+
+#[cfg(any(feature = "shell", feature = "wasm-glue", feature = "fb-core"))]
 pub(crate) fn offset_of(offset: i64, len: usize, span: usize) -> Option<usize> {
     if offset < 0 {
         return None;
