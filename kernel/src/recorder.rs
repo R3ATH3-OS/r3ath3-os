@@ -76,6 +76,26 @@ impl Entry {
     pub fn body(&self) -> &[u8] {
         &self.body[..self.body_len as usize]
     }
+
+    /// Rebuild a stored entry. Checks lengths and printable bytes, not the link.
+    pub fn from_parts(n: u32, tick: u64, link: u64, tag: &[u8], body: &[u8]) -> Option<Entry> {
+        if n == 0 || !valid_text(tag, 1, TAG_MAX) || !valid_text(body, 0, BODY_MAX) {
+            return None;
+        }
+        let mut stored_tag = [0u8; TAG_MAX];
+        stored_tag[..tag.len()].copy_from_slice(tag);
+        let mut stored_body = [0u8; BODY_MAX];
+        stored_body[..body.len()].copy_from_slice(body);
+        Some(Entry {
+            n,
+            tick,
+            link,
+            tag: stored_tag,
+            tag_len: tag.len() as u8,
+            body: stored_body,
+            body_len: body.len() as u8,
+        })
+    }
 }
 
 const _: () = assert!(core::mem::size_of::<Entry>() == 128);

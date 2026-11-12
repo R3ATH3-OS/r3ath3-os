@@ -98,7 +98,7 @@ Task lines that smoke judges are written inside `irq::without_interrupts`, so a 
 
 The key loop calls `sched::yield_now` instead of `irq::idle_hlt`. With nothing else ready, `pick_next` returns the shell and `yield_now` returns at once, so a key is noticed within one tick (10 ms). With six `spin` tasks the shell runs once per round of quanta, at most 70 ms. When the shell is blocked in `wait` and nothing else is ready, idle halts.
 
-`help` is 19 lines. These three are inserted after `mem`. The five gate lines sit after `wait ID` (`docs/GATE.md`, `docs/SHELL.md`):
+`help` is 24 lines. These three are inserted after `mem`. The five gate lines sit after `wait ID` (`docs/GATE.md`, `docs/SHELL.md`):
 
 ```
 ps          list tasks

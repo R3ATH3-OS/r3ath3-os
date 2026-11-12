@@ -6,7 +6,7 @@ This document is the spec for the flight recorder and `selftest`. If the code an
 
 There are no crates.io dependencies. The toolchain is rustc/cargo 1.83.0, target `x86_64-unknown-none`.
 
-The record is the first one the kernel keeps. Milestone 8 printed gate outcomes. This image appends them. The record is RAM-only and is lost on reboot until storage (milestone 10).
+The record is the first one the kernel keeps. Milestone 8 printed gate outcomes. This image appends them, and writes each entry through to the store. In this image the store is the RAM disk, and a reboot erases both (`docs/STORAGE.md`).
 
 ## 1. Scope
 
@@ -15,16 +15,16 @@ In this image:
 1. `recorder.rs`: a pure, safe, generic, fixed-capacity append-only record with a hash chain, and the body formatter.
 2. Recording in the shell. Every gate event goes through `report()`. Every human command line is recorded with its outcome. One summary entry is recorded per `selftest`.
 3. The full-record policy. No entry is overwritten. Agent lines are refused when only the reserve is left. `approve` is refused when the record is full. The human is never locked out, and unrecorded actions are counted.
-4. Human commands `log`, `replay`, `replay N`, and `selftest`. `help` is 19 lines.
-5. `selftest.rs`: seven safe on-machine checks and the report card.
+4. Human commands `log`, `replay`, `replay N`, and `selftest`. `help` is 24 lines.
+5. `selftest.rs`: eight safe on-machine checks and the report card. The eighth, `store`, is specified in `docs/STORAGE.md`.
 6. One kernel proof, `recorder-core` (status 245, fake clock).
 7. Four shell cases (`log-record`, `log-full`, `log-usage`, `shell-selftest`) and the `log` judge.
 
-Not in this image, and not added here: persistence across reboot, a RAM disk, NVMe, or a file system; WASM, a framebuffer, or sound; any model, inference, or agent runtime in the kernel; crypto (SHA-256, HMAC, keys, or signatures); an agent verb or any COM1 path that reads, clears, or changes the record; clearing, rotating, or overwriting the record; re-executing recorded actions; undoing approved actions; queueing more than one pending request; recording keystrokes, raw agent bytes, `R3GATE data` lines, or scheduler internals; wall-clock dates or reading the RTC in the shell; fault injection, panics, or spawned tasks inside `selftest`; changes to the gate's decisions, verbs, or the reply protocol, except the reason word `log-full`; heap allocation in the shell, recorder, or selftest; new `unsafe`. The default boot path is unchanged: boot marker, status 33.
+Not in this image, and not added here: a copy that survives a reboot, NVMe, or a file system; WASM, a framebuffer, or sound; any model, inference, or agent runtime in the kernel; crypto (SHA-256 was considered in milestone 10 and not adopted, see `docs/STORAGE.md`; also HMAC, keys, or signatures); an agent verb or any COM1 path that reads, clears, or changes the record; clearing, rotating, or overwriting the record; re-executing recorded actions; undoing approved actions; queueing more than one pending request; recording keystrokes, raw agent bytes, `R3GATE data` lines, or scheduler internals; wall-clock dates or reading the RTC in the shell; fault injection, panics, or spawned tasks inside `selftest`; changes to the gate's decisions, verbs, or the reply protocol, except the reason word `log-full`; heap allocation in the shell, recorder, or selftest; new `unsafe`. The default boot path is unchanged: boot marker, status 33.
 
 Honest limits, on purpose:
 
-- The record is RAM-only and is lost on reboot until milestone 10.
+- The live record is written through to the store. In this image that store is the RAM disk, and a reboot erases both.
 - In this emulator build, COM1 TX carries the human transcript, including `log` and `replay`. Whoever reads the host side of COM1 sees what the human sees. No request can fetch the record, and nothing on COM1 can change it. The same lines also print on VGA, which does not pass through the host's serial capture.
 - Agent names are self-asserted. The record stores the claimed name.
 - The chain is not crypto. It is not keyed and not collision-resistant.
@@ -34,7 +34,7 @@ Honest limits, on purpose:
 
 `kernel/src/recorder.rs` is safe code only: `Entry`, `Recorder<const N: usize>`, `link()`, `Verify`, `AppendError`, `Body`, and `event_body()`. No I/O, no statics, no allocation, no `unsafe`. Time comes in as a `tick: u64` argument.
 
-`kernel/src/recordertest.rs` is the `recorder-core` body. `kernel/src/selftest.rs` holds the check names, `Card`, and the report-card line formatters (compiled for `any(shell, recorder-core)`). The seven checks are compiled only for `shell`. `selftest.rs` never sees the live gate or the live record.
+`kernel/src/recordertest.rs` is the `recorder-core` body. `kernel/src/selftest.rs` holds the check names, `Card`, and the report-card line formatters (compiled for `any(shell, recorder-core)`). The eight checks are compiled only for `shell`. `selftest.rs` never sees the live gate, the live record, or the store. The shell passes the store result in.
 
 The live record is a module-private `static LOG: IrqCell<Recorder<128>>` in `shell.rs`. `IrqCell` is the existing safe wrapper the scheduler table already uses, so this adds no `unsafe`. Module privacy keeps any other kernel module from naming it. `Recorder::new()` is a `const fn` whose bytes are all zero, and the empty-record head is computed rather than stored, so the static lands in `.bss`.
 
@@ -200,7 +200,7 @@ What it does not prove:
 
 - It is not keyed and not collision-resistant. Kernel code that can write this memory can rewrite entries and recompute every later link.
 - Truncating the newest entries and lowering `len` is invisible unless the human noted the head.
-- It proves nothing after a reboot, when the record is gone.
+- It proves nothing after a reboot. The live record is written through to the RAM disk, and a reboot erases both.
 - The kernel has no entropy source or key storage, and anyone who controls ring 0 also controls the verifier. That is why there is no crypto.
 
 The agent has no write path into kernel memory. It can only send bounded, printable COM1 lines. The reserve covers floods, and the indented body line covers display forgery. The host can drop or edit serial output. The record stays in kernel RAM, and `log` and `replay` also print on VGA.
@@ -244,6 +244,7 @@ impl Entry {
     pub fn link(&self) -> u64;
     pub fn tag(&self) -> &[u8];
     pub fn body(&self) -> &[u8];
+    pub fn from_parts(n: u32, tick: u64, link: u64, tag: &[u8], body: &[u8]) -> Option<Entry>;
 }
 pub enum AppendError { Full, Bad }   // both add one to lost
 pub enum Verify { Ok, Broken { at: u32 } }
@@ -300,7 +301,7 @@ No shell path allocates. `LOG.with` closures copy one `Entry` (128 bytes) out at
 
 ## 11. `selftest`
 
-The checks are safe, bounded, and read-mostly. A normal `selftest` never panics, never takes a fault path, never spawns a task, never touches the live gate, and never changes the live record except for its own summary entry. Each check returns `Result<(), &'static str>`. All seven run, then the card prints. There is no `unwrap` and no `panic!` in `selftest.rs`. `selftest.rs` never calls `sched::spawn`, `qemu_exit`, or anything in `shell.rs`.
+The checks are safe, bounded, and read-mostly. A normal `selftest` never panics, never takes a fault path, never spawns a task, never touches the live gate, and never changes the live record except for its own summary entry. Each check returns `Result<(), &'static str>`. All eight run, then the card prints. There is no `unwrap` and no `panic!` in `selftest.rs`. `selftest.rs` never calls `sched::spawn`, `qemu_exit`, or anything in `shell.rs`. The `store` check is computed by the shell with `store::check_live` before `selftest::run`. It only reads. Its failure details are `superblock unreadable`, `store write failed`, and `record copy differs` (`docs/STORAGE.md`).
 
 | # | Name | What it does | Failure detail |
 | --- | --- | --- | --- |
@@ -310,23 +311,25 @@ The checks are safe, bounded, and read-mostly. A normal `selftest` never panics,
 | 4 | `script` | `run_inline(b"set n 2; add n 3; print n; say \"ok\"", &mut cap)` into a fixed-buffer capture sink. Require `Ok` and exactly the lines `n=5`, `ok`. | `script error` · `script output differs` |
 | 5 | `gate` | A scratch `Gate::new(100)` with a fake clock and agent name `st`. Expect, in order: read with no badge → `Refused(NoBadge)`. Grant read; read → `Run(Read)`. `spawn nap` → `Refused(NoPermission(Spawn))`. Grant spawn; `spawn nap` at 0 → `Pending { rq: 1 }`. `spawn spin` → `Refused(Busy)`. `approve(2)` → `Err`. `approve(1)` → `Go` with `rq == 1`; the returned `Pending` is dropped and nothing is executed. `approve(1)` → `Err`. `spawn nap` at 10 → `Pending { rq: 2 }`. `poll(109)` → `None`. `poll(110)` → expired rq 2. | `gate decision differs` |
 | 6 | `recorder` | The shell passes `live_ok = LOG.verify() == Ok`. Then a scratch `Recorder<4>`: four appends (ticks 1–4, tag `selftest`, body `x`) give `Ok(1..=4)`, the fifth gives `Err(Full)`, `lost() == 1`, `verify() == Ok`, and `head()` equals `get(4)`'s link. | `live chain broken` · `scratch log misbehaved` |
-| 7 | `heap` | `heap::used()` read at the start of `selftest` equals `heap::used()` read now, and is at most `heap::SIZE`. | `heap use changed during selftest` |
+| 7 | `store` | The shell's `check_live`: the superblock reads, this boot's record matches the live chain, and a failed write-through is reported. When this boot has no record, the check passes. | `superblock unreadable` · `store write failed` · `record copy differs` |
+| 8 | `heap` | `heap::used()` read at the start of `selftest` equals `heap::used()` read now, and is at most `heap::SIZE`. | `heap use changed during selftest` |
 
 The card is exact. Names are padded to 8 columns, then one space:
 
 ```
-selftest: 7 checks
+selftest: 8 checks
 selftest timer    ok
 selftest sched    ok
 selftest frames   ok
 selftest script   ok
 selftest gate     ok
 selftest recorder ok
+selftest store    ok
 selftest heap     ok
-selftest: 7 of 7 ok
+selftest: 8 of 8 ok
 ```
 
-A failed check prints `selftest <name padded to 8> FAIL <detail>`, for example `selftest frames   FAIL no free frame`. The summary becomes `selftest: <ok> of 7 ok, <fail> failed`.
+A failed check prints `selftest <name padded to 8> FAIL <detail>`, for example `selftest frames   FAIL no free frame`. The summary becomes `selftest: <ok> of 8 ok, <fail> failed`.
 
 After the card, the shell records `selftest` / `ok=<n> fail=<m>`. That append happens before the human-line entry. `selftest` takes at least 70 ms (5 + 2 ticks). Agent lines wait in the buffer meanwhile, as they do during `wait`.
 
@@ -347,7 +350,7 @@ No scheduler and no timer: every tick is a literal. Each step prints one line `R
 7. `corrupt_for_test(3)`. `verify()` → `Broken { at: 3 }`. `verify_upto(2)` → `Ok`: `step=7 tamper=3 verify=broken at=3 upto2=ok`
 8. `get(0)` → `None`. `get(7)` → `None`. `get(1)` → tick 10, tag `human last=ok`, body `help`: `step=8 get0=none get7=none get1=10,human last=ok,help`
 9. The check-line formatter for frames gives `step=9 card=selftest frames   FAIL no free frame`
-10. The summary formatter for that card gives `step=10 card=selftest: 6 of 7 ok, 1 failed`
+10. The summary formatter for that card gives `step=10 card=selftest: 7 of 8 ok, 1 failed`
 11. `event_body` for the expired halt and the failed spawn: `step=11 expired=ai1 halt seq=1 rq=4 denied reason=timeout|failed=ai1 spawn-spin seq=7 rq=5 failed reason=full`
 
 The links in steps 2, 3, and 5 come from section 7. Links 3–5 of that record are `7e04d0e40086d407`, `36286de24c5c145c`, and `41b02d0be281909e`.
@@ -358,7 +361,7 @@ The links in steps 2, 3, and 5 come from section 7. Links 3–5 of that record a
 | --- | --- | --- | --- |
 | `0x7A` | 245 | `recorder-core` ok | `recorder_core_ok` (compiled only for `recorder-core`) |
 
-Shell cases use the shell outcome statuses 209 and 211. The unused odd statuses are 203–207, 219–223, 237–239, and 247–255: 13 values.
+Shell cases use the shell outcome statuses 209 and 211. The store proof uses 247. The unused odd statuses are 203, 205, 207, 219, 221, 223, 237, 239, 249, 251, 253, and 255: 12 values.
 
 ## 14. Determinism
 
@@ -371,7 +374,7 @@ Shell cases use the shell outcome statuses 209 and 211. The unused odd statuses 
 
 ## 15. Smoke
 
-`./scripts/smoke.sh` runs 61 QEMU cases, plus `harness-selftest`, and 26 build lines. The new build is `recorder-core`. All 56 earlier cases keep their judges. Only `shell-basic`'s expected help text changes, and it now lists 19 lines. `expect_gate` takes an optional sixth argument: `exact` (the default, so the six existing gate calls are unchanged) or `log`.
+`./scripts/smoke.sh` runs 64 QEMU cases, plus `harness-selftest`, and 27 build lines. The recorder build is `recorder-core`. The store build is `store-core` (`docs/STORAGE.md`). `shell-basic`'s expected help text lists 24 lines. `expect_gate` takes an optional sixth argument: `exact` (the default), `log`, `store`, or `store:s1`.
 
 The `log` judge (`judge_log` in the harness, bash wrapper `judge_shell_log status file expected want`):
 
@@ -417,15 +420,16 @@ R3ATH3_SHELL_EXIT last=cmd
 grant ai1 read
 granted ai1 read
 r3> selftest
-selftest: 7 checks
+selftest: 8 checks
 selftest timer    ok
 selftest sched    ok
 selftest frames   ok
 selftest script   ok
 selftest gate     ok
 selftest recorder ok
+selftest store    ok
 selftest heap     ok
-selftest: 7 of 7 ok
+selftest: 8 of 8 ok
 r3> badges
 badge ai1 may=read
 no pending request

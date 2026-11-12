@@ -18,10 +18,11 @@
 //! (preempt → 227), `0x72` (sleep → 229), `0x73` (full → 231), `0x74`
 //! (exit → 233), and `0x75` (reap → 235). The gate proofs write `0x78`
 //! (core → 241) and `0x79` (expire → 243). The flight-recorder proof writes
-//! `0x7A` (core → 245). The record that proof checks is local; the shell's
-//! flight recorder is RAM-only and is lost on reboot. Unused odd statuses:
+//! `0x7A` (core → 245). The store proof writes `0x7B` (core → 247). The
+//! record that proof checks is local. The shell writes the live record
+//! through to a RAM disk, and a reboot erases both. Unused odd statuses:
 //! `0x65`–`0x67` (203–207), `0x6D`–`0x6F` (219–223), `0x76`–`0x77` (237–239),
-//! and `0x7B`–`0x7F` (247–255).
+//! `0x7C` (249), `0x7D` (251), `0x7E` (253), and `0x7F` (255).
 //! This device exists only in the emulator. Do not boot this image on hardware.
 
 use crate::port;
@@ -157,6 +158,11 @@ pub fn gate_expire_ok() -> ! {
 #[cfg(feature = "recorder-core")]
 pub fn recorder_core_ok() -> ! {
     exit(0x7A)
+}
+
+#[cfg(feature = "store-core")]
+pub fn store_core_ok() -> ! {
+    exit(0x7B)
 }
 
 pub fn cpu_fault(vector: u64) -> ! {

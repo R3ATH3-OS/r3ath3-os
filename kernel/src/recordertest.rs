@@ -114,7 +114,7 @@ pub fn run_core() -> ! {
     serial::write_str("\n");
 
     let _ = write!(serial::Writer, "R3ATH3_RECORDER_CORE step=10 card=");
-    selftest::write_summary(&mut serial::Writer, 6, 1);
+    selftest::write_summary(&mut serial::Writer, 7, 1);
     serial::write_str("\n");
 
     let expired = recorder::event_body(

@@ -45,7 +45,11 @@ gate-expire = ["gate", "sched"]
 # Internal. Not a test mode. Implied by `shell` and `recorder-core`.
 recorder = []
 recorder-core = ["recorder"]
-shell = ["sched", "gate", "recorder"]
+# Internal. Not a test mode. Implied by `shell` and `store-core`.
+# `sched` is required because `IrqCell` lives in `context.rs`.
+store = ["sched", "recorder"]
+store-core = ["store"]
+shell = ["sched", "gate", "recorder", "store"]
 
 [profile.dev]
 panic = "abort"

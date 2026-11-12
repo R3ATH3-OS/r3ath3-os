@@ -6,11 +6,12 @@
 //! feature reads the keyboard instead of taking that exit.
 //! The model stays outside ring 0. The human gate, when the shell is built,
 //! checks agent requests inside the kernel. The shell also keeps a flight
-//! recorder: an append-only record in kernel memory. That record is RAM-only
-//! and is lost on reboot.
+//! recorder: an append-only record in kernel memory. Each entry is written
+//! through to a RAM disk. A reboot erases the record and the RAM disk.
 
 #![no_std]
 #![no_main]
+#![allow(unexpected_cfgs)]
 
 extern crate alloc;
 
@@ -41,6 +42,14 @@ mod qemu_exit;
 mod recorder;
 #[cfg(feature = "recorder-core")]
 mod recordertest;
+#[cfg(any(feature = "store", feature = "nvme"))]
+mod block;
+#[cfg(feature = "store")]
+mod ramdisk;
+#[cfg(feature = "store")]
+mod store;
+#[cfg(feature = "store-core")]
+mod storetest;
 #[cfg(feature = "sched")]
 mod sched;
 #[cfg(any(
@@ -89,6 +98,7 @@ const _: () = {
         + cfg!(feature = "gate-core") as u8
         + cfg!(feature = "gate-expire") as u8
         + cfg!(feature = "recorder-core") as u8
+        + cfg!(feature = "store-core") as u8
         + cfg!(feature = "shell") as u8;
     assert!(modes <= 1, "enable at most one test feature");
 };
@@ -199,6 +209,9 @@ pub extern "C" fn kernel_main() -> ! {
     #[cfg(feature = "recorder-core")]
     recordertest::run_core();
 
+    #[cfg(feature = "store-core")]
+    storetest::run_core();
+
     #[cfg(feature = "shell")]
     shell::run();
 
@@ -227,6 +240,7 @@ pub extern "C" fn kernel_main() -> ! {
         feature = "gate-core",
         feature = "gate-expire",
         feature = "recorder-core",
+        feature = "store-core",
         feature = "shell"
     )))]
     boot_ok();
@@ -257,6 +271,7 @@ pub extern "C" fn kernel_main() -> ! {
     feature = "gate-core",
     feature = "gate-expire",
     feature = "recorder-core",
+    feature = "store-core",
     feature = "shell"
 )))]
 fn boot_ok() -> ! {
