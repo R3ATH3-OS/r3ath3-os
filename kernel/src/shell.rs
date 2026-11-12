@@ -40,6 +40,7 @@ const MAX_LINE: usize = 76;
 const PROMPT: &[u8] = b"r3> ";
 const GATE_TIMEOUT_TICKS: u64 = 6000;
 const LOG_CAP: usize = 128;
+const _: () = assert!(LOG_CAP <= 128);
 const AGENT_RESERVE: usize = 8;
 const FULL_NOTICE: &[u8] = b"log: flight recorder full; later entries are counted as lost\n";
 
@@ -1629,17 +1630,17 @@ fn store_cmd(out: &mut Out, rest: &[u8], last: &mut Last) {
             mounted.saved_upto
         );
     } else if let Some(k) = mounted.this {
-        if mounted.device == Device::Ram {
-            let _ = write!(
-                out,
-                "store: ram disk, erased by a reboot; this boot is boot {k}\n"
-            );
-        } else {
-            let _ = write!(
-                out,
-                "store: nvme disk; this boot is saved as boot {k} of {}\n",
-                mounted.slots
-            );
+        match mounted.device {
+            Device::Ram => {
+                let _ = write!(
+                    out,
+                    "store: ram disk, erased by a reboot; this boot is boot {k}\n"
+                );
+            }
+            // This image never selects Nvme. The arm stays so the type is
+            // named, and it prints nothing: no sentence here claims a boot
+            // was saved.
+            Device::Nvme => {}
         }
     } else {
         let _ = write!(

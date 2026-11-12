@@ -580,6 +580,19 @@ def mask_line(line):
     line = re.sub(r"\bhead=[0-9a-f]{16}", "head=H", line)
     return line
 
+def mask_store_line(line):
+    # Same rule as judge_log: only header and summary lines. A body or a
+    # command line keeps t=, link=, and head= as written.
+    if (
+        LOG_HEADER.fullmatch(line)
+        or LOG_SUMMARY.fullmatch(line)
+        or REPLAY_SUMMARY.fullmatch(line)
+        or BOOT_LIST.fullmatch(line)
+        or BOOT_OK.fullmatch(line)
+    ):
+        return mask_line(line)
+    return line
+
 def parse_groups(lines):
     groups = {}
     current = None
@@ -652,7 +665,7 @@ def judge_store(actual, expected, alias=None, ref=None):
     if parsed is None:
         return False
     lines, ends = parsed
-    rendered = "\n".join(mask_line(line) for line in lines) + ("\n" if ends else "")
+    rendered = "\n".join(mask_store_line(line) for line in lines) + ("\n" if ends else "")
     if rendered != expected_text:
         return False
     groups = parse_groups(lines)
@@ -1594,6 +1607,13 @@ record = open(out + "/task/log-record.expected", "rb").read()
 if mod.judge_log(filled, record):
     sys.exit(1)
 if mod.judge_store(filled, record, "s1=live"):
+    sys.exit(1)
+# A command line is not a summary. Masking head= there would hide a mismatch.
+loose_actual = filled.replace(
+    b"saved note to ram\n", b"saved note to ram head=0123456789abcdef\n", 1
+)
+loose_expected = expected.replace(b"saved note to ram\n", b"saved note to ram head=H\n", 1)
+if mod.judge_store(loose_actual, loose_expected, "s1=live"):
     sys.exit(1)
 PY
     then

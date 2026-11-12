@@ -225,6 +225,25 @@ pub fn run_core() -> ! {
         "R3ATH3_STORE_CORE step=7 short=size small=small notblank=not-blank lba0=zero\n",
     );
 
+    // A superblock whose own block count is below 41 has zero slots. The
+    // parser refuses it. The printed line above stays the same.
+    ramdisk::wipe_for_test();
+    let mut tiny = [0u8; BLOCK];
+    tiny[0..8].copy_from_slice(b"R3ATH3ST");
+    tiny[8..12].copy_from_slice(&1u32.to_le_bytes());
+    tiny[12..16].copy_from_slice(&512u32.to_le_bytes());
+    tiny[16..24].copy_from_slice(&40u64.to_le_bytes());
+    tiny[24..28].copy_from_slice(&1u32.to_le_bytes());
+    tiny[28..32].copy_from_slice(&4u32.to_le_bytes());
+    tiny[32..36].copy_from_slice(&8u32.to_le_bytes());
+    tiny[36..40].copy_from_slice(&33u32.to_le_bytes());
+    let tiny_check = fnv(&tiny[0..48]);
+    tiny[48..56].copy_from_slice(&tiny_check.to_le_bytes());
+    must_write(0, &tiny, 7);
+    if word(store::read_superblock(&mut RamDisk)) != "small" {
+        panic!("step 7 undersize superblock");
+    }
+
     ramdisk::wipe_for_test();
     for n in 1..=15u32 {
         let opened = must_mount(store::mount(&mut RamDisk, Device::Ram), 8);

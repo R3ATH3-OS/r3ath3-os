@@ -50,9 +50,9 @@ Why not frames: frames are reached through raw pointers, which would be `unsafe`
 
 512 blocks is 15 boot records (`store-core` step 8 fills all 15 and proves the next mount opens none) plus the 16 saved slots. The smallest device the format accepts is 41 blocks.
 
-`mem` on the shell build of main printed `frames_total=16015`. The same command on this branch printed `frames_total=15945`. The drop is 70 frames. The RAM disk is 64 frames (256 KiB). The rest is code and data. A drop of more than 80 frames would have stopped the change. `shell-mem` checks `frames_free == frames_total` and a bound, not an exact total.
+`mem` on the shell build of main printed `frames_total=16015`. The same command on the part A shell printed `frames_total=15945`. The drop is 70 frames. The RAM disk is 64 frames (256 KiB). The rest is code and data. A drop of more than 80 frames would have stopped the change. `shell-mem` checks `frames_free == frames_total` and a bound, not an exact total.
 
-`size_of::<store::Mounted>()` is 40.
+`size_of::<store::Mounted>()` is 40, locked by a compile-time assert.
 
 ## 3. Format `R3ATH3ST` version 1
 
@@ -158,14 +158,14 @@ pub struct Mounted {
 }
 ```
 
-`Mounted::UNMOUNTED` has `blocks = 0`. `is_mounted` is `blocks >= 41`. A failed RAM mount leaves `STORE` at `UNMOUNTED`. `Device::Nvme` is in the enum so the shell's second line has a place for it. This image only constructs `Device::Ram`, and it never prints the NVMe sentence or a third line.
+`Mounted::UNMOUNTED` has `blocks = 0`. `is_mounted` is `blocks >= 41`. A failed RAM mount leaves `STORE` at `UNMOUNTED`. `size_of::<Mounted>()` is 40, and a compile-time assert locks that. `Device::Nvme` is in the enum. This image only constructs `Device::Ram`. The `Nvme` arm of `store` prints nothing, so this image does not carry a sentence that says a boot was saved. There is no third output line.
 
 Mount order:
 
 1. `blocks < 41` → `Small`.
 2. Read LBA 0. An I/O error is `Io`.
 3. If LBA 0 is all zero, read LBA 1–7 and every slot header that fits. Any non-zero byte is `NotBlank`, and nothing is written. Otherwise write the superblock, flush, and set `formatted`.
-4. Otherwise: magic or check wrong → `Superblock` (this is decided before version). `version != 1` → `Version`. `block_size`, `saved_lba`, `saved_blocks`, `boot_lba`, `boot_blocks`, or `slots` differ from section 3 for the superblock's own `blocks` → `Layout`. Superblock `blocks` greater than the device → `Size`.
+4. Otherwise: magic or check wrong → `Superblock` (this is decided before version). `version != 1` → `Version`. `block_size`, `saved_lba`, `saved_blocks`, `boot_lba`, `boot_blocks`, or `slots` differ from section 3 for the superblock's own `blocks` → `Layout`. Superblock `blocks` below 41, or `slots` of 0, → `Small` (a store with no boot record is refused, even when the device itself is larger). Superblock `blocks` greater than the device → `Size`.
 5. Count non-free headers in `used`. The first free slot `k` is `this`. If none is free, `this = None`.
 6. Open `k`: previous `(entries, head)` from `scan_boot(k−1)` when that header is ok, otherwise `(0, BASIS)` when `k = 1` or the previous header is bad. Write zeros over the 32 entry blocks, write the header with `lost = 0`, flush once, then `used += 1`.
 
@@ -173,7 +173,7 @@ Mount order:
 
 The shell copies `Mounted` out of `STORE`, does I/O, and writes it back. I/O never runs inside `LOG.with` or `STORE.with`. The shell is the only store task.
 
-After an append that returned `Ok(n)`, the shell writes the block of entries `4q+1 … 4q+4` (`q = (n−1)/4`). Slots above `len` are zero. There is no read of that block. Then flush, and `saved_upto = n`. After `lost` changes, the shell reads the header, rewrites `lost`, recomputes the check over bytes 0..32, writes, flushes, and sets `saved_lost`. Nothing is written when `this` is `None` or `failed` is set. `persist_entry` and `persist_lost` return `Ok` in that case, so the shell prints the failure line only on the transition.
+After an append that returned `Ok(n)`, the shell writes the block of entries `4q+1 … 4q+4` (`q = (n−1)/4`). Slots above `len` are zero. There is no read of that block. Then flush, and `saved_upto = n`. `n` above 128 returns `Range`, sets `failed`, and does not write: that entry would land on the next record's header. The shell's `LOG_CAP` is 128, and a compile-time assert keeps it at most 128, so the shell does not reach that return. After `lost` changes, the shell reads the header, rewrites `lost`, recomputes the check over bytes 0..32, writes, flushes, and sets `saved_lost`. Nothing is written when `this` is `None` or `failed` is set. `persist_entry` and `persist_lost` return `Ok` in that case, so the shell prints the failure line only on the transition.
 
 On a write or flush error: set `failed`, stop further record writes, and print once on both channels, using the `saved_upto` from before the failed write:
 
@@ -395,9 +395,9 @@ R3ATH3_STORE_CORE ok steps=10
 | 11 | human last=ok | boots |
 | 12 | human last=ok | boots 1 |
 
-`store-usage` types 32 lines and `exit`, and exits 211. It covers every error line in section 5, fills all 16 names (`k1`…`k16`), overwrites `k1`, and refuses `k17`. The line `save a` plus 69 `x` is 76 bytes, so the shell accepts it and the 58-byte text rule refuses it.
+`store-usage` types 32 lines and `exit`, and exits 211. It covers the usage, name, length, missing-name, and full-table errors in section 5, fills all 16 names (`k1`…`k16`), overwrites `k1`, and refuses `k17`. The line `save a` plus 69 `x` is 76 bytes, so the shell accepts it and the 58-byte text rule refuses it. It does not cover `error: store read failed` or `error: store write failed`. The RAM disk does not fail a read or a write, so those two lines are not reached in this image. They are reserved for a later device that can fail a read or a write.
 
-The `store` judge masks `t=<digits>`, `link=<16 hex>`, and `head=<16 hex>`, compares the masked text, then checks the values. Entries after `r3> boots K` are group `sK`. Entries after `r3> log` or `r3> replay` are group `live`. Each group is one chain from `BASIS` when it starts at #1; a group that starts later anchors its first link and checks the rest, and ticks do not decrease. A list line `boot K entries=e … head=X` must use `BASIS` when `e = 0`, and must use entry `e`'s link when group `sK` printed that entry. `boot K ok … head` and `replay ok … head` equal the last link of that group. `store:s1` also requires group `s1` to match group `live` on every common entry number. The `ref` argument is accepted and unused by the cases in this image.
+The `store` judge masks `t=<digits>`, `link=<16 hex>`, and `head=<16 hex>` only on header lines and on summary lines (`log`, `replay`, a `boot K` list line, and a `boot K ok` line), the same way the `log` judge masks header and summary lines. Every other line is compared as written. It then checks the values. Entries after `r3> boots K` are group `sK`. Entries after `r3> log` or `r3> replay` are group `live`. Each group is one chain from `BASIS` when it starts at #1; a group that starts later anchors its first link and checks the rest, and ticks do not decrease. A list line `boot K entries=e … head=X` must use `BASIS` when `e = 0`, and must use entry `e`'s link when group `sK` printed that entry. `boot K ok … head` and `replay ok … head` equal the last link of that group. `store:s1` also requires group `s1` to match group `live` on every common entry number. The `ref` argument is accepted and unused by the cases in this image.
 
 Intentional changes to older expected transcripts: `shell-basic` help is 24 lines, `shell-selftest` prints the eight-check card, and `recorder-core` step 10 says `selftest: 7 of 8 ok, 1 failed`. 209 covers 14 cases, 211 covers 8, and 247 covers `store-core`.
 

@@ -11,7 +11,6 @@
 
 #![no_std]
 #![no_main]
-#![allow(unexpected_cfgs)]
 
 extern crate alloc;
 
@@ -42,7 +41,7 @@ mod qemu_exit;
 mod recorder;
 #[cfg(feature = "recorder-core")]
 mod recordertest;
-#[cfg(any(feature = "store", feature = "nvme"))]
+#[cfg(feature = "store")]
 mod block;
 #[cfg(feature = "store")]
 mod ramdisk;

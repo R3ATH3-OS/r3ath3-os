@@ -92,6 +92,8 @@ impl Mounted {
     }
 }
 
+const _: () = assert!(core::mem::size_of::<Mounted>() == 40);
+
 #[derive(Clone, Copy)]
 pub struct BootScan {
     pub header_ok: bool,
@@ -195,6 +197,9 @@ fn parse_super(buf: &[u8; BLOCK], device_blocks: u64) -> Result<Super, MountErro
         || slots != slots_for(blocks)
     {
         return Err(MountError::Layout);
+    }
+    if blocks < MIN_BLOCKS || slots == 0 {
+        return Err(MountError::Small);
     }
     if blocks > device_blocks {
         return Err(MountError::Size);
@@ -406,6 +411,11 @@ pub fn persist_entry(
 ) -> Result<(), IoError> {
     if mounted.this.is_none() || mounted.failed || n == 0 {
         return Ok(());
+    }
+    // One boot record holds 128 entries. A larger n would write the next
+    // record's header. LOG_CAP is asserted <= 128 in the shell.
+    if n > 128 {
+        return Err(mark_failed(mounted, IoError::Range));
     }
     let k = mounted.this.unwrap();
     let q = (n - 1) / 4;
