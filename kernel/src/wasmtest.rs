@@ -151,15 +151,19 @@ fn step5() {
     if !underflow_keeps_slots() {
         fail(5, "underflow");
     }
+    if !call_arg_traps() {
+        fail(5, "call-arg");
+    }
     let _ = write!(
         serial::Writer,
         "R3ATH3_WASM_CORE step=5 traps=unreachable,memory,div-zero,overflow,indirect,stack,fuel\n"
     );
 }
 
-/// `go` stores 222, then `bad` stores its parameter 333 and local 111, then
-/// `i32.add` on an empty operand stack. The trap must happen before that add
-/// can store a stolen value at offset 12, and the three earlier words stay.
+/// `go` stores 222, then `bad` stores its parameter 333 and local 111.
+/// `bad` then runs `i32.add` on an empty operand stack, keeps that sum, and
+/// `i32.store`s it at offset 12 (`i32.const 12` is the address). The add traps
+/// `stack` first, so offset 12 stays 0 and the three earlier words stay.
 fn underflow_keeps_slots() -> bool {
     let kept = wasm::with_instance(UNDER, |loaded| {
         let mut inst = match loaded {
@@ -176,6 +180,19 @@ fn underflow_keeps_slots() -> bool {
             && mem_word(mem, 12) == Some(0)
     });
     kept == Some(true)
+}
+
+/// Caller sets a local, leaves the operand stack empty, and calls a one-param
+/// function. `enter` must trap `stack` instead of using that local as the param.
+fn call_arg_traps() -> bool {
+    let trapped = wasm::with_instance(CALLARG, |loaded| {
+        let mut inst = match loaded {
+            Ok(inst) => inst,
+            Err(_) => return false,
+        };
+        matches!(inst.call("go", &[]), Err(Trap::Stack))
+    });
+    trapped == Some(true)
 }
 
 fn mem_word(mem: &[u8], off: usize) -> Option<i32> {
@@ -357,7 +374,9 @@ fn fail_i64(step: u32, what: &str, got: i64) -> ! {
 // MEM: store 0x12345678, memory.grow, memory.size. Memory min 1 max 2.
 // WIDE: (func (export "wide") (result i32) (i64.const 9223372036854775807))
 // UNDER: caller stores 222 at 0 and calls bad(333). bad stores the parameter
-// at 4 and local 111 at 8, then i32.add on an empty stack and would store at 12.
+// at 4 and local 111 at 8, then i32.add, local.set 2, i32.const 12, local.get 2,
+// i32.store. That store would write the stolen sum at offset 12.
+// CALLARG: go sets local 0 and calls a 1-param function with an empty stack.
 // Traps: unreachable, load at 65536, div_u by 0, div_s(MIN,-1),
 // call_indirect of an empty slot, unbounded call, (loop (br 0)).
 // FRESH: write 99, then a new load reads 0.
@@ -420,11 +439,18 @@ static UNDER: &[u8] = &[
     0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x60,
     0x01, 0x7F, 0x00, 0x60, 0x00, 0x00, 0x03, 0x03, 0x02, 0x00, 0x01, 0x05,
     0x04, 0x01, 0x01, 0x01, 0x01, 0x07, 0x06, 0x01, 0x02, 0x67, 0x6F, 0x00,
-    0x01, 0x0A, 0x2F, 0x02, 0x1D, 0x01, 0x01, 0x7F, 0x41, 0x04, 0x20, 0x00,
+    0x01, 0x0A, 0x33, 0x02, 0x21, 0x01, 0x02, 0x7F, 0x41, 0x04, 0x20, 0x00,
     0x36, 0x02, 0x00, 0x41, 0xEF, 0x00, 0x21, 0x01, 0x41, 0x08, 0x20, 0x01,
-    0x36, 0x02, 0x00, 0x6A, 0x41, 0x0C, 0x36, 0x02, 0x00, 0x0B, 0x0F, 0x00,
-    0x41, 0x00, 0x41, 0xDE, 0x01, 0x36, 0x02, 0x00, 0x41, 0xCD, 0x02, 0x10,
-    0x00, 0x0B,
+    0x36, 0x02, 0x00, 0x6A, 0x21, 0x02, 0x41, 0x0C, 0x20, 0x02, 0x36, 0x02,
+    0x00, 0x0B, 0x0F, 0x00, 0x41, 0x00, 0x41, 0xDE, 0x01, 0x36, 0x02, 0x00,
+    0x41, 0xCD, 0x02, 0x10, 0x00, 0x0B,
+];
+
+static CALLARG: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x60,
+    0x01, 0x7F, 0x00, 0x60, 0x00, 0x00, 0x03, 0x03, 0x02, 0x00, 0x01, 0x07,
+    0x06, 0x01, 0x02, 0x67, 0x6F, 0x00, 0x01, 0x0A, 0x0F, 0x02, 0x02, 0x00,
+    0x0B, 0x0A, 0x01, 0x01, 0x7F, 0x41, 0x07, 0x21, 0x00, 0x10, 0x00, 0x0B,
 ];
 
 static T_UNREACH: &[u8] = &[

@@ -358,7 +358,10 @@ impl<'a> Exec<'a> {
         let info = *self.arena.funcs.get(func).ok_or(Trap::Unreachable)?;
         let params = info.param_count as usize;
         let locals = info.local_count as usize;
-        if self.sp < params {
+        // A wasm caller is still the top frame, so this is that caller's floor.
+        // The host entry has no frame and the floor is 0. A missing argument
+        // must not be taken from a local or from a caller's slot.
+        if self.sp < self.operand_floor() + params {
             return Err(Trap::Stack);
         }
         let base = self.sp - params;
