@@ -29,7 +29,7 @@ FNV-1a, where this kernel uses it, is a checksum, not a cryptographic hash and n
 | `kernel/src/gluetest.rs` | The `wasm-glue` proof. No privileged code |
 | `apps/glue-duty/` | The game. `logic.rs` and `text.rs` forbid `unsafe`. `abi.rs` is the wasm exports |
 | `apps/glue-duty/src/bin/replay.rs` | The native host. Same source, same key script |
-| `scripts/build-apps.sh` | Builds `glue_duty.wasm` and `glue-duty-replay` |
+| `scripts/build-apps.sh` | Runs `cargo test --offline`, then builds `glue_duty.wasm` and `glue-duty-replay` |
 
 `kernel/Cargo.toml`: `wasm` is internal and is not a test mode. `wasm-core = ["wasm"]` and `wasm-glue = ["wasm"]` are test modes. Both are in the at-most-one assert and in both `boot_ok` exclusion lists. `shell` includes `wasm` and does not include `wasm-glue`.
 
@@ -205,10 +205,10 @@ R3ATH3_WASM_CORE ok steps=11
 ```
 
 1. `add(40, 2)` in `i32`.
-2. `fac64(20)` is 20! = 2432902008176640000. `ext8(0xFF)` is `i32.extend8_s` and returns −1. `wide` is typed `-> i32` and its body is `i64.const` of `i64::MAX` (9223372036854775807). The host result is −1, not that raw `i64`. `bend` is also `-> i32`. Its body is a void block containing `i64.const` of that same `i64::MAX` and `br 1`, then `i32.const 1`. `br 1` from inside the one block targets the function end (`depth` equal to the open-block count). The return is −1, sign-narrowed. Taking the block's own end instead would return 1.
+2. `fac64(20)` is 20! = 2432902008176640000. `ext8(0xFF)` is `i32.extend8_s` and returns −1. `wide` is typed `-> i32` and its body is `i64.const` of `i64::MAX` (9223372036854775807), encoded as the 10-byte signed LEB `FF` nine times then `00`. The host result is −1, not that raw `i64`. `bend` is also `-> i32`. Its body is a void block containing `i64.const` of that same immediate and `br 1`, then `i32.const 1`. `br 1` from inside the one block targets the function end (`depth` equal to the open-block count). The return is −1, sign-narrowed. A 9-byte LEB `FF` eight times then `7F` is −1, so it would not exercise that narrowing. Taking the block's own end instead would return 1.
 3. Recursive `fib(20)` is 6765, through arena frames. `pick` is `br_table` with empty blocks: index 0 returns 10, index 1 returns 20, an index past the table returns 99. `ind` is `call_indirect` through table slots 0 and 1 and returns 7 and 8.
 4. Store `0x12345678` and load it back (305419896). `memory.grow(1)` from 1 page with maximum 2 returns 1. A second grow returns −1. `memory.size` is 2.
-5. Seven separate instances, one trap each, in that word order. The same step then calls a `br_table` of 4096 labels with fuel 10. The opcode costs 1, so 9 units remain, which cannot pay for 4096 labels. The trap is `fuel`, before those labels are read (`brtable=fuel`). The same step then loads a module whose caller stores 222 at offset 0 and calls a function with argument 333. That function stores the parameter at offset 4 and a local 111 at offset 8, then executes `i32.add` on an empty operand stack, keeps the sum, and `i32.store`s it at offset 12 (`i32.const 12` is the address, and the sum is the value). The add traps `stack`. The three stored words stay, and offset 12 stays 0. The same step also loads a caller that sets a local and, with an empty operand stack, calls a one-parameter function. That call traps `stack`.
+5. Seven separate instances, one trap each, in that word order. The same step then calls a body of `i32.const 0` followed by a `br_table` of 4096 labels, with fuel 10. The const and the opcode cost 1 each, so 8 units remain, which cannot pay for 4096 labels. The trap is `fuel`, before those labels are read (`brtable=fuel`). The zero is the index. Without the per-label charge the walk would finish and the call would return. An empty stack would trap `stack` at the index pop instead. The same step then loads a module whose caller stores 222 at offset 0 and calls a function with argument 333. That function stores the parameter at offset 4 and a local 111 at offset 8, then executes `i32.add` on an empty operand stack, keeps the sum, and `i32.store`s it at offset 12 (`i32.const 12` is the address, and the sum is the value). The add traps `stack`. The three stored words stay, and offset 12 stays 0. The same step also loads a caller that sets a local and, with an empty operand stack, calls a one-parameter function. That call traps `stack`.
 6. After `unreachable`, the next call on that instance is `dead`. A new load of `add` returns 42.
 7. A module writes 99, and the next load reads 0 at the same address.
 8. Eight malformed modules, refused with those words: bad magic, version 2, a section id with no size, a start section, opcode `0x06`, `f32.const`, one import, memory maximum 5.
@@ -228,7 +228,7 @@ The harness self-test rejects a `wasm-core` log with `add=41`, a log missing the
 
 The game is one Rust source under `apps/glue-duty/`. `logic.rs` and `text.rs` are `#![forbid(unsafe_code)]`. `abi.rs` has two lines containing `unsafe`: `unsafe impl Sync` on its one `UnsafeCell`, and the block that borrows it. The panic handler calls `core::arch::wasm32::unreachable()`, which is a safe function at rustc 1.83.0, so the count stays 2. The crate is `no_std` only on `wasm32` (`#![cfg_attr(target_arch = "wasm32", no_std)]`). The package also builds a host cdylib for the replay binary, and a host `no_std` cdylib would need a second panic handler. The wasm artifact is `no_std`.
 
-`scripts/build-apps.sh` changes to `apps/glue-duty` before `cargo build`. Cargo reads `.cargo/config.toml` from that directory and passes `-zstack-size=32768`, `--initial-memory=131072`, and `--max-memory=262144`. The module's memory is 2 pages initial and 4 pages maximum. There is no import section. Block types in this module are `0x40` only. Spike W3's report is in the pull request. The module is 15,797 bytes.
+`scripts/build-apps.sh` changes to `apps/glue-duty`, runs `cargo test --offline`, and then `cargo build`. A failing test fails that script, and smoke treats that as a failed glue build. Cargo reads `.cargo/config.toml` from that directory and passes `-zstack-size=32768`, `--initial-memory=131072`, and `--max-memory=262144`. The module's memory is 2 pages initial and 4 pages maximum. There is no import section. Block types in this module are `0x40` only. Spike W3's report is in the pull request. The module is 15,797 bytes.
 
 The rules are the integer port in `logic.rs`: three lanes, a 72-column belt, a scraper fixed at belt column 8, shifts of 750 steps, at most 24 blobs, xorshift32, and no floats. `text.rs` paints the 80×25 grid. Grid bytes, summary bytes, and log bytes go through `store_byte`, which is `#[inline(never)]`, so those stores do not become `memory.fill` or `memory.copy`. Other writes are ordinary assignments. `q` is never delivered. Pixels and sound are milestone 12.
 
@@ -280,7 +280,7 @@ Seed is 1. Keys are applied before step `n` (`n` from 1). `apps/glue-duty/proof-
 - Any other state that is not playing: no keys.
 - While playing: if a blob has not reached the discharge, one `w` or `s` toward the lane of the blob closest to the discharge (the smallest `72 * 16 - x16` among blobs where that value is positive), then `a` when `n` is even and `d` when `n` is odd.
 
-On seed 1 that reaches `SHIFT_DONE` at step 750 (shift 1) and `next_shift` at step 751 (shift 2, jam cleared by the shift bonus). Shift 2 later reaches `GAME_OVER`. The step count stays 2000. The game rules are unchanged.
+On seed 1 that reaches `SHIFT_DONE` at step 750 (shift 1) and `next_shift` at step 751 (shift 2). `next_shift` subtracts 2500 from the jam; on this run that subtraction reaches 0. The shift bonus is added to the score when the shift completes. Shift 2 later reaches `GAME_OVER`. The step count stays 2000. The game rules are unchanged.
 
 Each `r3_step` is given the full 1,000,000 fuel budget and must use at most 250,000. The proof does not print the fuel count.
 

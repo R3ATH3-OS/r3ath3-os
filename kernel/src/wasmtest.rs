@@ -56,9 +56,9 @@ fn step2() {
     if wide != -1 {
         fail_i64(2, "wide", wide);
     }
-    // Same narrowing, but the `br` is inside a block and targets the
-    // function-end label (`depth == csp`). Falling out of the block would
-    // return 1 from `i32.const`.
+    // Same narrowing, through `br` to the function-end label from inside a
+    // block. The immediate is `i64::MAX` (`FF` nine times, then `00`), not
+    // the 9-byte LEB of −1. Falling out of the block would return 1.
     let bend = must_call(2, BEND, "bend", &[], wasm::FUEL_PER_CALL);
     if bend != -1 {
         fail_i64(2, "bend", bend);
@@ -192,10 +192,12 @@ fn underflow_keeps_slots() -> bool {
     kept == Some(true)
 }
 
-/// `br_table` with 4096 labels, called with fuel 10. The opcode costs 1, so
-/// 9 units remain, which is not enough to charge `n`. The trap is `fuel`
-/// before those labels are read. A missing charge would return `Ok` (every
-/// depth is 0, and depth 0 with no open block is a function-end return).
+/// `i32.const 0` then `br_table` with 4096 labels, called with fuel 10.
+/// The const costs 1 and the opcode costs 1, so 8 units remain, which is
+/// not enough to charge `n`. The trap is `fuel` before those labels are
+/// read. The zero is the index: without the charge the walk would finish
+/// and the call would return `Ok`. An empty stack would trap `stack` at
+/// the index pop, which would not prove the charge.
 fn brtable_fuel_traps() -> bool {
     let trapped = wasm::with_instance(&BR_FUEL, |loaded| {
         let mut inst = match loaded {
@@ -400,9 +402,13 @@ fn fail_i64(step: u32, what: &str, got: i64) -> ! {
 // WIDE: (func (export "wide") (result i32) (i64.const 9223372036854775807))
 // BEND: (func (export "bend") (result i32)
 //   (block (i64.const 9223372036854775807) (br 1)) (i32.const 1))
-// `br 1` from inside the block targets the function end. The i64 narrows
-// to -1. Taking the block's end instead would return 1.
-// BR_FUEL: (func (export "go") (br_table 0 0 ... 0)) with 4096 labels.
+// The immediate is the 10-byte signed LEB `FF×9 00`, the same bytes as
+// `wide`, which is i64::MAX. `FF×8 7F` is a 9-byte LEB of −1. `br 1`
+// from inside the block targets the function end and sign-narrows to −1.
+// Taking the block's end instead would return 1. Code section size 0x16,
+// body size 0x14.
+// BR_FUEL: (func (export "go") (i32.const 0) (br_table 0 0 ... 0))
+// with 4096 labels.
 // UNDER: caller stores 222 at 0 and calls bad(333). bad stores the parameter
 // at 4 and local 111 at 8, then i32.add, local.set 2, i32.const 12, local.get 2,
 // i32.store. That store would write the stolen sum at offset 12.
@@ -468,19 +474,20 @@ static WIDE: &[u8] = &[
 static BEND: &[u8] = &[
     0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60,
     0x00, 0x01, 0x7F, 0x03, 0x02, 0x01, 0x00, 0x07, 0x08, 0x01, 0x04, 0x62,
-    0x65, 0x6E, 0x64, 0x00, 0x00, 0x0A, 0x15, 0x01, 0x13, 0x00, 0x02, 0x40,
-    0x42, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F, 0x0C, 0x01,
+    0x65, 0x6E, 0x64, 0x00, 0x00, 0x0A, 0x16, 0x01, 0x14, 0x00, 0x02, 0x40,
+    0x42, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x0C, 0x01,
     0x0B, 0x41, 0x01, 0x0B,
 ];
 
-/// `(func (export "go") (br_table` of 4096 zeros `))`. Built in a const so
-/// the 4 KiB of label bytes are not a source listing. `n` is the LEB `0x80 0x20`.
-const fn br_fuel_module() -> [u8; 4134] {
-    let mut module = [0u8; 4134];
+/// `(func (export "go") (i32.const 0) (br_table` of 4096 zeros `))`.
+/// Built in a const so the 4 KiB of label bytes are not a source listing.
+/// `n` is the LEB `0x80 0x20`. Body size is 4104 (`0x88 0x20`).
+const fn br_fuel_module() -> [u8; 4136] {
+    let mut module = [0u8; 4136];
     let header: &[u8] = &[
         0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03,
-        0x02, 0x01, 0x00, 0x07, 0x06, 0x01, 0x02, 0x67, 0x6F, 0x00, 0x00, 0x0A, 0x89, 0x20, 0x01,
-        0x86, 0x20, 0x00, 0x0E, 0x80, 0x20,
+        0x02, 0x01, 0x00, 0x07, 0x06, 0x01, 0x02, 0x67, 0x6F, 0x00, 0x00, 0x0A, 0x8B, 0x20, 0x01,
+        0x88, 0x20, 0x00, 0x41, 0x00, 0x0E, 0x80, 0x20,
     ];
     let mut i = 0;
     while i < header.len() {
@@ -497,7 +504,7 @@ const fn br_fuel_module() -> [u8; 4134] {
     module
 }
 
-static BR_FUEL: [u8; 4134] = br_fuel_module();
+static BR_FUEL: [u8; 4136] = br_fuel_module();
 
 static UNDER: &[u8] = &[
     0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x60,
