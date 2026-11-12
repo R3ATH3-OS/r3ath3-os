@@ -76,6 +76,30 @@ pub fn write_line(text: &[u8]) {
     }
 }
 
+/// Paint an 80×25 grid. `0x00` is a space, `0x20`–`0x7E` are themselves, and
+/// every other byte is `?`. The attribute is green on black (`0x0A`).
+pub fn present(grid: &[u8]) {
+    for row in 0..HEIGHT {
+        for col in 0..WIDTH {
+            let index = row * WIDTH + col;
+            let byte = grid.get(index).copied().unwrap_or(0);
+            let glyph = if byte == 0x00 {
+                b' '
+            } else if (0x20..=0x7E).contains(&byte) {
+                byte
+            } else {
+                b'?'
+            };
+            write_cell(row, col, GREEN_ON_BLACK | u16::from(glyph));
+        }
+    }
+    with_console(|pos| {
+        pos.row = 0;
+        pos.col = 0;
+    });
+    set_cursor(0, 0);
+}
+
 /// Fill the 80×25 buffer with green-on-black spaces and home the cursor.
 pub fn console_clear() {
     for index in 0..CELLS {

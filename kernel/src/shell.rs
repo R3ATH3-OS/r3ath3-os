@@ -12,6 +12,9 @@
 //! disk, earlier boots stay on the image and are read with `boots K`. The
 //! live record still starts empty every boot. Badges are not stored.
 //!
+//! `app` runs one baked WebAssembly module. While it runs, the shell does not
+//! read COM1 or poll the gate, the same as `wait`. See `docs/WASM.md`.
+//!
 //! When the key ring is empty the shell calls `sched::yield_now`. With no
 //! other ready task that returns at once and the shell polls again, so a key
 //! is noticed within one tick (10 ms). With six `spin` tasks the shell runs
@@ -75,9 +78,9 @@ const HELP: [&str; 24] = [
     "save N TEXT keep TEXT under name N",
     "show [N]    list saved names, or the text saved as N",
     "forget N    remove the text saved as N",
+    "app [NAME]  list built-in WASM apps, or start app NAME",
     "run SCRIPT  run a task script, lines separated by ;",
-    "exit        leave the shell with the last status",
-    "halt        stop the machine",
+    "exit, halt  leave with the last status, or stop the machine",
 ];
 
 #[derive(Clone, Copy)]
@@ -396,6 +399,7 @@ fn dispatch(out: &mut Out, line: &[u8], last: &mut Last, gate: &mut Gate) {
         b"save" => save_cmd(out, rest, last),
         b"show" => show_cmd(out, rest, last),
         b"forget" => forget_cmd(out, rest, last),
+        b"app" => app_cmd(out, rest, last),
         b"run" => {
             let script = skip_spaces(rest);
             if script.is_empty() {
@@ -2001,6 +2005,46 @@ fn show_one(out: &mut Out, name: &[u8], last: &mut Last) {
     out.both(name);
     out.both(b"\n");
     *last = Last::Cmd;
+}
+
+fn app_cmd(out: &mut Out, rest: &[u8], last: &mut Last) {
+    let rest = skip_spaces(rest);
+    if rest.is_empty() {
+        for app in crate::apps::APPS {
+            out.both(b"app ");
+            let name = app.name.as_bytes();
+            out.both(name);
+            let pad = 11usize.saturating_sub(name.len());
+            for _ in 0..pad {
+                out.both(b" ");
+            }
+            out.both(app.desc.as_bytes());
+            out.both(b"\n");
+        }
+        *last = Last::Ok;
+        return;
+    }
+    let (name, extra) = split_first(rest);
+    if name.is_empty() || has_extra(extra) {
+        usage(out, b"app [NAME]");
+        *last = Last::Cmd;
+        return;
+    }
+    match crate::apps::find(name) {
+        Some(app) => {
+            if crate::apps::run_app(app) {
+                *last = Last::Ok;
+            } else {
+                *last = Last::Cmd;
+            }
+        }
+        None => {
+            out.both(b"error: no app ");
+            out.both(name);
+            out.both(b"\n");
+            *last = Last::Cmd;
+        }
+    }
 }
 
 fn forget_cmd(out: &mut Out, rest: &[u8], last: &mut Last) {

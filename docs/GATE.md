@@ -16,7 +16,7 @@ Honest limits, on purpose:
 - Revocation does not stop a task an earlier approval already started. There is no `kill`, and revocation does not undo output.
 - Badges do not survive a reboot, by design. Storage does not keep them. Trust is granted by the human in this boot.
 - There is no queue. One privileged request may wait. Another is `busy`.
-- The flight recorder (`docs/RECORDER.md`) appends every gate outcome in `report`. Each entry is written through to the RAM disk (`docs/STORAGE.md`). A reboot erases both.
+- The flight recorder (`docs/RECORDER.md`) appends every gate outcome in `report`. Each entry is written through to the store (`docs/STORAGE.md`). With no NVMe controller that store is a RAM disk, and a reboot erases both. With QEMU's emulated NVMe disk, earlier boots stay inside the QEMU-emulated disk image.
 - `next_rq` starts at 1 and uses wrapping addition. Wrapping is unreachable in a real session.
 
 ## 2. Scope
@@ -27,6 +27,8 @@ In this image:
 2. COM1 as the agent channel in the shell build. The shell reads lines and answers them.
 3. Human commands `badges`, `grant`, `revoke`, `approve`, and `deny`.
 4. Proofs `gate-core` (status 241) and `gate-expire` (status 243).
+
+No verb starts, feeds, or reads a WASM app; see `docs/WASM.md`.
 
 Not in this image, and not added here: any model or agent runtime in the kernel; a host-side AI adapter beyond the smoke harness; persistence of badges or of the flight recorder; authentication or crypto for names; a queue of pending requests; permissions on files, storage, network, or WASM; letting an agent type shell commands or reach `dispatch`; a `run` or `cmd` verb; an agent verb that reads the record; `kill`; COM2; unmasking IRQ4 or any IRQ besides 0 and 1; heap allocation in the gate or the shell; new `unsafe`. The default boot path is unchanged: boot marker, status 33. The flight recorder, `replay`, and `selftest` are specified in `docs/RECORDER.md`.
 
@@ -189,7 +191,7 @@ The seven lines are `R3GATE ASK ai1 1 read`, `halt`, `R3GATE ASK ai1 2 say ` plu
 | `0x78` | 241 | `gate-core` ok | `gate_core_ok` |
 | `0x79` | 243 | `gate-expire` ok | `gate_expire_ok` |
 
-`0x76`–`0x77` (237–239) and `0x7B`–`0x7F` (247–255) stay unused. `0x7A` (245) is `recorder-core` (`docs/RECORDER.md`). Each helper is compiled only for its feature. Gate shell cases use the shell outcome statuses 209, 211, and 217.
+`0x76`–`0x77` (237–239) stay unused. `0x7A` (245) is `recorder-core` (`docs/RECORDER.md`). `0x7B` (247) is `store-core`. `0x7C` (249) is `nvme-core`. `0x7D` (251) is `wasm-core` (`docs/WASM.md`). `0x7E` (253) and `0x7F` (255) stay unused. Each helper is compiled only for its feature. Gate shell cases use the shell outcome statuses 209, 211, and 217.
 
 ## 10. Determinism
 

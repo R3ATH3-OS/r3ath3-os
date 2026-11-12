@@ -15,9 +15,10 @@
 # full 0x73 → 231, exit 0x74 → 233, reap 0x75 → 235.
 # Gate: core 0x78 → 241, expire 0x79 → 243.
 # Flight recorder: core 0x7A → 245. Store: core 0x7B → 247. NVMe: core 0x7C → 249.
+# WebAssembly: core 0x7D → 251.
 # With no NVMe controller the shell uses the RAM disk, and a reboot erases it.
 # With QEMU's emulated NVMe disk, earlier boots stay in the image.
-# Unused odd statuses: 203–207, 219–223, 237–239, 251, 253, 255.
+# Unused odd statuses: 203–207, 219–223, 237–239, 253, 255.
 # A triple-fault or silent reset does not print the fault line and does not
 # use those statuses (this QEMU build has exited 0 on triple fault).
 set -u
@@ -58,6 +59,7 @@ GATE_EXPIRE_STATUS=243
 RECORDER_CORE_STATUS=245
 STORE_CORE_STATUS=247
 NVME_CORE_STATUS=249
+WASM_CORE_STATUS=251
 RAM_BYTES=67108864
 HEAP_BYTES=1048576
 HEAP_LINE='R3ATH3_HEAP ok size=1048576 used=([0-9]+) align_max=4096'
@@ -1013,6 +1015,16 @@ judge_exact() {
   cmp -s "$file" "$expected_file"
 }
 
+judge_wasm_core() {
+  local status="$1" file="$2"
+  judge_exact "$status" "$file" "$WASM_CORE_STATUS" "$OUT/task/wasm-core.expected"
+}
+
+judge_app_screen() {
+  local status="$1" serial="$2" expected_serial="$3" vga="$4" expected_vga="$5"
+  judge_shell_screen "$status" "$serial" "$expected_serial" "$vga" "$expected_vga"
+}
+
 selftest_harness() {
   local dir="$OUT/selftest"
   mkdir -p "$dir"
@@ -1768,6 +1780,34 @@ PY
     then
       ok=1
     fi
+    judge_wasm_core "$WASM_CORE_STATUS" "$OUT/task/wasm-core.expected" || ok=1
+    sed 's/add=42/add=41/' "$OUT/task/wasm-core.expected" >"$dir/wasm-core-step.log"
+    if judge_wasm_core "$WASM_CORE_STATUS" "$dir/wasm-core-step.log"; then ok=1; fi
+    grep -v 'ok steps=11' "$OUT/task/wasm-core.expected" >"$dir/wasm-core-nook.log"
+    if judge_wasm_core "$WASM_CORE_STATUS" "$dir/wasm-core-nook.log"; then ok=1; fi
+    if judge_wasm_core "$NVME_CORE_STATUS" "$OUT/task/wasm-core.expected"; then ok=1; fi
+    python3 - "$OUT/task/app-hello.vga" "$dir/app-hello-cell.vga" <<'PY'
+import sys
+src, dst = sys.argv[1:]
+text = open(src, encoding="ascii").read()
+text = text.replace("0A20", "0A21", 1)
+open(dst, "w", encoding="ascii").write(text)
+PY
+    judge_app_screen "$SHELL_OK_STATUS" "$OUT/task/app-hello.expected" "$OUT/task/app-hello.expected" "$OUT/task/app-hello.vga" "$OUT/task/app-hello.vga" || ok=1
+    if judge_app_screen "$SHELL_OK_STATUS" "$OUT/task/app-hello.expected" "$OUT/task/app-hello.expected" "$dir/app-hello-cell.vga" "$OUT/task/app-hello.vga"; then ok=1; fi
+    sed 's/stopped: trap fuel/stopped: trap stack/' "$OUT/task/app-spin.expected" >"$dir/app-spin-stack.log"
+    if judge_exact "$SHELL_OK_STATUS" "$dir/app-spin-stack.log" "$SHELL_OK_STATUS" "$OUT/task/app-spin.expected"; then ok=1; fi
+    python3 - "$OUT/task/app-gate.expected" "$dir/app-gate-ready.log" <<'PY'
+import sys
+src, dst = sys.argv[1:]
+text = open(src, encoding="ascii").read()
+needle = "ai1 says: app spin\n"
+insert = needle + "R3ATH3_APP_READY name=spin\n"
+if needle not in text:
+    raise SystemExit("say line missing")
+open(dst, "w", encoding="ascii").write(text.replace(needle, insert, 1))
+PY
+    if judge_exact "$SHELL_OK_STATUS" "$dir/app-gate-ready.log" "$SHELL_OK_STATUS" "$OUT/task/app-gate.expected"; then ok=1; fi
   fi
 
   if [[ "$ok" -eq 0 ]]; then
@@ -2257,9 +2297,9 @@ help_text = (
     "save N TEXT keep TEXT under name N\n"
     "show [N]    list saved names, or the text saved as N\n"
     "forget N    remove the text saved as N\n"
+    "app [NAME]  list built-in WASM apps, or start app NAME\n"
     "run SCRIPT  run a task script, lines separated by ;\n"
-    "exit        leave the shell with the last status\n"
-    "halt        stop the machine\n"
+    "exit, halt  leave with the last status, or stop the machine\n"
 )
 p = "r3> "
 ansi = "\x1b[2J\x1b[H"
@@ -3206,6 +3246,100 @@ write_bytes("store-reboot.boot1.expected", reboot_boot1)
 write_bytes("store-reboot.boot2.expected", reboot_boot2)
 write_bytes("store-tamper.boot2.expected", tamper_boot2)
 write_bytes("store-baddisk.expected", baddisk)
+
+wasm_core = (
+    "R3ATH3_STAGE rust_main\n"
+    "R3ATH3_WASM_CORE start\n"
+    "R3ATH3_WASM_CORE step=1 add=42\n"
+    "R3ATH3_WASM_CORE step=2 fac64=2432902008176640000 ext8=-1\n"
+    "R3ATH3_WASM_CORE step=3 fib=6765 pick=10,20,99 ind=7,8\n"
+    "R3ATH3_WASM_CORE step=4 mem=305419896 grow=1,-1 size=2\n"
+    "R3ATH3_WASM_CORE step=5 traps=unreachable,memory,div-zero,overflow,indirect,stack,fuel\n"
+    "R3ATH3_WASM_CORE step=6 after-trap=dead fresh=42\n"
+    "R3ATH3_WASM_CORE step=7 fresh-memory=0\n"
+    "R3ATH3_WASM_CORE step=8 refused=magic,version,truncated,section,opcode,float,import,limits\n"
+    "R3ATH3_WASM_CORE step=9 prefixes=ok flips=ok\n"
+    "R3ATH3_WASM_CORE step=10 hello=abi-ok spin-init=fuel\n"
+    "R3ATH3_WASM_CORE step=11 heap=same frames=same\n"
+    "R3ATH3_WASM_CORE ok steps=11\n"
+)
+write_bytes("wasm-core.expected", wasm_core)
+
+write_text("app-hello.steps", "launch hello\nxp\nappquit\nline exit\n")
+write_bytes(
+    "app-hello.expected",
+    prefix
+    + "app hello\n"
+    + "app hello: started; q quits\n"
+    + "R3ATH3_APP_READY name=hello\n"
+    + "app hello: quit\n"
+    + p
+    + "exit\n"
+    + exit_ok,
+)
+hello_rows = []
+for row in range(25):
+    cells = []
+    for col in range(80):
+        glyph = 0x20
+        index = row * 80 + col
+        if 990 <= index < 990 + len("hello from wasm"):
+            glyph = ord("hello from wasm"[index - 990])
+        elif 1150 <= index < 1150 + len("press q to quit"):
+            glyph = ord("press q to quit"[index - 1150])
+        cells.append("%04X" % (0x0A00 | glyph))
+    hello_rows.append(" ".join(cells))
+write_text("app-hello.vga", "\n".join(hello_rows) + "\n")
+
+app_list = (
+    "app hello      a static screen; the smallest app\n"
+    "app spin       loops forever; the fuel limit stops it"
+)
+write_text("app-spin.steps", "line app\nline app spin\nline echo alive\nline exit\n")
+write_bytes(
+    "app-spin.expected",
+    prefix
+    + typed("app", app_list)
+    + typed("app spin", "app spin: started; q quits\napp spin: stopped: trap fuel")
+    + typed("echo alive", "alive")
+    + "exit\n"
+    + exit_ok,
+)
+write_text("app-usage.steps", "line app a b\nline app nope\nline app Spin\nline exit\n")
+write_bytes(
+    "app-usage.expected",
+    prefix
+    + typed("app a b", "error: usage: app [NAME]")
+    + typed("app nope", "error: no app nope")
+    + typed("app Spin", "error: no app Spin")
+    + "exit\n"
+    + exit_cmd,
+)
+write_text(
+    "app-gate.steps",
+    "line grant ai1 app\n"
+    "ai R3GATE ASK ai1 1 app spin\n"
+    "line grant ai1 say\n"
+    "ai R3GATE ASK ai1 2 say app spin\n"
+    "line app spin\n"
+    "line badges\n"
+    "line exit\n",
+)
+write_bytes(
+    "app-gate.expected",
+    prefix
+    + typed("grant ai1 app", "error: unknown permission: app")
+    + bad_line("verb", "ai1", "1", "-")
+    + typed("grant ai1 say", "granted ai1 say")
+    + "\n"
+    + "ai1 says: app spin\n"
+    + "R3GATE reply agent=ai1 seq=2 verb=say result=done\n"
+    + p
+    + typed("app spin", "app spin: started; q quits\napp spin: stopped: trap fuel")
+    + typed("badges", "badge ai1 may=say\nno pending request")
+    + "exit\n"
+    + exit_ok,
+)
 PY
 }
 
@@ -3338,6 +3472,15 @@ for raw in open(steps_path, "r", encoding="utf-8"):
         steps.append(("keys", raw[5:].split(), None))
     elif raw == "xp":
         steps.append(("xp", [], None))
+    elif raw.startswith("launch "):
+        steps.append(("launch", qcodes_for_text("app " + raw[7:]), raw[7:].encode("utf-8")))
+    elif raw == "appquit":
+        steps.append(("appquit", ["q"], None))
+    elif raw.startswith("appkey "):
+        parts = raw.split()
+        if len(parts) != 3:
+            fail(2, "bad appkey " + raw)
+        steps.append(("appkey", [parts[1], parts[2]], None))
     else:
         fail(2, "bad step " + raw)
 
@@ -3410,6 +3553,66 @@ for index, (kind, keys, echo) in enumerate(steps):
             fail(1, "monitor closed while sending keys")
         if not last and not wait_stable(start, echo, kind == "keys"):
             fail(124, "timed out waiting for the next prompt")
+    elif kind == "launch":
+        start = len(read_serial())
+        if not send_keys(keys):
+            fail(1, "monitor closed while sending keys")
+        ready_line = b"R3ATH3_APP_READY name=" + echo + b"\n"
+        limit = time.time() + 5
+        ready = False
+        while time.time() < limit and time.time() < deadline:
+            data = read_serial()
+            if ready_line in data[start:]:
+                time.sleep(0.05)
+                if ready_line in read_serial()[start:]:
+                    ready = True
+                    break
+            if proc.poll() is not None:
+                break
+            time.sleep(0.02)
+        if not ready:
+            fail(124, "timed out waiting for the app ready line")
+    elif kind == "appquit":
+        start = len(read_serial())
+        if not send_keys(keys):
+            fail(1, "monitor closed while sending keys")
+        limit = time.time() + 5
+        done = False
+        while time.time() < limit and time.time() < deadline:
+            data = read_serial()
+            chunk = data[start:]
+            if (b": quit" in chunk or b": stopped:" in chunk) and harness.prompt_anchored(data):
+                time.sleep(0.05)
+                data2 = read_serial()
+                chunk2 = data2[start:]
+                if len(data2) == len(data) and (b": quit" in chunk2 or b": stopped:" in chunk2) and harness.prompt_anchored(data2):
+                    done = True
+                    break
+            if proc.poll() is not None:
+                break
+            time.sleep(0.02)
+        if not done:
+            fail(124, "timed out waiting for the app to end")
+    elif kind == "appkey":
+        key, count = keys
+        start = len(read_serial())
+        if not send_keys([key]):
+            fail(1, "monitor closed while sending keys")
+        need = int(count)
+        if need == 0:
+            time.sleep(3)
+        else:
+            limit = time.time() + 5
+            got = False
+            while time.time() < limit and time.time() < deadline:
+                if read_serial()[start:].count(b"R3ATH3_APP_STATE ") >= need:
+                    got = True
+                    break
+                if proc.poll() is not None:
+                    break
+                time.sleep(0.02)
+            if not got:
+                fail(124, "timed out waiting for app state")
     elif kind == "xp":
         try:
             mon.sendall(b"xp /2000hx 0xb8000\n")
@@ -3468,6 +3671,11 @@ PY
         passed=1
       fi
       ;;
+    apphello)
+      if judge_app_screen "$status" "$log_file" "$expected" "$vga_file" "$OUT/task/app-hello.vga"; then
+        passed=1
+      fi
+      ;;
     *)
       log "[FAIL] $name unknown judge $kind"
       FAILURES=$((FAILURES + 1))
@@ -3482,9 +3690,15 @@ PY
     cat "$log_file" 2>/dev/null || true
     log "----- expected -----"
     cat "$expected" 2>/dev/null || true
-    if [[ "$kind" == "screen" ]]; then
+    if [[ "$kind" == "screen" || "$kind" == "apphello" ]]; then
       log "----- vga -----"
       cat "$vga_file" 2>/dev/null || true
+      log "----- vga expected -----"
+      if [[ "$kind" == "apphello" ]]; then
+        cat "$OUT/task/app-hello.vga" 2>/dev/null || true
+      else
+        cat "$OUT/task/shell-screen.vga" 2>/dev/null || true
+      fi
     fi
     log "----- qemu stderr -----"
     cat "$err_file" 2>/dev/null || true
@@ -3968,6 +4182,39 @@ PY
   fi
 }
 
+expect_wasm_core() {
+  local name="wasm-core"
+  local status
+  status="$(run_qemu "$name" 30)"
+  if judge_wasm_core "$status" "$OUT/$name.serial.log"; then
+    log "[PASS] $name exit=$status"
+  else
+    log "[FAIL] $name exit=$status"
+    log "----- serial -----"
+    cat "$OUT/$name.serial.log" 2>/dev/null || true
+    log "----- expected -----"
+    cat "$OUT/task/wasm-core.expected" 2>/dev/null || true
+    log "----- qemu stderr -----"
+    cat "$OUT/$name.qemu.err" 2>/dev/null || true
+    FAILURES=$((FAILURES + 1))
+  fi
+  # Cross-judge the two proofs. A match here is a harness bug, not a case.
+  if [[ -f "$OUT/nvme-core.serial.log" ]]; then
+    if judge_wasm_core "$NVME_CORE_STATUS" "$OUT/nvme-core.serial.log"; then
+      log "[FAIL] swap nvme-core judged as wasm-core"
+      FAILURES=$((FAILURES + 1))
+    fi
+    if judge_nvme_core "$WASM_CORE_STATUS" "$OUT/$name.serial.log"; then
+      log "[FAIL] swap wasm-core judged as nvme-core"
+      FAILURES=$((FAILURES + 1))
+    fi
+    if cmp -s "$OUT/nvme-core.serial.log" "$OUT/$name.serial.log"; then
+      log "[FAIL] swap wasm-core and nvme-core logs are identical"
+      FAILURES=$((FAILURES + 1))
+    fi
+  fi
+}
+
 expect_case() {
   local name="$1"
   local judge="$2"
@@ -4101,6 +4348,9 @@ else
   if build_kernel nvme-core nvme-core; then
     expect_nvme_core
   fi
+  if build_kernel wasm-core wasm-core; then
+    expect_wasm_core
+  fi
   if build_kernel shell shell; then
     if write_shell_cases; then
       expect_shell shell-basic 12 "$OUT/task/shell-basic.steps" "$OUT/task/shell-basic.expected" "$SHELL_OK_STATUS" exact
@@ -4139,6 +4389,10 @@ else
         flip:4914 \
         "$OUT/task/store-tamper.boot2.steps" "$OUT/task/store-tamper.boot2.expected" "$SHELL_CMD_STATUS"
       expect_baddisk
+      expect_shell app-hello 20 "$OUT/task/app-hello.steps" "$OUT/task/app-hello.expected" "$SHELL_OK_STATUS" apphello
+      expect_shell app-spin 20 "$OUT/task/app-spin.steps" "$OUT/task/app-spin.expected" "$SHELL_OK_STATUS" exact
+      expect_shell app-usage 12 "$OUT/task/app-usage.steps" "$OUT/task/app-usage.expected" "$SHELL_CMD_STATUS" exact
+      expect_gate app-gate 20 "$OUT/task/app-gate.steps" "$OUT/task/app-gate.expected" "$SHELL_OK_STATUS"
     else
       log "[FAIL] write shell cases"
       FAILURES=$((FAILURES + 1))
