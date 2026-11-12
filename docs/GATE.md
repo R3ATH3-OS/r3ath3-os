@@ -75,7 +75,7 @@ One pending request. A privileged request while another is pending is `busy`. Fr
 
 Privileged requests are numbered `1, 2, 3, …` per boot. `approve` or `deny` with any other number is an error and changes nothing. A decided, cancelled, or expired number cannot be approved again.
 
-A pending request expires when `now >= asked_at.saturating_add(timeout)` and is denied with `reason=timeout`. Only `Gate::poll(now)` notices expiry. The shell polls on every idle pass and immediately before `approve` and `deny`. A late `approve` prints the expiry and then `error: no pending request <N>`.
+A pending request expires when `now >= asked_at.saturating_add(timeout)` and is denied with `reason=timeout`. Only `Gate::poll(now)` notices expiry. The shell polls on every idle pass, before it takes a buffered agent line, and immediately before `approve` and `deny`. A late `approve` prints the expiry and then `error: no pending request <N>`.
 
 ## 5. The channel and the human
 
@@ -91,7 +91,7 @@ Tokens are separated by exactly one space, with no leading or trailing space. `<
 
 | Condition | Reason |
 | --- | --- |
-| Does not start with `R3GATE ASK `, or the name, seq, or token shape is bad | `syntax` |
+| Does not start with `R3GATE ASK `, or the name, seq, or token shape is bad, or a trailing space leaves the argument empty (`R3GATE ASK ai1 1 read `) | `syntax` |
 | More than 72 bytes before the newline | `too-long` (the rest of the line is discarded, and agent and seq stay `-`) |
 | Any other verb, including `approve` or `deny` | `verb` |
 | Wrong argument | `arg` |
@@ -112,7 +112,7 @@ A privileged request gets `result=pending rq=<n>` at once, then a second reply w
 
 The human answers by typing `approve N` or `deny N`, naming the request number. A modal yes/no key is not used, so a key meant for something else cannot approve a request that just arrived.
 
-The shell loop reads a key first. It acts on an agent line, or on expiry, only while the human's line buffer is empty, so a notice does not break into a line the human is typing. While the human types, the agent line stays buffered and is handled after Enter. At an idle prompt an agent event prints a newline first (the cursor sits after `r3> `), then the human lines on serial and VGA, then the `R3GATE` lines on serial only, then `r3> `. Agent events do not change `last`. An approved spawn that finds the task table full sets `last` to cmd. When the shell is blocked in `wait`, agent lines and expiry wait until `wait` returns. `wait` on `spin` still blocks forever.
+The shell loop reads a key first. It acts on expiry, then on an agent line, only while the human's line buffer is empty, so a notice does not break into a line the human is typing and a run of agent lines cannot postpone the timeout reply. While the human types, the agent line stays buffered and is handled after Enter. At an idle prompt an agent event prints a newline first (the cursor sits after `r3> `), then the human lines on serial and VGA, then the `R3GATE` lines on serial only, then `r3> `. Agent events do not change `last`. An approved spawn that finds the task table full sets `last` to cmd. When the shell is blocked in `wait`, agent lines and expiry wait until `wait` returns. `wait` on `spin` still blocks forever.
 
 | Event | Lines |
 | --- | --- |
@@ -175,9 +175,9 @@ All gate lines are `R3ATH3_GATE_*`. A failed internal check panics (status 35), 
 11. grant `ai1 halt`; `ask halt` at now=30 is rq=4 with deadline 130; `poll(129)` is none; `poll(130)` expires it; `approve 4` is `NoPending` → `step=11 expired rq=4 at=130`
 12. grant `ai1 spawn`; `ask spawn nap` at now=200 is rq=5; `force_clear_for_test` clears spawn without cancelling; `approve 5` is `Cancelled` → `step=12 recheck=cancelled rq=5`
 13. `revoke ai1 all`; `ask read` is `no-badge`; grant `a`, `b`, `c`, and `d` `read`; grant `e read` is `BadgeTableFull` → `step=13 removed refused=no-badge full=e`
-14. `parse_request` on the six fixed lines prints `step=14 parse=ok,syntax,too-long,verb,arg,syntax`
+14. `parse_request` on the seven fixed lines prints `step=14 parse=ok,syntax,too-long,verb,arg,syntax,syntax`
 
-The six lines are `R3GATE ASK ai1 1 read`, `halt`, `R3GATE ASK ai1 2 say ` plus 60 `x` bytes, `R3GATE ASK ai1 3 approve 1`, `R3GATE ASK ai1 4 spawn bomb`, and `R3GATE ASK AI1 5 read`.
+The seven lines are `R3GATE ASK ai1 1 read`, `halt`, `R3GATE ASK ai1 2 say ` plus 60 `x` bytes, `R3GATE ASK ai1 3 approve 1`, `R3GATE ASK ai1 4 spawn bomb`, `R3GATE ASK AI1 5 read`, and `R3GATE ASK ai1 1 read ` (the trailing space is `syntax`, and the agent and seq are parsed).
 
 `gate-expire` runs with preemption on and the real PIT. `Gate::new(50)`. Grant `ai1 spawn`. Ask `spawn nap` at `t0 = irq::ticks()`. Sleep 5 ticks and poll until the request expires. Print `R3ATH3_GATE_EXPIRE ok rq=1 timeout=50 waited=<irq::ticks()-t0> early_polls=<n>` and exit 243. The test does not execute the action.
 

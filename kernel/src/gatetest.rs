@@ -146,15 +146,16 @@ pub fn run_core() -> ! {
     for byte in &mut long[prefix.len()..] {
         *byte = b'x';
     }
-    let lines: [&[u8]; 6] = [
+    let lines: [&[u8]; 7] = [
         b"R3GATE ASK ai1 1 read",
         b"halt",
         &long,
         b"R3GATE ASK ai1 3 approve 1",
         b"R3GATE ASK ai1 4 spawn bomb",
         b"R3GATE ASK AI1 5 read",
+        b"R3GATE ASK ai1 1 read ",
     ];
-    let mut words = [""; 6];
+    let mut words = [""; 7];
     for (index, line) in lines.iter().enumerate() {
         words[index] = match gate::parse_request(line) {
             Ok(_) => "ok",
@@ -187,15 +188,21 @@ pub fn run_core() -> ! {
         false,
         Some((BadLine::Syntax, false)),
     );
+    expect_parse(
+        gate::parse_request(lines[6]),
+        false,
+        Some((BadLine::Syntax, true)),
+    );
     let _ = write!(
         serial::Writer,
-        "R3ATH3_GATE_CORE step=14 parse={},{},{},{},{},{}\n",
+        "R3ATH3_GATE_CORE step=14 parse={},{},{},{},{},{},{}\n",
         words[0],
         words[1],
         words[2],
         words[3],
         words[4],
-        words[5]
+        words[5],
+        words[6]
     );
 
     serial::write_str("R3ATH3_GATE_CORE ok steps=14\n");

@@ -56,7 +56,7 @@ The line buffer is 76 bytes, so the 4-byte prompt plus the line fill one row. `l
 - Backspace at a non-empty line drops one byte, echoes `\x08 \x08` on COM1, and backspaces one VGA cell. Backspace on an empty line echoes nothing. Backspace does not clear overflow.
 - Enter echoes `\n` on both channels. If overflow is set, the shell prints `error: line too long (max 76)` and does not run the line. `last` becomes overflow. A line that is empty or only spaces does not run, and `last` stays as it was. Otherwise the line is split on ASCII spaces and dispatched. Leading and trailing spaces are ignored. The first word is the command, case-sensitive. Then the buffer and the overflow flag reset, and the prompt is printed again.
 - `exit` and `halt` do not return to the prompt.
-- The shell reads a key first. It acts on a buffered agent line, or on an expired gate request, only while the human line buffer is empty and not overflowed. While the human is typing, the agent line stays buffered and is handled after Enter. At an idle prompt an agent event prints a newline first, then the human lines, then the `R3GATE` lines, then `r3> `. Agent events do not change `last`, except an approved spawn that finds the task table full, which sets `last` to cmd. When the shell is blocked in `wait`, agent lines and expiry wait until `wait` returns.
+- The shell reads a key first. While the human line buffer is empty and not overflowed, it polls an expired gate request before it takes a buffered agent line. While the human is typing, the agent line stays buffered and is handled after Enter. At an idle prompt an agent event prints a newline first, then the human lines, then the `R3GATE` lines, then `r3> `. Agent events do not change `last`, except an approved spawn that finds the task table full, which sets `last` to cmd. When the shell is blocked in `wait`, agent lines and expiry wait until `wait` returns.
 
 ## 7. Built-ins
 
@@ -132,7 +132,7 @@ QEMU turns an `out` of `V` to port `0xF4` into status `(V << 1) | 1`.
 | `0x6B` | 215 | `exit`, last `run` failed |
 | `0x6C` | 217 | `halt` |
 
-`0x65`–`0x67` (203–207) and `0x6D`–`0x6F` (219–223) are unused. None of these collide with 33, 35, 95, 97, 99, 101, 103, 105, 124–127, 137, 161, 163, 177, 179, 181, 193, 195, 197, 199, 201, or the scheduler statuses 225–233.
+`0x65`–`0x67` (203–207) and `0x6D`–`0x6F` (219–223) are unused. None of these collide with 33, 35, 95, 97, 99, 101, 103, 105, 124–127, 137, 161, 163, 177, 179, 181, 193, 195, 197, 199, 201, or the scheduler statuses 225–233 and 235, or the gate statuses 241 and 243.
 
 A status names an outcome. A feature that can end its own run gets its own status; shell commands are judged by exact transcript under the shell's outcome statuses, and a swap self-test proves those cases cannot pass for each other. 209 covers `shell-basic`, `shell-backspace`, `shell-run`, `shell-mem`, `shell-screen`, `shell-ps`, `shell-wait`, `gate-approve`, `gate-noperm`, and `gate-revoke` (10). 211 covers `shell-unknown`, `shell-sched-error`, `shell-usage`, `gate-sneak`, `gate-usage`, and `shell-sched-args` (6). 213 covers `shell-overflow` and `shell-edge`. 215 stays one case. 217 covers `shell-halt` and `gate-halt`.
 

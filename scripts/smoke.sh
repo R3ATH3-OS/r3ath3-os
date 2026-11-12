@@ -391,7 +391,7 @@ def judge_gate_core(text):
         b"R3ATH3_GATE_CORE step=11 expired rq=4 at=130\n"
         b"R3ATH3_GATE_CORE step=12 recheck=cancelled rq=5\n"
         b"R3ATH3_GATE_CORE step=13 removed refused=no-badge full=e\n"
-        b"R3ATH3_GATE_CORE step=14 parse=ok,syntax,too-long,verb,arg,syntax\n"
+        b"R3ATH3_GATE_CORE step=14 parse=ok,syntax,too-long,verb,arg,syntax,syntax\n"
         b"R3ATH3_GATE_CORE ok steps=14\n"
     )
 
@@ -856,7 +856,7 @@ R3ATH3_GATE_CORE step=10 run=read
 R3ATH3_GATE_CORE step=11 expired rq=4 at=130
 R3ATH3_GATE_CORE step=12 recheck=cancelled rq=5
 R3ATH3_GATE_CORE step=13 removed refused=no-badge full=e
-R3ATH3_GATE_CORE step=14 parse=ok,syntax,too-long,verb,arg,syntax
+R3ATH3_GATE_CORE step=14 parse=ok,syntax,too-long,verb,arg,syntax,syntax
 R3ATH3_GATE_CORE ok steps=14
 EOF
   sed '3d' "$dir/gate-core.log" >"$dir/gate-core-short.log"

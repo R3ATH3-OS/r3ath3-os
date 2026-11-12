@@ -249,13 +249,15 @@ pub fn run() -> ! {
         }
         agent.pump();
         if len == 0 && !overflow {
-            if let Some(incoming) = agent.take_line() {
-                out.both(b"\n");
-                handle_agent_line(&mut out, &mut gate, incoming);
-                out.both(PROMPT);
-            } else if let Some(pending) = gate.poll(irq::ticks()) {
+            // Expiry before the buffered agent line, so a flood of lines
+            // cannot starve the timeout reply.
+            if let Some(pending) = gate.poll(irq::ticks()) {
                 out.both(b"\n");
                 report(&mut out, &GateEvent::Expired { pending: &pending });
+                out.both(PROMPT);
+            } else if let Some(incoming) = agent.take_line() {
+                out.both(b"\n");
+                handle_agent_line(&mut out, &mut gate, incoming);
                 out.both(PROMPT);
             }
         }

@@ -423,7 +423,9 @@ pub fn parse_request(line: &[u8]) -> Result<Request, (BadLine, Option<(Name, u32
     if after_seq.is_empty() {
         return Err((BadLine::Syntax, parsed));
     }
-    let (verb, arg) = split_token_optional(after_seq);
+    let Some((verb, arg)) = split_token_optional(after_seq) else {
+        return Err((BadLine::Syntax, parsed));
+    };
     if verb.is_empty() {
         return Err((BadLine::Syntax, parsed));
     }
@@ -485,12 +487,16 @@ fn split_token(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
     Some((&bytes[..end], &bytes[end + 1..]))
 }
 
-/// Verb plus the bytes after one separating space. No space means no argument.
-fn split_token_optional(bytes: &[u8]) -> (&[u8], &[u8]) {
+/// Verb plus the bytes after one separating space.
+///
+/// No space means no argument. A space with nothing after it is a trailing
+/// space on an empty argument, which is a syntax error (`None`).
+fn split_token_optional(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
     match bytes.iter().position(|byte| *byte == b' ') {
-        Some(0) => (b"", bytes),
-        Some(end) => (&bytes[..end], &bytes[end + 1..]),
-        None => (bytes, b""),
+        Some(0) => Some((b"", bytes)),
+        Some(end) if end + 1 == bytes.len() => None,
+        Some(end) => Some((&bytes[..end], &bytes[end + 1..])),
+        None => Some((bytes, b"")),
     }
 }
 
