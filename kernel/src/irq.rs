@@ -49,6 +49,11 @@ static KB_DROPS: AtomicU32 = AtomicU32::new(0);
 static KB_DATA: KbData = KbData(UnsafeCell::new([0; KB_CAP]));
 
 struct KbData(UnsafeCell<[u8; KB_CAP]>);
+// SAFETY: one CPU. IRQ1 (sole producer) writes slot tail only before publishing
+// KB_TAIL with Release; the sole consumer (the shell task, via pop_key) reads
+// slot head only after an Acquire of KB_TAIL, then publishes KB_HEAD. No slot
+// is accessed by both at once. In a `sched` build the shell task is the only
+// caller of `pop_key`.
 unsafe impl Sync for KbData {}
 
 #[cfg(any(feature = "keys", feature = "kbd-script", feature = "shell"))]
@@ -150,9 +155,49 @@ pub fn enable() {
     }
 }
 
-#[cfg(any(feature = "ticks", feature = "shell"))]
+#[cfg(any(feature = "ticks", feature = "sched"))]
 pub fn ticks() -> u64 {
     TICKS.load(Ordering::Acquire)
+}
+
+/// Run `f` with IF clear, then restore IF only if it was set on entry.
+/// Safe code has no other way to disable interrupts.
+#[cfg(feature = "sched")]
+pub fn without_interrupts<R>(f: impl FnOnce() -> R) -> R {
+    let flags = read_flags();
+    // SAFETY: `cli` clears IF on this one CPU. The restore below sets IF
+    // again only when `flags` says it was set. Nothing else runs the CPU.
+    // `nomem` is omitted so this asm is a compiler barrier: task-table
+    // writes cannot move out of the critical section.
+    unsafe {
+        asm!("cli", options(nostack, preserves_flags));
+    }
+    let result = f();
+    if flags & 0x200 != 0 {
+        // SAFETY: IF was set when this function was entered, so `sti` puts
+        // the caller back in that state. One CPU. `nomem` is omitted so
+        // writes inside the critical section cannot move past this `sti`.
+        unsafe {
+            asm!("sti", options(nostack, preserves_flags));
+        }
+    }
+    result
+}
+
+#[cfg(feature = "sched")]
+fn read_flags() -> u64 {
+    let flags: u64;
+    // SAFETY: `pushfq`/`pop` copy RFLAGS into `flags`. The pair is balanced
+    // and does not write Rust memory.
+    unsafe {
+        asm!(
+            "pushfq",
+            "pop {flags}",
+            flags = out(reg) flags,
+            options(nomem, preserves_flags),
+        );
+    }
+    flags
 }
 
 #[cfg(feature = "ticks")]
@@ -160,14 +205,14 @@ pub fn wait_ticks(n: u64) -> u64 {
     let start = ticks();
     loop {
         unsafe {
-            asm!("cli", options(nomem, nostack, preserves_flags));
+            asm!("cli", options(nostack, preserves_flags));
         }
         let got = ticks().wrapping_sub(start);
         if got >= n {
             return got;
         }
         unsafe {
-            asm!("sti; hlt", options(nomem, nostack));
+            asm!("sti; hlt", options(nostack, preserves_flags));
         }
     }
 }
@@ -192,7 +237,7 @@ pub fn pop_key() -> Option<Key> {
 /// A key that arrives after `pop_key` returns `None` and before this `hlt`
 /// retires is taken on the next interrupt. The PIT is 100 Hz, so that wait is
 /// at most one tick, about 10 ms.
-#[cfg(any(feature = "kbd-script", feature = "shell"))]
+#[cfg(any(feature = "kbd-script", feature = "sched"))]
 pub fn idle_hlt() {
     // SAFETY: `hlt` pauses this CPU until an interrupt. Interrupts are enabled.
     // The instruction does not read or write Rust memory and preserves flags.
@@ -263,7 +308,11 @@ extern "C" fn rust_irq_entry(vector: u64) {
     match vector {
         32 => {
             TICKS.fetch_add(1, Ordering::Release);
+            // EOI before the hook: a switch inside `on_tick` can run another
+            // task for a full tick before this handler returns.
             eoi(0);
+            #[cfg(feature = "sched")]
+            crate::sched::on_tick();
         }
         33 => {
             on_keyboard_irq();

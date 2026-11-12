@@ -14,7 +14,9 @@
 //! reuses the panic status 35 on purpose.
 //! The shell writes `0x68` (exit ok → 209), `0x69` (command error → 211),
 //! `0x6A` (line overflow → 213), `0x6B` (script error → 215), or `0x6C`
-//! (halt → 217). `0x65`–`0x67` (203–207) stay unused.
+//! (halt → 217). `0x65`–`0x67` (203–207) and `0x6D`–`0x6F` (219–223) stay
+//! unused. Scheduler proofs write `0x70` (coop → 225), `0x71` (preempt → 227),
+//! `0x72` (sleep → 229), `0x73` (full → 231), and `0x74` (exit → 233).
 //! This device exists only in the emulator. Do not boot this image on hardware.
 
 use crate::port;
@@ -105,6 +107,31 @@ pub fn shell_exit_script() -> ! {
 #[cfg(feature = "shell")]
 pub fn shell_halt() -> ! {
     exit(0x6C)
+}
+
+#[cfg(feature = "sched-coop")]
+pub fn sched_coop_ok() -> ! {
+    exit(0x70)
+}
+
+#[cfg(feature = "sched-preempt")]
+pub fn sched_preempt_ok() -> ! {
+    exit(0x71)
+}
+
+#[cfg(feature = "sched-sleep")]
+pub fn sched_sleep_ok() -> ! {
+    exit(0x72)
+}
+
+#[cfg(feature = "sched-full")]
+pub fn sched_full_ok() -> ! {
+    exit(0x73)
+}
+
+#[cfg(feature = "sched-exit")]
+pub fn sched_exit_ok() -> ! {
+    exit(0x74)
 }
 
 pub fn cpu_fault(vector: u64) -> ! {

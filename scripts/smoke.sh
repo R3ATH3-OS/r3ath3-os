@@ -10,7 +10,9 @@
 # 197, frame exhaustion 0x63 → 199, memory init error 0x64 → 201. The heap
 # overflow panic case reuses the panic status 35 on purpose.
 # Shell: exit ok 0x68 → 209, command error 0x69 → 211, line overflow 0x6A → 213,
-# script error 0x6B → 215, halt 0x6C → 217.
+# script error 0x6B → 215, halt 0x6C → 217. 0x6D–0x6F (219–223) stay unused.
+# Scheduler: coop 0x70 → 225, preempt 0x71 → 227, sleep 0x72 → 229,
+# full 0x73 → 231, exit 0x74 → 233.
 # A triple-fault or silent reset does not print the fault line and does not
 # use those statuses (this QEMU build has exited 0 on triple fault).
 set -u
@@ -40,6 +42,11 @@ SHELL_CMD_STATUS=211
 SHELL_OVERFLOW_STATUS=213
 SHELL_SCRIPT_STATUS=215
 SHELL_HALT_STATUS=217
+SCHED_COOP_STATUS=225
+SCHED_PREEMPT_STATUS=227
+SCHED_SLEEP_STATUS=229
+SCHED_FULL_STATUS=231
+SCHED_EXIT_STATUS=233
 RAM_BYTES=67108864
 HEAP_BYTES=1048576
 HEAP_LINE='R3ATH3_HEAP ok size=1048576 used=([0-9]+) align_max=4096'
@@ -262,6 +269,145 @@ judge_shell_screen() {
   cmp -s "$vga" "$expected_vga"
 }
 
+write_harness_py() {
+  cat >"$OUT/harness_py.py" <<'PY'
+import re
+
+PROMPT = b"r3> "
+
+def prompt_anchored(data):
+    if not isinstance(data, (bytes, bytearray)) or not data.endswith(PROMPT):
+        return False
+    head = data[:-len(PROMPT)]
+    return head.endswith(b"\n") or head.endswith(b"\x1b[H")
+
+def idle_at_prompt(data, start, echo):
+    if not isinstance(data, (bytes, bytearray)):
+        return False
+    if start < 0 or start > len(data):
+        return False
+    if (echo + b"\n") not in data[start:]:
+        return False
+    return prompt_anchored(data)
+
+def keys_at_prompt(data, start):
+    if not isinstance(data, (bytes, bytearray)):
+        return False
+    if start < 0 or start >= len(data):
+        return False
+    if b"\n" not in data[start:]:
+        return False
+    return prompt_anchored(data)
+
+def _lines(text):
+    if text.endswith(b"\n"):
+        text = text[:-1]
+    if text == b"":
+        return []
+    return text.split(b"\n")
+
+def judge_sched_coop(text):
+    lines = _lines(text)
+    expect = [b"R3ATH3_STAGE rust_main"]
+    for index, name in enumerate("ABC" * 3):
+        step = index // 3 + 1
+        expect.append(f"R3ATH3_SCHED_COOP task={name} step={step}".encode())
+    if lines[:10] != expect or len(lines) != 11:
+        return False
+    match = re.fullmatch(rb"R3ATH3_SCHED_COOP ok order=ABCABCABC switches=([0-9]+)", lines[10])
+    return bool(match) and int(match.group(1)) >= 9
+
+def judge_sched_preempt(text):
+    lines = _lines(text)
+    if len(lines) != 7 or lines[0] != b"R3ATH3_STAGE rust_main":
+        return False
+    for step in range(1, 6):
+        if lines[step] != f"R3ATH3_SCHED_PREEMPT worker step={step}".encode():
+            return False
+    match = re.fullmatch(
+        rb"R3ATH3_SCHED_PREEMPT ok worker_steps=5 hog_spins=([0-9]+) preemptions=([0-9]+)",
+        lines[6],
+    )
+    if not match:
+        return False
+    return int(match.group(1)) > 0 and int(match.group(2)) >= 5
+
+def judge_sched_sleep(text):
+    lines = _lines(text)
+    if len(lines) != 5 or lines[0] != b"R3ATH3_STAGE rust_main":
+        return False
+    order = (("S", 10), ("M", 20), ("L", 30))
+    for index, (name, want) in enumerate(order):
+        match = re.fullmatch(
+            rb"R3ATH3_SCHED_SLEEP name=([A-Z]) want=([0-9]+) elapsed=([0-9]+)",
+            lines[1 + index],
+        )
+        if not match or match.group(1).decode() != name or int(match.group(2)) != want:
+            return False
+        elapsed = int(match.group(3))
+        if elapsed < want or elapsed > want + 100:
+            return False
+    match = re.fullmatch(rb"R3ATH3_SCHED_SLEEP ok count=3 idle_runs=([0-9]+)", lines[4])
+    return bool(match) and int(match.group(1)) > 0
+
+def judge_sched_full(text):
+    return text == (
+        b"R3ATH3_STAGE rust_main\n"
+        b"R3ATH3_SCHED_FULL ok spawned=6 error=full after_reap=2\n"
+    )
+
+def judge_sched_exit(text):
+    return text == (
+        b"R3ATH3_STAGE rust_main\n"
+        b"R3ATH3_SCHED_EXIT ok rounds=2 spawned=12 ran=12 free=6 heap_delta=0\n"
+    )
+PY
+}
+
+load_harness_py() {
+  python3 - "$OUT/harness_py.py" "$@" <<'PY'
+import importlib.util, sys
+path = sys.argv[1]
+spec = importlib.util.spec_from_file_location("harness_py", path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+name = sys.argv[2]
+text = open(sys.argv[3], "rb").read()
+fn = getattr(mod, name)
+sys.exit(0 if fn(text) else 1)
+PY
+}
+
+judge_sched_coop() {
+  local status="$1" file="$2"
+  [[ "$status" -eq "$SCHED_COOP_STATUS" ]] || return 1
+  load_harness_py judge_sched_coop "$file"
+}
+
+judge_sched_preempt() {
+  local status="$1" file="$2"
+  [[ "$status" -eq "$SCHED_PREEMPT_STATUS" ]] || return 1
+  load_harness_py judge_sched_preempt "$file"
+}
+
+judge_sched_sleep() {
+  local status="$1" file="$2"
+  [[ "$status" -eq "$SCHED_SLEEP_STATUS" ]] || return 1
+  load_harness_py judge_sched_sleep "$file"
+}
+
+judge_sched_full() {
+  local status="$1" file="$2"
+  [[ "$status" -eq "$SCHED_FULL_STATUS" ]] || return 1
+  load_harness_py judge_sched_full "$file"
+}
+
+judge_sched_exit() {
+  local status="$1" file="$2"
+  [[ "$status" -eq "$SCHED_EXIT_STATUS" ]] || return 1
+  load_harness_py judge_sched_exit "$file"
+}
+
 judge_exact() {
   local status="$1" file="$2" expected_status="$3" expected_file="$4"
   [[ "$status" -eq "$expected_status" ]] || return 1
@@ -463,6 +609,152 @@ PY
     "$dir/screen-cell.vga" "$dir/screen-good.vga"; then ok=1; fi
   if judge_shell_screen "$SHELL_OK_STATUS" "$dir/screen-serial.log" "$dir/screen-serial.log" \
     "$dir/screen-attr.vga" "$dir/screen-good.vga"; then ok=1; fi
+
+  if ! python3 - "$OUT/harness_py.py" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("harness_py", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+checks = []
+def accept(buf, start, echo):
+    checks.append(mod.idle_at_prompt(buf, start, echo))
+def reject(buf, start, echo):
+    checks.append(not mod.idle_at_prompt(buf, start, echo))
+accept(b"banner\nr3> ", 0, b"banner")
+accept(b"clear\n\x1b[2J\x1b[Hr3> ", 0, b"clear")
+reject(b"banner\nr3> x", 0, b"banner")
+reject(b"hi\nxxr3> ", 0, b"hi")
+reject(b"\nr3> ", 0, b"help")
+if not all(checks):
+    sys.exit(1)
+PY
+  then
+    ok=1
+  fi
+
+  cat >"$dir/sched-coop.log" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SCHED_COOP task=A step=1
+R3ATH3_SCHED_COOP task=B step=1
+R3ATH3_SCHED_COOP task=C step=1
+R3ATH3_SCHED_COOP task=A step=2
+R3ATH3_SCHED_COOP task=B step=2
+R3ATH3_SCHED_COOP task=C step=2
+R3ATH3_SCHED_COOP task=A step=3
+R3ATH3_SCHED_COOP task=B step=3
+R3ATH3_SCHED_COOP task=C step=3
+R3ATH3_SCHED_COOP ok order=ABCABCABC switches=13
+EOF
+  cat >"$dir/sched-coop-swap.log" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SCHED_COOP task=B step=1
+R3ATH3_SCHED_COOP task=A step=1
+R3ATH3_SCHED_COOP task=C step=1
+R3ATH3_SCHED_COOP task=A step=2
+R3ATH3_SCHED_COOP task=B step=2
+R3ATH3_SCHED_COOP task=C step=2
+R3ATH3_SCHED_COOP task=A step=3
+R3ATH3_SCHED_COOP task=B step=3
+R3ATH3_SCHED_COOP task=C step=3
+R3ATH3_SCHED_COOP ok order=ABCABCABC switches=13
+EOF
+  judge_sched_coop "$SCHED_COOP_STATUS" "$dir/sched-coop.log" || ok=1
+  if judge_sched_coop "$SCHED_EXIT_STATUS" "$dir/sched-coop.log"; then ok=1; fi
+  if judge_sched_coop "$SCHED_COOP_STATUS" "$dir/sched-coop-swap.log"; then ok=1; fi
+
+  cat >"$dir/sched-preempt.log" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SCHED_PREEMPT worker step=1
+R3ATH3_SCHED_PREEMPT worker step=2
+R3ATH3_SCHED_PREEMPT worker step=3
+R3ATH3_SCHED_PREEMPT worker step=4
+R3ATH3_SCHED_PREEMPT worker step=5
+R3ATH3_SCHED_PREEMPT ok worker_steps=5 hog_spins=10 preemptions=6
+EOF
+  cat >"$dir/sched-preempt-zero-p.log" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SCHED_PREEMPT worker step=1
+R3ATH3_SCHED_PREEMPT worker step=2
+R3ATH3_SCHED_PREEMPT worker step=3
+R3ATH3_SCHED_PREEMPT worker step=4
+R3ATH3_SCHED_PREEMPT worker step=5
+R3ATH3_SCHED_PREEMPT ok worker_steps=5 hog_spins=10 preemptions=0
+EOF
+  cat >"$dir/sched-preempt-zero-h.log" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SCHED_PREEMPT worker step=1
+R3ATH3_SCHED_PREEMPT worker step=2
+R3ATH3_SCHED_PREEMPT worker step=3
+R3ATH3_SCHED_PREEMPT worker step=4
+R3ATH3_SCHED_PREEMPT worker step=5
+R3ATH3_SCHED_PREEMPT ok worker_steps=5 hog_spins=0 preemptions=6
+EOF
+  cat >"$dir/sched-preempt-short.log" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SCHED_PREEMPT worker step=1
+R3ATH3_SCHED_PREEMPT worker step=2
+R3ATH3_SCHED_PREEMPT worker step=3
+R3ATH3_SCHED_PREEMPT worker step=4
+R3ATH3_SCHED_PREEMPT ok worker_steps=5 hog_spins=10 preemptions=6
+EOF
+  judge_sched_preempt "$SCHED_PREEMPT_STATUS" "$dir/sched-preempt.log" || ok=1
+  if judge_sched_preempt "$SCHED_COOP_STATUS" "$dir/sched-preempt.log"; then ok=1; fi
+  if judge_sched_preempt "$SCHED_PREEMPT_STATUS" "$dir/sched-preempt-zero-p.log"; then ok=1; fi
+  if judge_sched_preempt "$SCHED_PREEMPT_STATUS" "$dir/sched-preempt-zero-h.log"; then ok=1; fi
+  if judge_sched_preempt "$SCHED_PREEMPT_STATUS" "$dir/sched-preempt-short.log"; then ok=1; fi
+
+  cat >"$dir/sched-sleep.log" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SCHED_SLEEP name=S want=10 elapsed=10
+R3ATH3_SCHED_SLEEP name=M want=20 elapsed=20
+R3ATH3_SCHED_SLEEP name=L want=30 elapsed=30
+R3ATH3_SCHED_SLEEP ok count=3 idle_runs=4
+EOF
+  cat >"$dir/sched-sleep-order.log" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SCHED_SLEEP name=M want=20 elapsed=20
+R3ATH3_SCHED_SLEEP name=S want=10 elapsed=10
+R3ATH3_SCHED_SLEEP name=L want=30 elapsed=30
+R3ATH3_SCHED_SLEEP ok count=3 idle_runs=4
+EOF
+  cat >"$dir/sched-sleep-early.log" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SCHED_SLEEP name=S want=10 elapsed=9
+R3ATH3_SCHED_SLEEP name=M want=20 elapsed=20
+R3ATH3_SCHED_SLEEP name=L want=30 elapsed=30
+R3ATH3_SCHED_SLEEP ok count=3 idle_runs=4
+EOF
+  cat >"$dir/sched-sleep-late.log" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_SCHED_SLEEP name=S want=10 elapsed=200
+R3ATH3_SCHED_SLEEP name=M want=20 elapsed=20
+R3ATH3_SCHED_SLEEP name=L want=30 elapsed=30
+R3ATH3_SCHED_SLEEP ok count=3 idle_runs=4
+EOF
+  judge_sched_sleep "$SCHED_SLEEP_STATUS" "$dir/sched-sleep.log" || ok=1
+  if judge_sched_sleep "$SCHED_FULL_STATUS" "$dir/sched-sleep.log"; then ok=1; fi
+  if judge_sched_sleep "$SCHED_SLEEP_STATUS" "$dir/sched-sleep-order.log"; then ok=1; fi
+  if judge_sched_sleep "$SCHED_SLEEP_STATUS" "$dir/sched-sleep-early.log"; then ok=1; fi
+  if judge_sched_sleep "$SCHED_SLEEP_STATUS" "$dir/sched-sleep-late.log"; then ok=1; fi
+
+  printf '%s\n' "R3ATH3_STAGE rust_main" "R3ATH3_SCHED_FULL ok spawned=6 error=full after_reap=2" >"$dir/sched-full.log"
+  printf '%s\n' "R3ATH3_STAGE rust_main" "R3ATH3_SCHED_EXIT ok rounds=2 spawned=12 ran=12 free=6 heap_delta=0" >"$dir/sched-exit.log"
+  judge_sched_full "$SCHED_FULL_STATUS" "$dir/sched-full.log" || ok=1
+  judge_sched_exit "$SCHED_EXIT_STATUS" "$dir/sched-exit.log" || ok=1
+  if judge_sched_full "$SCHED_EXIT_STATUS" "$dir/sched-full.log"; then ok=1; fi
+  if judge_sched_exit "$SCHED_FULL_STATUS" "$dir/sched-exit.log"; then ok=1; fi
+
+  if ! write_shell_cases; then
+    ok=1
+  else
+    if judge_exact "$SHELL_CMD_STATUS" "$OUT/task/shell-ps.expected" "$SHELL_OK_STATUS" "$OUT/task/shell-ps.expected"; then ok=1; fi
+    if judge_exact "$SHELL_CMD_STATUS" "$OUT/task/shell-wait.expected" "$SHELL_OK_STATUS" "$OUT/task/shell-wait.expected"; then ok=1; fi
+    if judge_exact "$SHELL_OK_STATUS" "$OUT/task/shell-sched-error.expected" "$SHELL_CMD_STATUS" "$OUT/task/shell-sched-error.expected"; then ok=1; fi
+    if judge_exact "$SHELL_OK_STATUS" "$OUT/task/shell-usage.expected" "$SHELL_CMD_STATUS" "$OUT/task/shell-usage.expected"; then ok=1; fi
+    if judge_exact "$SHELL_OK_STATUS" "$OUT/task/shell-edge.expected" "$SHELL_OVERFLOW_STATUS" "$OUT/task/shell-edge.expected"; then ok=1; fi
+    if judge_exact "$SHELL_OK_STATUS" "$OUT/task/shell-ps.expected" "$SHELL_OK_STATUS" "$OUT/task/shell-wait.expected"; then ok=1; fi
+    if judge_exact "$SHELL_CMD_STATUS" "$OUT/task/shell-usage.expected" "$SHELL_CMD_STATUS" "$OUT/task/shell-sched-error.expected"; then ok=1; fi
+  fi
 
   if [[ "$ok" -eq 0 ]]; then
     log "[PASS] harness-selftest"
@@ -914,6 +1206,9 @@ help_text = (
     "clear       clear the screen\n"
     "uptime      timer ticks and seconds since boot\n"
     "mem         heap and frame use\n"
+    "ps          list tasks\n"
+    "spawn DEMO  start demo task spin or nap\n"
+    "wait ID     wait for a task to exit\n"
     "run SCRIPT  run a task script, lines separated by ;\n"
     "exit        leave the shell with the last status\n"
     "halt        stop the machine\n"
@@ -1045,6 +1340,128 @@ write_bytes(
     prefix + "foo\nerror: unknown command: foo\n" + p + "halt\nR3ATH3_SHELL_HALT\n",
 )
 
+write_text("shell-ps.steps", "line spawn spin\nline ps\nline echo alive\nline exit\n")
+write_bytes(
+    "shell-ps.expected",
+    prefix
+    + "spawn spin\n"
+    + "spawned id=2 name=spin\n"
+    + p
+    + "ps\n"
+    + "task id=0 name=shell state=running\n"
+    + "task id=1 name=idle state=ready\n"
+    + "task id=2 name=spin state=ready\n"
+    + p
+    + "echo alive\n"
+    + "alive\n"
+    + p
+    + "exit\n"
+    + exit_ok,
+)
+
+write_text("shell-wait.steps", "line spawn nap\nline wait 2\nline ps\nline exit\n")
+write_bytes(
+    "shell-wait.expected",
+    prefix
+    + "spawn nap\n"
+    + "spawned id=2 name=nap\n"
+    + p
+    + "wait 2\n"
+    + "exited id=2\n"
+    + p
+    + "ps\n"
+    + "task id=0 name=shell state=running\n"
+    + "task id=1 name=idle state=ready\n"
+    + p
+    + "exit\n"
+    + exit_ok,
+)
+
+sched_err_steps = [
+    "line spawn",
+    "line spawn foo",
+    "line wait 5",
+    "line ps x",
+] + ["line spawn spin"] * 7 + ["line exit"]
+write_text("shell-sched-error.steps", "\n".join(sched_err_steps) + "\n")
+sched_err = (
+    "spawn\n"
+    + "error: usage: spawn DEMO\n"
+    + p
+    + "spawn foo\n"
+    + "error: unknown demo: foo\n"
+    + p
+    + "wait 5\n"
+    + "error: no task 5\n"
+    + p
+    + "ps x\n"
+    + "error: usage: ps\n"
+)
+for slot in range(2, 8):
+    sched_err += p + "spawn spin\n" + "spawned id=%d name=spin\n" % slot
+sched_err += (
+    p
+    + "spawn spin\n"
+    + "error: task table full\n"
+    + p
+    + "exit\n"
+    + "R3ATH3_SHELL_EXIT last=cmd\n"
+)
+write_bytes("shell-sched-error.expected", prefix + sched_err)
+
+write_text(
+    "shell-usage.steps",
+    "line run\nline help x\nline uptime x\nline mem x\nline exit x\nline halt x\nline exit\n",
+)
+write_bytes(
+    "shell-usage.expected",
+    prefix
+    + "run\n"
+    + "error: usage: run SCRIPT\n"
+    + p
+    + "help x\n"
+    + "error: usage: help\n"
+    + p
+    + "uptime x\n"
+    + "error: usage: uptime\n"
+    + p
+    + "mem x\n"
+    + "error: usage: mem\n"
+    + p
+    + "exit x\n"
+    + "error: usage: exit\n"
+    + p
+    + "halt x\n"
+    + "error: usage: halt\n"
+    + p
+    + "exit\n"
+    + "R3ATH3_SHELL_EXIT last=cmd\n",
+)
+
+echo_edge = "echo " + ("b" * 71)
+if len(echo_edge) != 76:
+    raise SystemExit("shell-edge line is not 76 bytes")
+write_text(
+    "shell-edge.steps",
+    "line " + echo_edge + "\nkeys " + " ".join(["a"] * 76) + " b backspace backspace ret\nline exit\n",
+)
+write_bytes(
+    "shell-edge.expected",
+    prefix
+    + echo_edge
+    + "\n"
+    + ("b" * 71)
+    + "\n"
+    + p
+    + ("a" * 76)
+    + "\x08 \x08\x08 \x08"
+    + "\n"
+    + "error: line too long (max 76)\n"
+    + p
+    + "exit\n"
+    + "R3ATH3_SHELL_EXIT last=overflow\n",
+)
+
 screen_steps = "line clear\n" + ("line\n" * 24) + "line echo vga\nxp\nline exit\n"
 write_text("shell-screen.steps", screen_steps)
 write_bytes(
@@ -1151,9 +1568,12 @@ expect_shell() {
   rm -f "$sock" "$vga_file" "$log_file"
   set +e
   timeout --foreground --kill-after=5s "$seconds" python3 - \
-    "$elf" "$log_file" "$err_file" "$seconds" "$steps" "$sock" "$vga_file" <<'PY'
-import os, re, signal, socket, subprocess, sys, time
-elf, out_log, err_log, seconds, steps_path, sock_path, vga_path = sys.argv[1:]
+    "$elf" "$log_file" "$err_file" "$seconds" "$steps" "$sock" "$vga_file" "$OUT/harness_py.py" <<'PY'
+import importlib.util, os, re, signal, socket, subprocess, sys, time
+elf, out_log, err_log, seconds, steps_path, sock_path, vga_path, harness_path = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("harness_py", harness_path)
+harness = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(harness)
 # A previous run's transcript must not satisfy the ready wait. QEMU truncates
 # the serial file only after it starts, and the first read can happen before that.
 try:
@@ -1198,8 +1618,27 @@ def read_serial():
     except FileNotFoundError:
         return b""
 
-def prompt_count():
-    return read_serial().count(b"r3> ")
+READY_ECHO = b"R3ATH3_SHELL_READY\nR3@TH3 shell. Type help for commands."
+
+def step_settled(data, start, echo, keys_mode):
+    if keys_mode:
+        return harness.keys_at_prompt(data, start)
+    return harness.idle_at_prompt(data, start, echo)
+
+def wait_stable(start, echo, keys_mode):
+    limit = time.time() + 5
+    while time.time() < limit and time.time() < deadline:
+        data = read_serial()
+        if step_settled(data, start, echo, keys_mode):
+            time.sleep(0.05)
+            data2 = read_serial()
+            if len(data2) == len(data) and step_settled(data2, start, echo, keys_mode):
+                return True
+            continue
+        if proc.poll() is not None:
+            return False
+        time.sleep(0.02)
+    return False
 
 PLAIN = {
     " ": "spc",
@@ -1236,28 +1675,32 @@ for raw in open(steps_path, "r", encoding="utf-8"):
     if raw == "" or raw.startswith("#"):
         continue
     if raw == "line":
-        steps.append(("line", qcodes_for_text("")))
+        steps.append(("line", qcodes_for_text(""), b""))
     elif raw.startswith("line "):
-        steps.append(("line", qcodes_for_text(raw[5:])))
+        steps.append(("line", qcodes_for_text(raw[5:]), raw[5:].encode("utf-8")))
     elif raw.startswith("keys "):
-        steps.append(("keys", raw[5:].split()))
+        steps.append(("keys", raw[5:].split(), None))
     elif raw == "xp":
-        steps.append(("xp", []))
+        steps.append(("xp", [], None))
     else:
         fail(2, "bad step " + raw)
 
 ready_deadline = min(deadline, time.time() + 5)
+ready = False
 while time.time() < ready_deadline:
     if proc.poll() is not None:
         break
     data = read_serial()
-    if b"R3ATH3_SHELL_READY" in data and prompt_count() >= 1:
-        break
+    if harness.idle_at_prompt(data, 0, READY_ECHO):
+        time.sleep(0.05)
+        data2 = read_serial()
+        if len(data2) == len(data) and harness.idle_at_prompt(data2, 0, READY_ECHO):
+            ready = True
+            break
+        continue
     time.sleep(0.02)
-else:
+if not ready:
     fail(124, "timed out waiting for the shell prompt")
-if b"R3ATH3_SHELL_READY" not in read_serial() or prompt_count() < 1:
-    fail(124, "shell prompt missing")
 
 mon = None
 for _ in range(50):
@@ -1301,23 +1744,15 @@ def send_keys(keys):
         time.sleep(0.03)
     return True
 
-def wait_prompts(target):
-    limit = time.time() + 5
-    while time.time() < limit and time.time() < deadline:
-        if prompt_count() >= target:
-            return True
-        if proc.poll() is not None:
-            return False
-        time.sleep(0.02)
-    return False
-
-for index, (kind, keys) in enumerate(steps):
+for index, (kind, keys, echo) in enumerate(steps):
     last = index + 1 == len(steps)
     if kind in ("line", "keys"):
-        before = prompt_count()
+        # Snapshot before the first key. The shell echoes while keys are
+        # still being sent, so the echo has to land after this point.
+        start = len(read_serial())
         if not send_keys(keys):
             fail(1, "monitor closed while sending keys")
-        if not last and not wait_prompts(before + 1):
+        if not last and not wait_stable(start, echo, kind == "keys"):
             fail(124, "timed out waiting for the next prompt")
     elif kind == "xp":
         try:
@@ -1430,6 +1865,7 @@ log "toolchain cargo=$(cargo --version)"
 log "toolchain qemu=$(qemu-system-x86_64 --version | head -n 1)"
 git_report before
 
+write_harness_py
 selftest_harness
 
 # Use the tracked lockfile only. Do not regenerate it: an online fallback can
@@ -1500,6 +1936,21 @@ else
   if build_kernel mem-badinfo mem-badinfo; then
     expect_case mem-badinfo judge_mem_badinfo 8
   fi
+  if build_kernel sched-coop sched-coop; then
+    expect_case sched-coop judge_sched_coop 12
+  fi
+  if build_kernel sched-preempt sched-preempt; then
+    expect_case sched-preempt judge_sched_preempt 12
+  fi
+  if build_kernel sched-sleep sched-sleep; then
+    expect_case sched-sleep judge_sched_sleep 12
+  fi
+  if build_kernel sched-full sched-full; then
+    expect_case sched-full judge_sched_full 12
+  fi
+  if build_kernel sched-exit sched-exit; then
+    expect_case sched-exit judge_sched_exit 12
+  fi
   if build_kernel shell shell; then
     if write_shell_cases; then
       expect_shell shell-basic 12 "$OUT/task/shell-basic.steps" "$OUT/task/shell-basic.expected" "$SHELL_OK_STATUS" exact
@@ -1511,6 +1962,11 @@ else
       expect_shell shell-mem 12 "$OUT/task/shell-mem.steps" "$OUT/task/shell-mem.expected" "$SHELL_OK_STATUS" mem
       expect_shell shell-halt 12 "$OUT/task/shell-halt.steps" "$OUT/task/shell-halt.expected" "$SHELL_HALT_STATUS" exact
       expect_shell shell-screen 20 "$OUT/task/shell-screen.steps" "$OUT/task/shell-screen.expected" "$SHELL_OK_STATUS" screen
+      expect_shell shell-ps 12 "$OUT/task/shell-ps.steps" "$OUT/task/shell-ps.expected" "$SHELL_OK_STATUS" exact
+      expect_shell shell-wait 12 "$OUT/task/shell-wait.steps" "$OUT/task/shell-wait.expected" "$SHELL_OK_STATUS" exact
+      expect_shell shell-sched-error 20 "$OUT/task/shell-sched-error.steps" "$OUT/task/shell-sched-error.expected" "$SHELL_CMD_STATUS" exact
+      expect_shell shell-usage 12 "$OUT/task/shell-usage.steps" "$OUT/task/shell-usage.expected" "$SHELL_CMD_STATUS" exact
+      expect_shell shell-edge 20 "$OUT/task/shell-edge.steps" "$OUT/task/shell-edge.expected" "$SHELL_OVERFLOW_STATUS" exact
     else
       log "[FAIL] write shell cases"
       FAILURES=$((FAILURES + 1))

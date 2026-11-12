@@ -12,21 +12,21 @@ In this image:
 
 1. A `shell` feature build: a line-editing prompt `r3> ` that reads the PS/2 keyboard and echoes to COM1 and to the VGA text console.
 2. A VGA text console: 80×25, cursor tracking, hardware cursor, scrolling, clear, backspace.
-3. Built-ins: `help`, `echo`, `clear`, `uptime`, `mem`, `run`, `exit`, `halt`.
+3. Built-ins: `help`, `echo`, `clear`, `uptime`, `mem`, `ps`, `spawn`, `wait`, `run`, `exit`, `halt`.
 4. Backspace, a fixed 76-byte line limit, an unknown-command error, and empty lines.
 5. `run` executes an inline task-language script and survives its errors. `script` and `kbd-script` output is unchanged.
 
-Not in this image: `ls`, `cat`, or any file system; processes, a scheduler, or background jobs; command history; tab completion; arrow keys, Home, End, Delete, or editing mid-line; Ctrl-C or other control keys; Caps Lock; pipes, redirection, shell variables, globbing, or quoting rules in the shell itself; scrollback; colors other than green on black; serial input to the shell; a mouse; a GUI or framebuffer. The default boot path is unchanged: it still prints the boot marker and exits 33.
+Not in this image: `ls`, `cat`, or any file system; processes or background jobs; command history; tab completion; arrow keys, Home, End, Delete, or editing mid-line; Ctrl-C or other control keys; Caps Lock; pipes, redirection, shell variables, globbing, or quoting rules in the shell itself; scrollback; colors other than green on black; serial input to the shell; a mouse; a GUI or framebuffer. The default boot path is unchanged: it still prints the boot marker and exits 33. The shell build runs the kernel scheduler (`docs/SCHEDULER.md`). `spawn` starts a demo task. It is not a process, and `wait` on `spin` blocks forever because there is no Ctrl-C.
 
 ## 2. Where it plugs in
 
-`kernel_main` order is unchanged through `mem::init()`. On the `shell` feature, `shell::run()` then runs and does not return. `shell` is one of the test features in the "at most one" assert and in both `boot_ok` `cfg` lists. `script` is compiled for `script`, `kbd-script`, or `shell`.
+`kernel_main` order is unchanged through `mem::init()`. On the `shell` feature, `sched::init(true)` then runs, and `shell::run()` does not return. `shell` is one of the test features in the "at most one" assert and in both `boot_ok` `cfg` lists. `script` is compiled for `script`, `kbd-script`, or `shell`. The `shell` feature depends on `sched`.
 
 COM1 is the judged channel. It carries the prompt, echoed keys, command output, and `R3ATH3_*` lines. VGA shows the same transcript, except `R3ATH3_*` lines are serial-only. Line endings are `\n` only.
 
 ## 3. VGA console
 
-Buffer `0xB8000`, 80 columns by 25 rows. Each cell is `attribute << 8 | byte` with attribute `0x0A` (green on black). Every console access uses `read_volatile` / `write_volatile`. Cursor state is a private static behind an `UnsafeCell`. It is main-context only. IRQ handlers do not touch VGA.
+Buffer `0xB8000`, 80 columns by 25 rows. Each cell is `attribute << 8 | byte` with attribute `0x0A` (green on black). Every console access uses `read_volatile` / `write_volatile`. Cursor state is a private static. `with_console` hands it to a closure, and the `&mut` cannot escape. Only the shell task calls the console. IRQ handlers and other tasks do not touch VGA. A preemption in the middle of a console call is harmless because no other task enters the module.
 
 - `console_clear` fills all 2000 cells with `0x0A20`, sets row and column to 0, and updates the hardware cursor.
 - `console_put` treats `\n` as "column 0 of the next row". A byte in `0x20`–`0x7E` is stored and the column advances. Any other byte is stored as `?`.
@@ -44,7 +44,7 @@ Buffer `0xB8000`, 80 columns by 25 rows. Each cell is `attribute << 8 | byte` wi
 
 ## 5. Keyboard
 
-The shell reads `irq::pop_key`. When the ring is empty it calls `irq::idle_hlt` and loops. Interrupts are already enabled. A key that arrives after the empty check and before `hlt` is picked up by the next timer tick at the latest, about 10 ms at 100 Hz.
+The shell reads `irq::pop_key`. In this build it is the only caller. When the ring is empty it calls `sched::yield_now` and loops. With nothing else ready, `pick_next` returns the shell and `yield_now` returns at once, so a key is noticed within one tick (10 ms). With six `spin` tasks the shell runs once per round of quanta, at most 70 ms. When the shell is blocked in `wait` and nothing else is ready, idle calls `irq::idle_hlt`.
 
 Scan code set 1 also maps `0x27` to `;` (Shift `:`) and `0x28` to `'` (Shift `"`). Keys `translate` does not map are ignored. The shell does not reset or print `KB_DROPS`.
 
@@ -63,16 +63,19 @@ Output lines end in `\n` and go to both channels unless marked serial-only.
 
 | Command | Arguments | Output | `last` |
 | --- | --- | --- | --- |
-| `help` | none | The 8 lines below | ok |
+| `help` | none | The 11 lines below | ok |
 | `echo` | any | The words joined by single spaces. `echo` alone prints an empty line. Quotes are not special. | ok |
 | `clear` | none | Serial `\x1b[2J\x1b[H`; VGA clear | ok |
 | `uptime` | none | `uptime ticks=<n> hz=100 seconds=<s>.<cc>` with `n = irq::ticks()`, `s = n / 100`, and `cc = n % 100` as two digits | ok |
 | `mem` | none | `mem heap_used=<heap::used()> heap_size=1048576 frames_total=<t> frames_free=<f>` from `frames::stats()` | ok |
+| `ps` | none | One line per non-free slot, id order: `task id=<n> name=<name> state=<ready\|running\|sleeping\|blocked\|exited>` | ok |
+| `spawn` | one word, `spin` or `nap` | `spawned id=<n> name=<demo>` | ok |
+| `wait` | one decimal id | `exited id=<n>` after the slot is reaped | ok |
 | `run` | the rest of the line after `run` and its following spaces, raw | Script lines (`text` plus `\n`) on both channels. On error: `error: script line=<n> reason=<word>` | ok, or script on error |
 | `exit` | none | Serial-only `R3ATH3_SHELL_EXIT last=<ok\|cmd\|overflow\|script>`, then the status in section 8 | n/a |
 | `halt` | none | Serial-only `R3ATH3_SHELL_HALT`, then status 217, whatever `last` is | n/a |
 
-An unknown first word prints `error: unknown command: <word>` and sets `last` to cmd. Extra arguments to `help`, `clear`, `uptime`, `mem`, `exit`, or `halt`, or `run` with nothing after it, print `error: usage: <command>` (`error: usage: run SCRIPT` for `run`). The shell does not exit, and `last` becomes cmd.
+An unknown first word prints `error: unknown command: <word>` and sets `last` to cmd. Extra arguments to `help`, `clear`, `uptime`, `mem`, `ps`, `exit`, or `halt`, or `run` with nothing after it, print `error: usage: <command>` (`error: usage: run SCRIPT` for `run`, `error: usage: ps` for `ps`). `spawn` with no word or extra words prints `error: usage: spawn DEMO`. Any other demo word prints `error: unknown demo: <word>`. A full table prints `error: task table full`. `wait` with a missing or extra argument prints `error: usage: wait ID`. A non-number, a value outside 2–7, or a free slot prints `error: no task <arg>` using the raw argument. Each of those errors sets `last` to cmd. The shell does not exit. `spin` loops and never returns. `nap` sleeps 20 ticks and returns. `wait` on `spin` blocks forever.
 
 `help` text, exactly:
 
@@ -82,6 +85,9 @@ echo TEXT   print TEXT
 clear       clear the screen
 uptime      timer ticks and seconds since boot
 mem         heap and frame use
+ps          list tasks
+spawn DEMO  start demo task spin or nap
+wait ID     wait for a task to exit
 run SCRIPT  run a task script, lines separated by ;
 exit        leave the shell with the last status
 halt        stop the machine
@@ -115,13 +121,15 @@ QEMU turns an `out` of `V` to port `0xF4` into status `(V << 1) | 1`.
 | `0x6B` | 215 | `exit`, last `run` failed |
 | `0x6C` | 217 | `halt` |
 
-`0x65`–`0x67` (203–207) are unused. None of these collide with 33, 35, 95, 97, 99, 101, 103, 105, 124–127, 137, 161, 163, 177, 179, 181, 193, 195, 197, 199, or 201.
+`0x65`–`0x67` (203–207) and `0x6D`–`0x6F` (219–223) are unused. None of these collide with 33, 35, 95, 97, 99, 101, 103, 105, 124–127, 137, 161, 163, 177, 179, 181, 193, 195, 197, 199, 201, or the scheduler statuses 225–233.
 
-`shell-basic`, `shell-backspace`, `shell-run`, `shell-mem`, and `shell-screen` share status 209 and are told apart by their transcripts, the same way the script error cases share 163.
+A status names an outcome. A feature that can end its own run gets its own status; shell commands are judged by exact transcript under the shell's outcome statuses, and a swap self-test proves those cases cannot pass for each other. 209 covers `shell-basic`, `shell-backspace`, `shell-run`, `shell-mem`, `shell-screen`, `shell-ps`, and `shell-wait`. 211 covers `shell-unknown`, `shell-sched-error`, and `shell-usage`. 213 covers `shell-overflow` and `shell-edge`. 215 and 217 stay one case each.
 
 ## 12. Smoke cases
 
-`./scripts/smoke.sh` runs the previous 27 cases unchanged, then nine shell cases on `shell.elf`. The harness uses the same QEMU command line as the monitor cases (`-vga std`, serial file, monitor socket, `-m 64M`). It deletes that case's serial log before starting QEMU. A log left by an earlier run does not count: QEMU truncates the file only after it has started, and a ready check that reads the old bytes injects keys while `init_keyboard` is still draining the controller. The harness injects no keys until this boot's log contains `R3ATH3_SHELL_READY` and the first `r3> ` prompt from section 7. Keys are `sendkey` 30 ms apart. After each input step except the last, it waits until the serial log contains one more `r3> ` than before, with a 5 second limit per step. A missed wait is status 124. The `xp` step reads the VGA buffer and does not produce a prompt, so it is not a prompt-wait step. Timeouts are 20 seconds for `shell-overflow` and `shell-screen`, and 12 seconds for the others.
+`./scripts/smoke.sh` runs the previous 27 cases unchanged, then fourteen shell cases on `shell.elf`, plus the five scheduler proofs in `docs/SCHEDULER.md`. The harness uses the same QEMU command line as the monitor cases (`-vga std`, serial file, monitor socket, `-m 64M`). It deletes that case's serial log before starting QEMU. A log left by an earlier run does not count: QEMU truncates the file only after it has started, and a ready check that reads the old bytes injects keys while `init_keyboard` is still draining the controller. The harness injects no keys until this boot's log contains `R3ATH3_SHELL_READY` and the first `r3> ` prompt from section 7, and that log length stays unchanged across two reads 50 ms apart. Keys are `sendkey` 30 ms apart.
+
+After a step is chosen, the harness records the log length **before** the first key, because the shell echoes while later keys are still in flight. It then waits, except on the last step (`exit` or `halt` does not print another prompt), until all of these hold: the bytes after that point contain the typed text followed by `\n` (a `keys` step instead needs the log to have grown and to contain a `\n`); the log ends in `r3> ` preceded by `\n` or `\x1b[H`; and the log length is unchanged across two reads 50 ms apart. The limit is 5 seconds per step. A missed wait is status 124. The `xp` step reads the VGA buffer and does not produce a prompt, so it is not a prompt-wait step. Timeouts are 20 seconds for `shell-overflow`, `shell-screen`, `shell-sched-error`, and `shell-edge`, and 12 seconds for the others.
 
 | Case | Status | What it checks |
 | --- | --- | --- |
@@ -134,9 +142,14 @@ QEMU turns an `out` of `V` to port `0xF4` into status `(V << 1) | 1`.
 | `shell-mem` | 209 | The two `mem` lines are identical, `heap_used` ≤ 4096, `frames_free == frames_total`, and the uptime fields match the tick count |
 | `shell-halt` | 217 | `halt` prints `R3ATH3_SHELL_HALT` and ignores `last` |
 | `shell-screen` | 209 | Serial transcript plus a 25×80 dump of `0xB8000`. After `clear`, 24 empty lines, and `echo vga`: rows 0–21 are `r3> `, row 22 is `r3> echo vga`, row 23 is `vga`, row 24 is `r3> `, every attribute `0x0A` |
+| `shell-ps` | 209 | `spawn spin`, then `ps` shows shell running, idle ready, and spin ready, then `echo alive` |
+| `shell-wait` | 209 | `spawn nap`, `wait 2` prints `exited id=2`, and the next `ps` shows only ids 0 and 1 |
+| `shell-sched-error` | 211 | `spawn` usage, unknown demo, `wait 5` with no such task, `ps` usage, six `spin` tasks, then `error: task table full` |
+| `shell-usage` | 211 | `run`, `help x`, `uptime x`, `mem x`, `exit x`, and `halt x` each print a usage error and the shell stays up |
+| `shell-edge` | 213 | An exactly-76-byte `echo` line runs. 76 `a`s, then `b` and two backspaces, then Enter, still reports overflow, and the `b` is not echoed |
 
-The screen dump is 25 lines of 80 `XXXX` hex cells. The harness self-test rejects a wrong shell status, a shortened transcript, mismatched `mem` numbers, a changed screen cell, and a cell whose attribute is `0x07`.
+The screen dump is 25 lines of 80 `XXXX` hex cells. The harness self-test rejects a wrong shell status, a shortened transcript, mismatched `mem` numbers, a changed screen cell, a cell whose attribute is `0x07`, a `shell-ps` transcript judged as `shell-wait`, and a `shell-usage` transcript judged as `shell-sched-error`.
 
 ## 13. Unsafe
 
-New `unsafe` for this milestone is the console state and volatile cell access in `vga.rs` (including the CRTC `port::outb` calls) and `idle_hlt` in `irq.rs`. Each new block has a `// SAFETY:` comment. `shell.rs` and `script.rs` have no `unsafe`. The file list is in `docs/FOUNDATION.md`.
+New `unsafe` for the console is in `vga.rs` (`with_console`, volatile cell access, and the CRTC `port::outb` calls). `idle_hlt` and `without_interrupts` are in `irq.rs`. The scheduler's `unsafe` is in `context.rs` (`docs/SCHEDULER.md`). Each new block has a `// SAFETY:` comment. `shell.rs` and `script.rs` have no `unsafe`. The file list is in `docs/FOUNDATION.md`.

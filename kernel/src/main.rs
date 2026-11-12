@@ -12,6 +12,8 @@
 extern crate alloc;
 
 mod boot;
+#[cfg(feature = "sched")]
+mod context;
 mod exceptions;
 mod frames;
 mod heap;
@@ -28,6 +30,16 @@ mod memmap;
 mod memtest;
 mod port;
 mod qemu_exit;
+#[cfg(feature = "sched")]
+mod sched;
+#[cfg(any(
+    feature = "sched-coop",
+    feature = "sched-preempt",
+    feature = "sched-sleep",
+    feature = "sched-full",
+    feature = "sched-exit"
+))]
+mod schedtest;
 #[cfg(any(feature = "script", feature = "kbd-script", feature = "shell"))]
 mod script;
 mod serial;
@@ -54,6 +66,11 @@ const _: () = {
         + cfg!(feature = "frames") as u8
         + cfg!(feature = "frames-oom") as u8
         + cfg!(feature = "mem-badinfo") as u8
+        + cfg!(feature = "sched-coop") as u8
+        + cfg!(feature = "sched-preempt") as u8
+        + cfg!(feature = "sched-sleep") as u8
+        + cfg!(feature = "sched-full") as u8
+        + cfg!(feature = "sched-exit") as u8
         + cfg!(feature = "shell") as u8;
     assert!(modes <= 1, "enable at most one test feature");
 };
@@ -79,6 +96,14 @@ pub extern "C" fn kernel_main() -> ! {
 
     #[cfg(feature = "mem-badinfo")]
     panic!("memory init accepted a zeroed start-info pointer");
+
+    #[cfg(feature = "sched")]
+    {
+        // Cooperative proofs leave the timer hook unable to switch. Every
+        // other sched build, including the shell, preempts once per tick.
+        let preempt = !cfg!(any(feature = "sched-coop", feature = "sched-full"));
+        sched::init(preempt);
+    }
 
     #[cfg(feature = "fault-panic")]
     panic!("injected boot fault");
@@ -125,6 +150,21 @@ pub extern "C" fn kernel_main() -> ! {
     #[cfg(feature = "frames-oom")]
     memtest::run_frames_oom();
 
+    #[cfg(feature = "sched-coop")]
+    schedtest::run_coop();
+
+    #[cfg(feature = "sched-preempt")]
+    schedtest::run_preempt();
+
+    #[cfg(feature = "sched-sleep")]
+    schedtest::run_sleep();
+
+    #[cfg(feature = "sched-full")]
+    schedtest::run_full();
+
+    #[cfg(feature = "sched-exit")]
+    schedtest::run_exit();
+
     #[cfg(feature = "shell")]
     shell::run();
 
@@ -144,6 +184,11 @@ pub extern "C" fn kernel_main() -> ! {
         feature = "frames",
         feature = "frames-oom",
         feature = "mem-badinfo",
+        feature = "sched-coop",
+        feature = "sched-preempt",
+        feature = "sched-sleep",
+        feature = "sched-full",
+        feature = "sched-exit",
         feature = "shell"
     )))]
     boot_ok();
@@ -165,6 +210,11 @@ pub extern "C" fn kernel_main() -> ! {
     feature = "frames",
     feature = "frames-oom",
     feature = "mem-badinfo",
+    feature = "sched-coop",
+    feature = "sched-preempt",
+    feature = "sched-sleep",
+    feature = "sched-full",
+    feature = "sched-exit",
     feature = "shell"
 )))]
 fn boot_ok() -> ! {

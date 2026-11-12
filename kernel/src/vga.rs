@@ -3,7 +3,9 @@
 //! # Invariants
 //! Boot code identity-maps the first 1 GiB before `kernel_main`, so this
 //! physical address is the same virtual address. Only the boot processor
-//! writes it, and only from main context. IRQ handlers do not.
+//! writes it. The console cursor is touched only by the shell task. IRQ
+//! handlers and other tasks do not. A preemption in the middle of a console
+//! call is harmless because no other task enters this module.
 //! `write_marker` fills 80×25 cells and `write_line` fills the first row.
 //! The console API tracks a cursor, scrolls, and programs the hardware cursor
 //! through CRTC ports `0x3D4` and `0x3D5`. QEMU's default VGA text mode
@@ -38,10 +40,11 @@ unsafe impl Sync for ConsoleCell {}
 
 static CONSOLE: ConsoleCell = ConsoleCell(UnsafeCell::new(ConsolePos { row: 0, col: 0 }));
 
-fn console_pos() -> &'static mut ConsolePos {
-    // SAFETY: single CPU, main context only. IRQ handlers do not call into
-    // this module, and the shell never overlaps two calls.
-    unsafe { &mut *CONSOLE.0.get() }
+fn with_console<R>(f: impl FnOnce(&mut ConsolePos) -> R) -> R {
+    // SAFETY: one CPU; only the shell task calls the console; IRQ handlers
+    // and other tasks never do; a preemption mid-call is harmless because
+    // no other task enters the module. The `&mut` does not escape `f`.
+    f(unsafe { &mut *CONSOLE.0.get() })
 }
 
 pub fn write_marker(text: &str) {
@@ -82,9 +85,10 @@ pub fn console_clear() {
             BUFFER.add(index).write_volatile(space_cell());
         }
     }
-    let pos = console_pos();
-    pos.row = 0;
-    pos.col = 0;
+    with_console(|pos| {
+        pos.row = 0;
+        pos.col = 0;
+    });
     set_cursor(0, 0);
 }
 
@@ -94,36 +98,36 @@ pub fn console_clear() {
 /// row; a `\n` at column 80 moves to the next row once and does not insert a
 /// blank line. Moving past row 24 scrolls.
 pub fn console_put(byte: u8) {
-    let pos = console_pos();
-    if byte == b'\n' {
-        newline(pos);
-    } else {
-        if pos.col == WIDTH {
+    let (row, col) = with_console(|pos| {
+        if byte == b'\n' {
             newline(pos);
-        }
-        let glyph = if (0x20..=0x7E).contains(&byte) {
-            byte
         } else {
-            b'?'
-        };
-        write_cell(pos.row, pos.col, GREEN_ON_BLACK | u16::from(glyph));
-        pos.col += 1;
-    }
-    let row = pos.row;
-    let col = pos.col;
+            if pos.col == WIDTH {
+                newline(pos);
+            }
+            let glyph = if (0x20..=0x7E).contains(&byte) {
+                byte
+            } else {
+                b'?'
+            };
+            write_cell(pos.row, pos.col, GREEN_ON_BLACK | u16::from(glyph));
+            pos.col += 1;
+        }
+        (pos.row, pos.col)
+    });
     set_cursor(row, col);
 }
 
 /// Erase the previous cell on this row. Does nothing at column 0, and never
 /// moves to the previous row.
 pub fn console_backspace() {
-    let pos = console_pos();
-    if pos.col > 0 {
-        pos.col -= 1;
-        write_cell(pos.row, pos.col, space_cell());
-    }
-    let row = pos.row;
-    let col = pos.col;
+    let (row, col) = with_console(|pos| {
+        if pos.col > 0 {
+            pos.col -= 1;
+            write_cell(pos.row, pos.col, space_cell());
+        }
+        (pos.row, pos.col)
+    });
     set_cursor(row, col);
 }
 
