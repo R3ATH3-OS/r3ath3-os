@@ -52,7 +52,10 @@ store-core = ["store"]
 # Internal. Not a test mode. Implied by `shell` and `nvme-core`.
 nvme = ["sched"]
 nvme-core = ["nvme"]
-shell = ["sched", "gate", "recorder", "store", "nvme"]
+# Internal. Not a test mode. Implied by `shell` and `wasm-core`.
+wasm = []
+wasm-core = ["wasm"]
+shell = ["sched", "gate", "recorder", "store", "nvme", "wasm"]
 
 [profile.dev]
 panic = "abort"

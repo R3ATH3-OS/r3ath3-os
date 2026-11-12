@@ -21,11 +21,11 @@
 7. Scheduler. Merged in PR #7 at f1d2a3d (46/46 smoke cases).
 8. Human gate. Merged in PR #8 at 64d7225 from tested head 92abe8c (56/56 smoke cases).
 9. Flight recorder + selftest. Merged in PR #9 at 08a4bc6 from tested head 9ce5596 (61/61 smoke cases).
+10. **Storage (QEMU-emulated).** RAM disk merged in PR #10; emulated NVMe merged in PR #11 at `3ac0fe5` from tested head `ac0f38a`. Official smoke on the tested head `ac0f38a` was 68/68, 28 builds, harness-selftest PASS, smoke_exit=0, dirty 0, rustc 1.83.0, QEMU 8.2.2. Saved data survives a reboot only inside the emulated disk image. Without a disk the RAM disk is erased by a reboot.
 
 ## Next, in order
-10. **Storage.** A RAM disk first, then QEMU-emulated NVMe, so the audit log and saved data survive a reboot inside that image. This is not real hardware. Without a disk the RAM disk is erased by a reboot.
-   In progress: docs/STORAGE.md (part A merged in PR #10; part B: emulated NVMe).
 11. **WebAssembly runtime.** A sandbox for apps and for AI tools, running under the gate's permissions. Game logic is written once and runs on R3@TH3 and on the web.
+    In progress: `docs/WASM.md` (part A: runtime).
     - The first native app is Glue Duty.
     - Then Watch Mechanic, The Movement (a system monitor), the shop terminal, and a Patterns trainer.
 12. **Framebuffer graphics + PC speaker sound.**

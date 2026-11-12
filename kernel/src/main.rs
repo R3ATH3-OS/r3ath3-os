@@ -58,6 +58,12 @@ mod pci;
 mod nvme;
 #[cfg(feature = "nvme-core")]
 mod nvmetest;
+#[cfg(feature = "wasm")]
+mod wasm;
+#[cfg(feature = "wasm")]
+mod apps;
+#[cfg(feature = "wasm-core")]
+mod wasmtest;
 #[cfg(feature = "sched")]
 mod sched;
 #[cfg(any(
@@ -108,6 +114,7 @@ const _: () = {
         + cfg!(feature = "recorder-core") as u8
         + cfg!(feature = "store-core") as u8
         + cfg!(feature = "nvme-core") as u8
+        + cfg!(feature = "wasm-core") as u8
         + cfg!(feature = "shell") as u8;
     assert!(modes <= 1, "enable at most one test feature");
 };
@@ -224,6 +231,9 @@ pub extern "C" fn kernel_main() -> ! {
     #[cfg(feature = "nvme-core")]
     nvmetest::run_core();
 
+    #[cfg(feature = "wasm-core")]
+    wasmtest::run_core();
+
     #[cfg(feature = "shell")]
     shell::run();
 
@@ -254,6 +264,7 @@ pub extern "C" fn kernel_main() -> ! {
         feature = "recorder-core",
         feature = "store-core",
         feature = "nvme-core",
+        feature = "wasm-core",
         feature = "shell"
     )))]
     boot_ok();
@@ -286,6 +297,7 @@ pub extern "C" fn kernel_main() -> ! {
     feature = "recorder-core",
     feature = "store-core",
     feature = "nvme-core",
+    feature = "wasm-core",
     feature = "shell"
 )))]
 fn boot_ok() -> ! {
