@@ -492,4 +492,4 @@ Shared statuses: 209 covers 13 cases (`shell-basic`, `shell-backspace`, `shell-r
 
 ## 16. Try it by hand
 
-Build the shell image (`cargo build --release --features shell` in `kernel/`) and boot it in QEMU the way `docs/SHELL.md` describes. Use the gate as in `docs/GATE.md`: `grant`, then an agent line on COM1, then `approve` or `deny`. Type `log` to see the newest entries and the totals, `replay` to check the chain and print every step, and `selftest` to print the report card. The record disappears on reboot.
+Build the shell image (`./scripts/build-apps.sh` from the repo root, then `cargo build --release --features "shell glue-baked"` in `kernel/`). The kernel build fails unless that script has written `build/apps/glue_duty.wasm`. Boot it in QEMU the way `docs/SHELL.md` describes. Use the gate as in `docs/GATE.md`: `grant`, then an agent line on COM1, then `approve` or `deny`. Type `log` to see the newest entries and the totals, `replay` to check the chain and print every step, and `selftest` to print the report card. The record disappears on reboot.

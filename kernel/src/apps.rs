@@ -7,7 +7,9 @@
 
 use crate::wasm::{Instance, ValType};
 #[cfg(feature = "shell")]
-use crate::wasm::{LoadError, Trap};
+use crate::wasm::LoadError;
+#[cfg(any(feature = "shell", feature = "wasm-glue"))]
+use crate::wasm::Trap;
 
 #[cfg(feature = "shell")]
 use crate::irq::{self, Key};
@@ -91,6 +93,29 @@ pub static SPIN: &[u8] = &[
     0x00, 0x41, 0x00, 0x0B, 0x05, 0x00, 0x41, 0xD0, 0x0F, 0x0B,
 ];
 
+#[cfg(any(feature = "glue-baked", feature = "wasm-glue"))]
+pub static GLUE_DUTY: &[u8] = include_bytes!("../../build/apps/glue_duty.wasm");
+
+#[cfg(any(feature = "glue-baked", feature = "wasm-glue"))]
+pub static APPS: &[App] = &[
+    App {
+        name: "glue-duty",
+        desc: "Glue Duty, the belt-scrub game, in text mode",
+        bytes: GLUE_DUTY,
+    },
+    App {
+        name: "hello",
+        desc: "a static screen; the smallest app",
+        bytes: HELLO,
+    },
+    App {
+        name: "spin",
+        desc: "loops forever; the fuel limit stops it",
+        bytes: SPIN,
+    },
+];
+
+#[cfg(not(any(feature = "glue-baked", feature = "wasm-glue")))]
 pub static APPS: &[App] = &[
     App {
         name: "hello",
@@ -134,7 +159,7 @@ pub fn run_app(app: &'static App) -> bool {
         Err(error) => End::NotLoaded(error),
         Ok(mut inst) => host_loop(app.name, &mut inst),
     });
-    let outcome = outcome.unwrap_or(End::NotLoaded(LoadError::Limits));
+    let outcome = outcome.unwrap_or(End::NotLoaded(LoadError::Busy));
     let ran = matches!(outcome, End::Quit(_, _) | End::Trap(_));
     finish(app.name, outcome);
     ran
@@ -258,14 +283,7 @@ fn finish(name: &str, end: End) {
             if len > 0 {
                 both(b"; ");
                 for &byte in &text[..len] {
-                    let glyph = if byte == 0x00 {
-                        b' '
-                    } else if (0x20..=0x7E).contains(&byte) {
-                        byte
-                    } else {
-                        b'?'
-                    };
-                    both(&[glyph]);
+                    both(&[printable(byte)]);
                 }
             }
             both(b"\n");
@@ -288,8 +306,8 @@ fn quit_end(inst: &mut Instance<'_, '_>) -> End {
     }
 }
 
-#[cfg(feature = "shell")]
-fn read_summary(inst: &mut Instance<'_, '_>) -> Result<([u8; 60], usize), Trap> {
+#[cfg(any(feature = "shell", feature = "wasm-glue"))]
+pub(crate) fn read_summary(inst: &mut Instance<'_, '_>) -> Result<([u8; 60], usize), Trap> {
     let offset = match inst.call("r3_summary", &[]) {
         Ok(Some(value)) => value,
         Ok(None) => return Err(Trap::Memory),
@@ -322,8 +340,21 @@ fn both(bytes: &[u8]) {
     }
 }
 
-#[cfg(feature = "shell")]
-fn offset_of(offset: i64, len: usize, span: usize) -> Option<usize> {
+/// Guest summary bytes on the way to serial or VGA. `0x00` is a space.
+/// Bytes outside `0x20..=0x7E` are `?`. Printable bytes pass through.
+#[cfg(any(feature = "shell", feature = "wasm-glue"))]
+pub(crate) fn printable(byte: u8) -> u8 {
+    if byte == 0x00 {
+        b' '
+    } else if (0x20..=0x7E).contains(&byte) {
+        byte
+    } else {
+        b'?'
+    }
+}
+
+#[cfg(any(feature = "shell", feature = "wasm-glue"))]
+pub(crate) fn offset_of(offset: i64, len: usize, span: usize) -> Option<usize> {
     if offset < 0 {
         return None;
     }

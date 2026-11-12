@@ -30,7 +30,7 @@ In this image:
 
 No verb starts, feeds, or reads a WASM app; see `docs/WASM.md`.
 
-Not in this image, and not added here: any model or agent runtime in the kernel; a host-side AI adapter beyond the smoke harness; persistence of badges or of the flight recorder; authentication or crypto for names; a queue of pending requests; permissions on files, storage, network, or WASM; letting an agent type shell commands or reach `dispatch`; a `run` or `cmd` verb; an agent verb that reads the record; `kill`; COM2; unmasking IRQ4 or any IRQ besides 0 and 1; heap allocation in the gate or the shell; new `unsafe`. The default boot path is unchanged: boot marker, status 33. The flight recorder, `replay`, and `selftest` are specified in `docs/RECORDER.md`.
+Not in this image, and not added here: any model or agent runtime in the kernel; a host-side AI adapter beyond the smoke harness; persistence of badges; persistence of the flight recorder outside the QEMU-emulated disk image (saved entries survive a reboot only inside that image); authentication or crypto for names; a queue of pending requests; permissions on files, storage, network, or WASM; letting an agent type shell commands or reach `dispatch`; a `run` or `cmd` verb; an agent verb that reads the record; `kill`; COM2; unmasking IRQ4 or any IRQ besides 0 and 1; heap allocation in the gate or the shell; new `unsafe`. The default boot path is unchanged: boot marker, status 33. The flight recorder, `replay`, and `selftest` are specified in `docs/RECORDER.md`.
 
 ## 4. Permission model
 
@@ -191,7 +191,7 @@ The seven lines are `R3GATE ASK ai1 1 read`, `halt`, `R3GATE ASK ai1 2 say ` plu
 | `0x78` | 241 | `gate-core` ok | `gate_core_ok` |
 | `0x79` | 243 | `gate-expire` ok | `gate_expire_ok` |
 
-`0x76`–`0x77` (237–239) stay unused. `0x7A` (245) is `recorder-core` (`docs/RECORDER.md`). `0x7B` (247) is `store-core`. `0x7C` (249) is `nvme-core`. `0x7D` (251) is `wasm-core` (`docs/WASM.md`). `0x7E` (253) and `0x7F` (255) stay unused. Each helper is compiled only for its feature. Gate shell cases use the shell outcome statuses 209, 211, and 217.
+`0x76`–`0x77` (237–239) stay unused. `0x7A` (245) is `recorder-core` (`docs/RECORDER.md`). `0x7B` (247) is `store-core`. `0x7C` (249) is `nvme-core`. `0x7D` (251) is `wasm-core` (`docs/WASM.md`). `0x7E` (253) is `wasm-glue`. `0x7F` (255) stays unused. Each helper is compiled only for its feature. Gate shell cases use the shell outcome statuses 209, 211, and 217.
 
 ## 10. Determinism
 
@@ -219,7 +219,10 @@ The exact `gate-approve` transcript is the one in the smoke harness. The other f
 Build the shell and run QEMU with a display and `-serial stdio`. Type human commands in the QEMU window. Type `R3GATE ASK …` lines in the terminal, as the agent:
 
 ```sh
-cd kernel && cargo build --release --features shell
+# From the repo root. The shell image includes Glue Duty, so this wasm
+# file must exist or the kernel build fails on include_bytes!.
+./scripts/build-apps.sh
+cd kernel && cargo build --release --features "shell glue-baked"
 qemu-system-x86_64 -machine pc,accel=tcg -cpu qemu64 -m 64M -smp 1 \
   -kernel target/x86_64-unknown-none/release/r3ath3 \
   -nic none -serial stdio -no-reboot \

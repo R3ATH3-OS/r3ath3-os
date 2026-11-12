@@ -29,12 +29,26 @@ pub fn call(
     args: &[i64],
     fuel: u32,
 ) -> Result<Option<i64>, Trap> {
+    match call_metered(module, arena, export, args, fuel) {
+        Ok((value, _)) => Ok(value),
+        Err((trap, _)) => Err(trap),
+    }
+}
+
+/// Like `call`, and reports fuel consumed (`budget - remaining`).
+pub fn call_metered(
+    module: &[u8],
+    arena: &mut Arena,
+    export: &str,
+    args: &[i64],
+    fuel: u32,
+) -> Result<(Option<i64>, u32), (Trap, u32)> {
     let Some(func) = exported_func(arena, export) else {
-        return Err(Trap::Dead);
+        return Err((Trap::Dead, 0));
     };
     let info = arena.funcs[func];
     if args.len() != info.param_count as usize {
-        return Err(Trap::Stack);
+        return Err((Trap::Stack, 0));
     }
     let mut exec = Exec {
         module,
@@ -54,10 +68,17 @@ pub fn call(
         } else {
             *arg as i32 as i64
         };
-        exec.push(value)?;
+        if let Err(trap) = exec.push(value) {
+            return Err((trap, fuel - exec.fuel));
+        }
     }
-    exec.enter(func, HOST_RETURN)?;
-    exec.run()
+    if let Err(trap) = exec.enter(func, HOST_RETURN) {
+        return Err((trap, fuel - exec.fuel));
+    }
+    match exec.run() {
+        Ok(value) => Ok((value, fuel - exec.fuel)),
+        Err(trap) => Err((trap, fuel - exec.fuel)),
+    }
 }
 
 fn exported_func(arena: &Arena, name: &str) -> Option<usize> {
@@ -368,6 +389,15 @@ impl<'a> Exec<'a> {
         if base + locals > VALUE_CAP {
             return Err(Trap::Stack);
         }
+        // Parameters are the caller's values. Every other local is cleared
+        // here, and each of those clears costs one fuel unit, charged before
+        // the loop. A long local list cannot be wiped for a single unit.
+        let extra = (locals as u32).saturating_sub(params as u32);
+        if self.fuel < extra {
+            self.fuel = 0;
+            return Err(Trap::Fuel);
+        }
+        self.fuel -= extra;
         for slot in &mut self.arena.values[base + params..base + locals] {
             *slot = 0;
         }
@@ -445,6 +475,15 @@ impl<'a> Exec<'a> {
 
     fn br_table(&mut self) -> Result<(), Trap> {
         let n = self.read_u32()?;
+        // The opcode itself already cost 1. Each of the n label immediates
+        // costs one more, charged before they are decoded, so a long table
+        // cannot be walked for a single fuel unit. The default immediate is
+        // one LEB, the same as `br`.
+        if self.fuel < n {
+            self.fuel = 0;
+            return Err(Trap::Fuel);
+        }
+        self.fuel -= n;
         let index = self.pop()? as i32 as u32;
         let mut chosen = 0u32;
         let mut matched = false;
@@ -461,11 +500,13 @@ impl<'a> Exec<'a> {
 
     fn branch(&mut self, depth: u32) -> Result<(), Trap> {
         let base = self.frame_label_base()?;
-        if self.label_sp <= base {
-            return Err(Trap::Stack);
+        let available = self.label_sp.saturating_sub(base);
+        // `depth == available` is the function's own end label. That branch
+        // is a return. Compiled modules emit it instead of `return`.
+        if depth as usize == available {
+            return self.do_return();
         }
-        let available = self.label_sp - base;
-        if depth as usize >= available {
+        if self.label_sp <= base || depth as usize > available {
             return Err(Trap::Stack);
         }
         let idx = self.label_sp - 1 - depth as usize;

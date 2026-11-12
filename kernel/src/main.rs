@@ -64,6 +64,8 @@ mod wasm;
 mod apps;
 #[cfg(feature = "wasm-core")]
 mod wasmtest;
+#[cfg(feature = "wasm-glue")]
+mod gluetest;
 #[cfg(feature = "sched")]
 mod sched;
 #[cfg(any(
@@ -115,6 +117,7 @@ const _: () = {
         + cfg!(feature = "store-core") as u8
         + cfg!(feature = "nvme-core") as u8
         + cfg!(feature = "wasm-core") as u8
+        + cfg!(feature = "wasm-glue") as u8
         + cfg!(feature = "shell") as u8;
     assert!(modes <= 1, "enable at most one test feature");
 };
@@ -234,6 +237,9 @@ pub extern "C" fn kernel_main() -> ! {
     #[cfg(feature = "wasm-core")]
     wasmtest::run_core();
 
+    #[cfg(feature = "wasm-glue")]
+    gluetest::run();
+
     #[cfg(feature = "shell")]
     shell::run();
 
@@ -265,6 +271,7 @@ pub extern "C" fn kernel_main() -> ! {
         feature = "store-core",
         feature = "nvme-core",
         feature = "wasm-core",
+        feature = "wasm-glue",
         feature = "shell"
     )))]
     boot_ok();
@@ -298,6 +305,7 @@ pub extern "C" fn kernel_main() -> ! {
     feature = "store-core",
     feature = "nvme-core",
     feature = "wasm-core",
+    feature = "wasm-glue",
     feature = "shell"
 )))]
 fn boot_ok() -> ! {

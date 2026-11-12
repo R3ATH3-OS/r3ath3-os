@@ -608,7 +608,8 @@ fn validate_body(
             0x0C | 0x0D => {
                 let (depth, next) = read_u32(module, pos, end)?;
                 pos = next;
-                if depth as usize >= csp {
+                // `depth == csp` targets the function body. That is a return.
+                if depth as usize > csp {
                     return Err(LoadError::Opcode);
                 }
             }
@@ -621,13 +622,13 @@ fn validate_body(
                 for _ in 0..n {
                     let (depth, next) = read_u32(module, pos, end)?;
                     pos = next;
-                    if depth as usize >= csp {
+                    if depth as usize > csp {
                         return Err(LoadError::Opcode);
                     }
                 }
                 let (depth, next) = read_u32(module, pos, end)?;
                 pos = next;
-                if depth as usize >= csp {
+                if depth as usize > csp {
                     return Err(LoadError::Opcode);
                 }
                 push_side_closed(arena, op_pc, pos as u32)?;

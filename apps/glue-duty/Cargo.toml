@@ -1,0 +1,20 @@
+[package]
+name = "glue-duty"
+version = "0.0.1"
+edition = "2021"
+publish = false
+description = "Glue Duty, the belt-scrub game, in text mode"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "replay"
+path = "src/bin/replay.rs"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+overflow-checks = false
+lto = true
+codegen-units = 1
