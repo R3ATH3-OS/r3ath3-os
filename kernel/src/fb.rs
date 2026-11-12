@@ -176,6 +176,7 @@ pub fn enter_text() {
 
 /// Copy `src` into the software buffer. `src` must be exactly `LEN` bytes.
 /// `false` means the length was wrong or the buffer was already borrowed.
+#[must_use]
 pub fn copy_from(src: &[u8]) -> bool {
     if src.len() != LEN {
         return false;
@@ -185,6 +186,7 @@ pub fn copy_from(src: &[u8]) -> bool {
 
 /// Copy the software buffer to `0xA0000`. `false` means the buffer was
 /// already borrowed and nothing was copied.
+#[must_use]
 pub fn blit() -> bool {
     with_bytes(|src| {
         // SAFETY: `0xA0000` is the VGA window inside the identity map. `src`
