@@ -2,21 +2,19 @@
 
 Suggested wording, not a certification and not a claim that this image is that system: "An authentic Human–AI co-op OS".
 
-This document is the spec for the runtime in this tree (milestone 11, part A). If the code and this document disagree, the change is not done.
+This document is the spec for the runtime in this tree (milestone 11, part A and part B). If the code and this document disagree, the change is not done.
 
-There are no crates.io dependencies. The toolchain is rustc/cargo 1.83.0, target `x86_64-unknown-none`. This tree does not install `wasm32-unknown-unknown` and does not change `rust-toolchain.toml` or `.cursor/environment.json`. The work runs in QEMU only. Nothing here touches real hardware. There is no framebuffer and no sound (milestone 12).
-
-Part B (Glue Duty, the `wasm32-unknown-unknown` target, and `wasm-glue`) is not in this tree.
+There are no crates.io dependencies. The toolchain is rustc/cargo 1.83.0. The kernel target is `x86_64-unknown-none`. Glue Duty is also built for `wasm32-unknown-unknown`. Both targets are in `rust-toolchain.toml`, and the Cloud Agents environment install line in `.cursor/environment.json` installs both. The work runs in QEMU only. Nothing here touches real hardware. There is no framebuffer and no sound (milestone 12). A browser host is not shipped.
 
 ## 1. What this tree runs
 
 One integer WebAssembly interpreter in the kernel. One instance at a time, in a static arena. Module bytes stay in the kernel image; the interpreter borrows them and does not copy them into the arena. Nothing in the runtime or the app host allocates on the heap.
 
-The shell command `app` can list two baked apps, `hello` and `spin`, or run one of them. An app has no imports. It cannot call the kernel, read the clock, touch the store, COM1, the gate, or another task. The host reads two regions of the app's linear memory (the text grid and the summary) and writes the grid to the VGA text buffer.
+The shell command `app` can list three baked apps, `glue-duty`, `hello`, and `spin`, or run one of them. `glue-duty` is baked only into the `shell` and `wasm-glue` images. An app has no imports. It cannot call the kernel, read the clock, touch the store, COM1, the gate, or another task. The host reads two regions of the app's linear memory (the text grid and the summary) and writes the grid to the VGA text buffer.
 
 The human gate is unchanged except for one sentence in `docs/GATE.md`. No verb starts, feeds, or reads an app. The gate is kernel-enforced permissions, default deny. The AI stays on the host and reaches the kernel over COM1. Agent names are self-asserted. The flight recorder is the record of gate outcomes and human commands. `app` is not a recorder event of its own: the human line is recorded by the existing `record_human` call after the app has ended. Keys pressed inside an app are not recorded.
 
-FNV-1a, where this kernel uses it, is a checksum, not a cryptographic hash. This runtime does not hash modules.
+FNV-1a, where this kernel uses it, is a checksum, not a cryptographic hash and not a security check. `wasm-glue` uses it to compare two grids. This runtime does not hash modules.
 
 ## 2. Files
 
@@ -26,12 +24,16 @@ FNV-1a, where this kernel uses it, is a checksum, not a cryptographic hash. This
 | `kernel/src/wasm/decode.rs` | One-pass structural validator and the side table |
 | `kernel/src/wasm/exec.rs` | The interpreter loop. Calls use arena frames, not Rust recursion |
 | `kernel/src/wasm/arena.rs` | The static arena. The only new privileged code |
-| `kernel/src/apps.rs` | `hello`, `spin`, the ABI check, and the shell host loop |
+| `kernel/src/apps.rs` | `hello`, `spin`, `glue-duty` on the shell and glue builds, the ABI check, and the shell host loop |
 | `kernel/src/wasmtest.rs` | The `wasm-core` proof |
+| `kernel/src/gluetest.rs` | The `wasm-glue` proof. No privileged code |
+| `apps/glue-duty/` | The game. `logic.rs` and `text.rs` forbid `unsafe`. `abi.rs` is the wasm exports |
+| `apps/glue-duty/src/bin/replay.rs` | The native host. Same source, same key script |
+| `scripts/build-apps.sh` | Builds `glue_duty.wasm` and `glue-duty-replay` |
 
-`kernel/Cargo.toml`: `wasm` is internal and is not a test mode. `wasm-core = ["wasm"]` is a test mode and is in the at-most-one assert and in both `boot_ok` exclusion lists. `shell` includes `wasm`.
+`kernel/Cargo.toml`: `wasm` is internal and is not a test mode. `wasm-core = ["wasm"]` and `wasm-glue = ["wasm"]` are test modes. Both are in the at-most-one assert and in both `boot_ok` exclusion lists. `shell` includes `wasm` and does not include `wasm-glue`.
 
-`vga::present` paints an 80×25 grid. `qemu_exit::wasm_core_ok` writes `0x7D` (status 251). Neither adds a privileged line.
+`vga::present` paints an 80×25 grid. `qemu_exit::wasm_core_ok` writes `0x7D` (status 251). `qemu_exit::wasm_glue_ok` writes `0x7E` (status 253). Neither adds a privileged line.
 
 ## 3. The subset
 
@@ -47,11 +49,13 @@ The validator is structural. It checks section shapes, indices, block nesting, b
 
 The side table is appended in scan order, so it is sorted by code offset. Lookup is a binary search. `br_table` gets a side entry whose target is the program counter after the instruction. That entry is not a control-stack frame. The runtime reads the `br_table` immediates itself.
 
+A branch whose depth equals the number of open blocks targets the function's own end label. Validation accepts it. At run time it is a return: the function result is popped, if the function has one, and the frame unwinds. A depth past that is `opcode` at load time. Spike W3's `glue_duty.wasm` emits none of these branches. The runtime accepts them so a later module that does emit one still returns.
+
 Section ids are not accepted in strictly increasing order. The rank is: type 1, import 2, function 3, table 4, memory 5, global 6, export 7, start 8 (always `section`), element 9, data count 12 at rank 10, code 10 at rank 11, data 11 at rank 12. A custom section (id 0) is skipped wherever it appears. A repeated or out-of-order ranked section is `section`. A start section is `section`. An import section with a count above 0 is `import`. An empty import section is accepted.
 
 ## 4. Limits and errors
 
-Load-time `LoadError` words: `magic`, `version`, `truncated`, `section`, `opcode`, `float`, `import`, `limits`, `export`, `too-big`.
+Load-time `LoadError` words: `magic`, `version`, `truncated`, `section`, `opcode`, `float`, `import`, `limits`, `export`, `too-big`, `busy`. `busy` is not a module fault. It is the word the shell prints when `with_instance` returns `None` because the arena is already taken. `limits` stays the word for a module that exceeds a limit. `wasm-core` step 8 still lists `limits` and does not list `busy`.
 
 | Item | Limit |
 | --- | --- |
@@ -95,7 +99,7 @@ let result = f(unsafe { &mut *ARENA.0.get() });
 
 `rg -n 'unsafe|asm!' kernel/src` is 122 lines. Those two are the only lines this milestone adds. Comments in that file do not contain the substring `unsafe`.
 
-On the shell build, `mem` reported `frames_total=15943` on main (`3ac0fe5`) and `frames_total=15773` on this branch. The drop is 170 frames, inside the 128–176 bound. Builds without `wasm` do not include the arena.
+On the shell build, `mem` reported `frames_total=15943` on main (`3ac0fe5`) and `frames_total=15773` on the part A head. The drop is 170 frames, inside the 128–176 bound. Part B may drop at most 24 more, so the shell build's `frames_total` must sit in 15749..=15773. The measured part B figure is `frames_total=15765`, a drop of 8 from 15773, inside that bound. Builds without `wasm` do not include the arena. The `shell-mem` case checks that bound. `judge_shell_mem` itself does not: its self-test still uses a synthetic `frames_total` of 16000.
 
 The shell's slot 0 stack is 16 KiB and has no canary. This tree adds no assembly to measure the high-water mark, so that mark is not verified. The interpreter does not recurse in Rust.
 
@@ -104,12 +108,13 @@ A fresh load zeros the pages the previous instance had committed and the table s
 ## 6. API
 
 ```rust
-pub enum LoadError { Magic, Version, Truncated, Section, Opcode, Float, Import, Limits, Export, TooBig }
+pub enum LoadError { Magic, Version, Truncated, Section, Opcode, Float, Import, Limits, Export, TooBig, Busy }
 pub enum Trap { Unreachable, Memory, DivZero, Overflow, Indirect, Table, Stack, Fuel, Dead }
 pub struct Instance<'m, 'a> { /* borrows the module bytes and the arena */ }
 impl Instance {
     pub fn call(&mut self, export: &str, args: &[i64]) -> Result<Option<i64>, Trap>;
     pub fn call_with_fuel(&mut self, export: &str, args: &[i64], fuel: u32) -> Result<Option<i64>, Trap>;
+    pub fn call_metered(&mut self, export: &str, args: &[i64], fuel: u32) -> (Result<Option<i64>, Trap>, u32);
     pub fn memory(&self) -> &[u8];
     pub fn has_export(&self, name: &str) -> bool;
     pub fn export_is_memory(&self, name: &str) -> bool;
@@ -121,9 +126,9 @@ pub fn with_instance<R>(
 ) -> Option<R>;
 ```
 
-`with_instance` returns `None` when the arena is already taken. That does not happen in this milestone: one shell, one app. A load failure is `Some(Err(_))`. The module slice lives as long as the call. Baked apps are `'static`. The flip test in `wasm-core` passes a stack copy. `None` from `call` means the export returns no value. `Some` is an `i32` or `i64` result. An `i32` result is the sign-extended low 32 bits, as the operand-floor paragraph describes.
+`with_instance` returns `None` when the arena is already taken. That does not happen in this milestone: one shell, one app. A load failure is `Some(Err(_))`. The module slice lives as long as the call. Baked apps are `'static`. The flip test in `wasm-core` passes a stack copy. `call_metered` returns that result and the fuel used (`budget` minus what remains). `wasm-glue` calls `r3_step` through it and fails the proof with `detail=fuel-budget` when one step uses more than 250,000. Nothing about fuel is printed. `None` from `call` means the export returns no value. `Some` is an `i32` or `i64` result. An `i32` result is the sign-extended low 32 bits, as the operand-floor paragraph describes.
 
-Fuel is 1 per opcode, counted before the opcode runs. Running out is `fuel`, which stops the instance. There is no resume. A module that wants to keep going must return and be called again. The shell build preempts on the timer tick. With only the shell and the idle task, the scheduler keeps running the shell, so a long call is not switched away from, and the tick counter still advances. At the assumed 2 million instructions per second the fuel budget is about half a second. Spike W1, on this QEMU TCG host, measured well above that floor: a counted loop of 3,600,004 opcodes (`result` equal to the iteration count) printed `ips=18000020` at `ticks=20` and `hz=100` on the saved run, and `ips=16363654` at `ticks=22` on the run before it. Both are above 2,000,000 per second. The logs are in the pull request. Spike W2's `app spin` printed `stopped: trap fuel` in under a fifth of a second after the command was entered, inside the 2 second bound.
+Fuel is 1 per opcode, counted before the opcode runs. `br_table` then charges one more unit for each of its `n` label immediates, before those immediates are read. If fewer than `n` units remain, fuel goes to 0 and the trap is `fuel`. The default label is one extra LEB and is not charged beyond the opcode, the same as `br`. A huge table cannot be decoded for a single fuel unit. Running out is `fuel`, which stops the instance. There is no resume. A module that wants to keep going must return and be called again. The shell build preempts on the timer tick. With only the shell and the idle task, the scheduler keeps running the shell, so a long call is not switched away from, and the tick counter still advances. At the assumed 2 million instructions per second the fuel budget is about half a second. Spike W1, on this QEMU TCG host, measured well above that floor: a counted loop of 3,600,004 opcodes (`result` equal to the iteration count) printed `ips=18000020` at `ticks=20` and `hz=100` on the saved run, and `ips=16363654` at `ticks=22` on the run before it. Both are above 2,000,000 per second. The logs are in the pull request. Spike W2's `app spin` printed `stopped: trap fuel` in under a fifth of a second after the command was entered, inside the 2 second bound.
 
 ## 7. The `r3app` ABI v1
 
@@ -148,7 +153,7 @@ Grid bytes: `0x00` is a space, `0x20`–`0x7E` are themselves, anything else is 
 `apps::run_app` on the shell build:
 
 1. Print `app <name>: started; q quits` on the console and on serial.
-2. Load. On `LoadError`, print `app <name>: not loaded: <word>` and return. `last` becomes cmd.
+2. Load. On `LoadError`, print `app <name>: not loaded: <word>` and return. A taken arena is `not loaded: busy`. `last` becomes cmd.
 3. ABI check. On failure, print `app <name>: stopped: abi` and return. `last` becomes cmd.
 4. `r3_init`. A trap stops the app.
 5. Paint the grid from `r3_text` (the data segment is already applied). An out-of-range offset is `memory`.
@@ -167,6 +172,7 @@ While the app runs, the shell is inside `dispatch`. Agent bytes stay in the COM1
 `app` with no argument lists the baked apps, name padded to 11 characters:
 
 ```
+app glue-duty  Glue Duty, the belt-scrub game, in text mode
 app hello      a static screen; the smallest app
 app spin       loops forever; the fuel limit stops it
 ```
@@ -212,12 +218,67 @@ R3ATH3_WASM_CORE ok steps=11
 
 ## 10. Smoke
 
-`./scripts/smoke.sh` runs 73 cases and 29 builds. The new build is `wasm-core`. The new cases are `wasm-core` (251), `app-hello` (209), `app-spin` (209), `app-usage` (211), and `app-gate` (209). `help_text` is the only previous golden that changes, and it changes with the 24-line help text.
+`./scripts/smoke.sh` runs 75 cases and 32 builds. Part A added the build `wasm-core` and the cases `wasm-core` (251), `app-hello` (209), `app-spin` (209), `app-usage` (211), and `app-gate` (209). Part B adds the builds `glue-duty-wasm`, `glue-duty-replay`, and `wasm-glue`, and the cases `wasm-glue` (253) and `app-glue` (209). `build_app` runs `scripts/build-apps.sh` before `wasm-glue` and `shell`, because those images bake `build/apps/glue_duty.wasm`. `wasm-core` does not bake it. `help_text` is unchanged. The `app` list in `app-spin` grows by the `glue-duty` line.
 
-The harness self-test rejects a `wasm-core` log with `add=41`, a log missing the `ok` line, and the good log judged at status 249. It rejects an `app-hello` VGA dump with one cell changed, an `app-spin` log that says `trap stack`, and an `app-gate` log that inserts `R3ATH3_APP_READY` after the agent's `say`. After `nvme-core` and `wasm-core` have both run, each log fails the other proof's judge. Those checks do not print their own `[PASS]` lines.
+The harness self-test rejects a `wasm-core` log with `add=41`, a log missing the `ok` line, and the good log judged at status 249. It rejects an `app-hello` VGA dump with one cell changed, an `app-spin` log that says `trap stack`, and an `app-gate` log that inserts `R3ATH3_APP_READY` after the agent's `say`. It rejects a `wasm-glue` replay whose `frame=` differs, a golden whose `frame=` differs, a truncated kernel log, and an `app-glue` title dump with one cell changed. After `nvme-core` and `wasm-core` have both run, each log fails the other proof's judge at the wrong status and again at the right status, so a matching body cannot hide behind the status check. `wasm-glue`'s log judged as `wasm-core` fails. Those checks do not print their own `[PASS]` lines.
 
 `app-gate` checks three refusals and one human run. `grant ai1 app` prints `error: unknown permission: app`. `R3GATE ASK ai1 1 app spin` is a bad line with `reason=verb`. `say` of the text `app spin` is printed as `ai1 says: app spin` and does not print `R3ATH3_APP_READY`. The human `app spin` then traps `fuel`. Badges still show `say` only.
 
-## 11. Part B is not in this tree
+## 11. Glue Duty
 
-Glue Duty in text mode, the native `replay`, the `wasm32-unknown-unknown` target, and status 253 are the next milestone. They are not built here. The accepted rules for that work stay in the milestone 11 design; this tree does not implement them and does not claim they have been run.
+The game is one Rust source under `apps/glue-duty/`. `logic.rs` and `text.rs` are `#![forbid(unsafe_code)]`. `abi.rs` has two lines containing `unsafe`: `unsafe impl Sync` on its one `UnsafeCell`, and the block that borrows it. The panic handler calls `core::arch::wasm32::unreachable()`, which is a safe function at rustc 1.83.0, so the count stays 2. The crate is `no_std` only on `wasm32` (`#![cfg_attr(target_arch = "wasm32", no_std)]`). The package also builds a host cdylib for the replay binary, and a host `no_std` cdylib would need a second panic handler. The wasm artifact is `no_std`.
+
+`scripts/build-apps.sh` changes to `apps/glue-duty` before `cargo build`. Cargo reads `.cargo/config.toml` from that directory and passes `-zstack-size=32768`, `--initial-memory=131072`, and `--max-memory=262144`. The module's memory is 2 pages initial and 4 pages maximum. There is no import section. Block types in this module are `0x40` only. Spike W3's report is in the pull request. The module is 15,797 bytes.
+
+The rules are the integer port in `logic.rs`: three lanes, a 72-column belt, a scraper fixed at belt column 8, shifts of 750 steps, at most 24 blobs, xorshift32, and no floats. `text.rs` paints the 80×25 grid. Every store goes through `store_byte`, which is `#[inline(never)]`, so the module does not emit `memory.fill` or `memory.copy`. `q` is never delivered. Pixels and sound are milestone 12.
+
+The title grid, after `r3_init(1)`, is the `app-glue` VGA golden (`apps/glue-duty/golden/app-glue.vga`). Attribute `0x0A`. The text is:
+
+```
+GLUE DUTY  shift 1  time 1:15  score 0  cleaned 0  solvent 2  combo x1
+gum-up [....................]   0%
+    scrub before the glue ships                                 DISCHARGE ->
+
+    ================================================================!!!!!!!!
+ 1  ----------------------------------------------------------------::::::::
+    ========v=======================================================!!!!!!!!
+ 2  ----------------------------------------------------------------::::::::
+    ================================================================!!!!!!!!
+ 3  ----------------------------------------------------------------::::::::
+    ================================================================!!!!!!!!
+
+Three lanes. Scrub glue, before it ships!
+Scrub with a and d. Alternate strokes cut deeper. Space is solvent.
+Keep the discharge clear. A blob that slips through gums the whole belt.
+Survive the shift. The next one is faster and cleaner.
+Press space to start work.
+
+  log: Nothing yet. The belts are suspiciously clean.
+
+w s: lane   a d: scrub (alternate)   space: solvent   p: pause   q: quit
+```
+
+Blank rows are empty. The `v` is the scraper.
+
+## 12. `wasm-glue`
+
+Status 253, port byte `0x7E`, `qemu_exit::wasm_glue_ok`. A failed check prints `R3ATH3_WASM_GLUE fail step=<n> <detail>` and then `qemu_exit::fail` (status 35). The kernel log, the native `replay` stdout, and `apps/glue-duty/golden/wasm-glue.txt` are byte-identical. The kernel also prints `R3ATH3_STAGE rust_main` before the proof, and `replay` prints that same line so the three copies match.
+
+```
+R3ATH3_STAGE rust_main
+R3ATH3_WASM_GLUE start seed=1
+R3ATH3_WASM_GLUE step=<n> state=<s> frame=<fnv64 of the 2000-byte grid, 16 hex digits> <summary>
+R3ATH3_WASM_GLUE ok steps=2000
+```
+
+A checkpoint is printed every 100 steps and on every state change. `frame` is FNV-1a 64 over the raw grid (basis `0xcbf29ce484222325`, prime `0x100000001b3`), a checksum for comparing two outputs, not a security check. The summary is `shift k score n cleaned c gum-up p%` with `p = jam / 100`.
+
+Seed is 1. Keys are applied before step `n` (`n` from 1), in `replay.rs` and again in `gluetest.rs`:
+
+- `n = 1` and `n = 1001`: Space.
+- For `2 ≤ n ≤ 740` and `1002 ≤ n ≤ 1400`, in this order: `w` when `n % 60 == 0` and `(n/60) % 2 == 0`, else `s` when `n % 60 == 0`; Space when `n % 150 == 75`; `p` when `n` is 300 or 310; then `a` when `n` is even, else `d`.
+- No keys otherwise.
+
+Each `r3_step` is given the full 1,000,000 fuel budget and must use at most 250,000. The proof does not print the fuel count.
+
+`app-glue` launches `glue-duty`, dumps the title screen, sends Space (state 1), `p` (state 2), `p` (state 1), and `q`. The end line is `app glue-duty: quit; shift 1 score 0 cleaned 0 gum-up 0%`. Quit is success, so the case exits 209. On this shell build `mem` reports `frames_total=15765`.

@@ -15,10 +15,11 @@
 # full 0x73 → 231, exit 0x74 → 233, reap 0x75 → 235.
 # Gate: core 0x78 → 241, expire 0x79 → 243.
 # Flight recorder: core 0x7A → 245. Store: core 0x7B → 247. NVMe: core 0x7C → 249.
-# WebAssembly: core 0x7D → 251.
+# WebAssembly: core 0x7D → 251. Glue Duty: 0x7E → 253.
 # With no NVMe controller the shell uses the RAM disk, and a reboot erases it.
 # With QEMU's emulated NVMe disk, earlier boots stay in the image.
-# Unused odd statuses: 203–207, 219–223, 237–239, 253, 255.
+# Saved flight-recorder entries survive a reboot only inside that image.
+# Unused odd statuses: 203–207, 219–223, 237–239, 255.
 # A triple-fault or silent reset does not print the fault line and does not
 # use those statuses (this QEMU build has exited 0 on triple fault).
 set -u
@@ -60,6 +61,7 @@ RECORDER_CORE_STATUS=245
 STORE_CORE_STATUS=247
 NVME_CORE_STATUS=249
 WASM_CORE_STATUS=251
+WASM_GLUE_STATUS=253
 RAM_BYTES=67108864
 HEAP_BYTES=1048576
 HEAP_LINE='R3ATH3_HEAP ok size=1048576 used=([0-9]+) align_max=4096'
@@ -272,6 +274,20 @@ if len(mems) != 2 or mems[0] != mems[1] or ups != 1:
 if out != expected:
     sys.exit(1)
 sys.exit(0)
+PY
+}
+
+# Part B shell builds may drop at most 24 frames from the Part A figure
+# 15773. This is not part of judge_shell_mem: that judge's self-test uses
+# a synthetic frames_total of 16000 and must keep passing.
+shell_frames_in_bound() {
+  python3 - "$1" <<'PY'
+import re, sys
+text = open(sys.argv[1], encoding="ascii", errors="replace").read()
+nums = [int(n) for n in re.findall(r"frames_total=([0-9]+)", text)]
+if len(nums) < 1 or len(set(nums)) != 1:
+    sys.exit(1)
+sys.exit(0 if 15749 <= nums[0] <= 15773 else 1)
 PY
 }
 
@@ -1020,6 +1036,14 @@ judge_wasm_core() {
   judge_exact "$status" "$file" "$WASM_CORE_STATUS" "$OUT/task/wasm-core.expected"
 }
 
+# Kernel log, native replay, and the committed golden, byte for byte.
+judge_wasm_glue() {
+  local status="$1" kernel="$2" replay="$3" golden="$4"
+  [[ "$status" -eq "$WASM_GLUE_STATUS" ]] || return 1
+  cmp -s "$kernel" "$replay" || return 1
+  cmp -s "$kernel" "$golden" || return 1
+}
+
 judge_app_screen() {
   local status="$1" serial="$2" expected_serial="$3" vga="$4" expected_vga="$5"
   judge_shell_screen "$status" "$serial" "$expected_serial" "$vga" "$expected_vga"
@@ -1173,6 +1197,12 @@ R3ATH3_SHELL_EXIT last=ok
 EOF
   judge_shell_mem "$SHELL_OK_STATUS" "$dir/shell-mem.log" "$dir/shell-mem.expected" || ok=1
   if judge_shell_mem "$SHELL_CMD_STATUS" "$dir/shell-mem.log" "$dir/shell-mem.expected"; then ok=1; fi
+  printf '%s\n' "mem heap_used=100 heap_size=1048576 frames_total=15773 frames_free=15773" >"$dir/frames-bound-ok.log"
+  printf '%s\n' "mem heap_used=100 heap_size=1048576 frames_total=15748 frames_free=15748" >"$dir/frames-bound-low.log"
+  printf '%s\n' "mem heap_used=100 heap_size=1048576 frames_total=15774 frames_free=15774" >"$dir/frames-bound-high.log"
+  shell_frames_in_bound "$dir/frames-bound-ok.log" || ok=1
+  if shell_frames_in_bound "$dir/frames-bound-low.log"; then ok=1; fi
+  if shell_frames_in_bound "$dir/frames-bound-high.log"; then ok=1; fi
   python3 - "$dir/shell-mem.log" "$dir/shell-mem-differ.log" <<'PY'
 import sys
 src, dst = sys.argv[1:]
@@ -1808,6 +1838,26 @@ if needle not in text:
 open(dst, "w", encoding="ascii").write(text.replace(needle, insert, 1))
 PY
     if judge_exact "$SHELL_OK_STATUS" "$dir/app-gate-ready.log" "$SHELL_OK_STATUS" "$OUT/task/app-gate.expected"; then ok=1; fi
+    local glue_golden="$ROOT/apps/glue-duty/golden/wasm-glue.txt"
+    local glue_vga="$ROOT/apps/glue-duty/golden/app-glue.vga"
+    cp "$glue_golden" "$dir/wasm-glue-kernel.log"
+    cp "$glue_golden" "$dir/wasm-glue-replay.log"
+    judge_wasm_glue "$WASM_GLUE_STATUS" "$dir/wasm-glue-kernel.log" "$dir/wasm-glue-replay.log" "$glue_golden" || ok=1
+    sed 's/frame=/frame=0/' "$dir/wasm-glue-replay.log" >"$dir/wasm-glue-frame.log"
+    if judge_wasm_glue "$WASM_GLUE_STATUS" "$dir/wasm-glue-kernel.log" "$dir/wasm-glue-frame.log" "$glue_golden"; then ok=1; fi
+    sed 's/frame=/frame=0/' "$glue_golden" >"$dir/wasm-glue-golden.log"
+    if judge_wasm_glue "$WASM_GLUE_STATUS" "$dir/wasm-glue-kernel.log" "$dir/wasm-glue-replay.log" "$dir/wasm-glue-golden.log"; then ok=1; fi
+    head -n -1 "$dir/wasm-glue-kernel.log" >"$dir/wasm-glue-short.log"
+    if judge_wasm_glue "$WASM_GLUE_STATUS" "$dir/wasm-glue-short.log" "$dir/wasm-glue-replay.log" "$glue_golden"; then ok=1; fi
+    python3 - "$glue_vga" "$dir/app-glue-cell.vga" <<'PY'
+import sys
+src, dst = sys.argv[1:]
+text = open(src, encoding="ascii").read()
+text = text.replace("0A20", "0A21", 1)
+open(dst, "w", encoding="ascii").write(text)
+PY
+    judge_app_screen "$SHELL_OK_STATUS" "$OUT/task/app-glue.expected" "$OUT/task/app-glue.expected" "$glue_vga" "$glue_vga" || ok=1
+    if judge_app_screen "$SHELL_OK_STATUS" "$OUT/task/app-glue.expected" "$OUT/task/app-glue.expected" "$dir/app-glue-cell.vga" "$glue_vga"; then ok=1; fi
   fi
 
   if [[ "$ok" -eq 0 ]]; then
@@ -1834,6 +1884,19 @@ build_kernel() {
   fi
   cp "$KERNEL_DIR/target/x86_64-unknown-none/release/r3ath3" "$OUT/$name.elf"
   log "[PASS] build $name"
+}
+
+# Builds glue_duty.wasm and the native replay before any kernel that bakes
+# the module. Two PASS lines, matching the two artifacts.
+build_app() {
+  if ! "$ROOT/scripts/build-apps.sh" >"$OUT/glue-duty.build.log" 2>&1; then
+    log "[FAIL] build glue-duty"
+    cat "$OUT/glue-duty.build.log"
+    FAILURES=$((FAILURES + 1))
+    return 1
+  fi
+  log "[PASS] build glue-duty-wasm"
+  log "[PASS] build glue-duty-replay"
 }
 
 run_qemu() {
@@ -3292,6 +3355,7 @@ for row in range(25):
 write_text("app-hello.vga", "\n".join(hello_rows) + "\n")
 
 app_list = (
+    "app glue-duty  Glue Duty, the belt-scrub game, in text mode\n"
     "app hello      a static screen; the smallest app\n"
     "app spin       loops forever; the fuel limit stops it"
 )
@@ -3314,6 +3378,24 @@ write_bytes(
     + typed("app Spin", "error: no app Spin")
     + "exit\n"
     + exit_cmd,
+)
+write_text(
+    "app-glue.steps",
+    "launch glue-duty\nxp\nappkey spc 1\nappkey p 1\nappkey p 1\nappquit\nline exit\n",
+)
+write_bytes(
+    "app-glue.expected",
+    prefix
+    + "app glue-duty\n"
+    + "app glue-duty: started; q quits\n"
+    + "R3ATH3_APP_READY name=glue-duty\n"
+    + "R3ATH3_APP_STATE name=glue-duty state=1\n"
+    + "R3ATH3_APP_STATE name=glue-duty state=2\n"
+    + "R3ATH3_APP_STATE name=glue-duty state=1\n"
+    + "app glue-duty: quit; shift 1 score 0 cleaned 0 gum-up 0%\n"
+    + p
+    + "exit\n"
+    + exit_ok,
 )
 write_text(
     "app-gate.steps",
@@ -3662,7 +3744,7 @@ PY
       fi
       ;;
     mem)
-      if judge_shell_mem "$status" "$log_file" "$expected"; then
+      if judge_shell_mem "$status" "$log_file" "$expected" && shell_frames_in_bound "$log_file"; then
         passed=1
       fi
       ;;
@@ -3673,6 +3755,11 @@ PY
       ;;
     apphello)
       if judge_app_screen "$status" "$log_file" "$expected" "$vga_file" "$OUT/task/app-hello.vga"; then
+        passed=1
+      fi
+      ;;
+    appglue)
+      if judge_app_screen "$status" "$log_file" "$expected" "$vga_file" "$ROOT/apps/glue-duty/golden/app-glue.vga"; then
         passed=1
       fi
       ;;
@@ -3690,12 +3777,14 @@ PY
     cat "$log_file" 2>/dev/null || true
     log "----- expected -----"
     cat "$expected" 2>/dev/null || true
-    if [[ "$kind" == "screen" || "$kind" == "apphello" ]]; then
+    if [[ "$kind" == "screen" || "$kind" == "apphello" || "$kind" == "appglue" ]]; then
       log "----- vga -----"
       cat "$vga_file" 2>/dev/null || true
       log "----- vga expected -----"
       if [[ "$kind" == "apphello" ]]; then
         cat "$OUT/task/app-hello.vga" 2>/dev/null || true
+      elif [[ "$kind" == "appglue" ]]; then
+        cat "$ROOT/apps/glue-duty/golden/app-glue.vga" 2>/dev/null || true
       else
         cat "$OUT/task/shell-screen.vga" 2>/dev/null || true
       fi
@@ -4204,14 +4293,53 @@ expect_wasm_core() {
       log "[FAIL] swap nvme-core judged as wasm-core"
       FAILURES=$((FAILURES + 1))
     fi
+    # The status above is the wrong one, so a content match would still
+    # fail the judge. Judge again at the right status: the bytes must differ.
+    if judge_wasm_core "$WASM_CORE_STATUS" "$OUT/nvme-core.serial.log"; then
+      log "[FAIL] swap nvme-core content judged as wasm-core"
+      FAILURES=$((FAILURES + 1))
+    fi
     if judge_nvme_core "$WASM_CORE_STATUS" "$OUT/$name.serial.log"; then
       log "[FAIL] swap wasm-core judged as nvme-core"
+      FAILURES=$((FAILURES + 1))
+    fi
+    if judge_nvme_core "$NVME_CORE_STATUS" "$OUT/$name.serial.log"; then
+      log "[FAIL] swap wasm-core content judged as nvme-core"
       FAILURES=$((FAILURES + 1))
     fi
     if cmp -s "$OUT/nvme-core.serial.log" "$OUT/$name.serial.log"; then
       log "[FAIL] swap wasm-core and nvme-core logs are identical"
       FAILURES=$((FAILURES + 1))
     fi
+  fi
+}
+
+expect_wasm_glue() {
+  local name="wasm-glue"
+  local status golden="$ROOT/apps/glue-duty/golden/wasm-glue.txt"
+  status="$(run_qemu "$name" 40)"
+  if ! "$ROOT/build/apps/glue-duty-replay" >"$OUT/wasm-glue.replay.txt"; then
+    log "[FAIL] $name replay"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  if judge_wasm_glue "$status" "$OUT/$name.serial.log" "$OUT/wasm-glue.replay.txt" "$golden"; then
+    log "[PASS] $name exit=$status"
+  else
+    log "[FAIL] $name exit=$status"
+    log "----- serial -----"
+    cat "$OUT/$name.serial.log" 2>/dev/null || true
+    log "----- replay -----"
+    cat "$OUT/wasm-glue.replay.txt" 2>/dev/null || true
+    log "----- golden -----"
+    cat "$golden" 2>/dev/null || true
+    log "----- qemu stderr -----"
+    cat "$OUT/$name.qemu.err" 2>/dev/null || true
+    FAILURES=$((FAILURES + 1))
+  fi
+  if judge_wasm_core "$WASM_CORE_STATUS" "$OUT/$name.serial.log"; then
+    log "[FAIL] swap wasm-glue judged as wasm-core"
+    FAILURES=$((FAILURES + 1))
   fi
 }
 
@@ -4351,6 +4479,10 @@ else
   if build_kernel wasm-core wasm-core; then
     expect_wasm_core
   fi
+  if build_app; then
+  if build_kernel wasm-glue wasm-glue; then
+    expect_wasm_glue
+  fi
   if build_kernel shell shell; then
     if write_shell_cases; then
       expect_shell shell-basic 12 "$OUT/task/shell-basic.steps" "$OUT/task/shell-basic.expected" "$SHELL_OK_STATUS" exact
@@ -4390,6 +4522,7 @@ else
         "$OUT/task/store-tamper.boot2.steps" "$OUT/task/store-tamper.boot2.expected" "$SHELL_CMD_STATUS"
       expect_baddisk
       expect_shell app-hello 20 "$OUT/task/app-hello.steps" "$OUT/task/app-hello.expected" "$SHELL_OK_STATUS" apphello
+      expect_shell app-glue 20 "$OUT/task/app-glue.steps" "$OUT/task/app-glue.expected" "$SHELL_OK_STATUS" appglue
       expect_shell app-spin 20 "$OUT/task/app-spin.steps" "$OUT/task/app-spin.expected" "$SHELL_OK_STATUS" exact
       expect_shell app-usage 12 "$OUT/task/app-usage.steps" "$OUT/task/app-usage.expected" "$SHELL_CMD_STATUS" exact
       expect_gate app-gate 20 "$OUT/task/app-gate.steps" "$OUT/task/app-gate.expected" "$SHELL_OK_STATUS"
@@ -4397,6 +4530,7 @@ else
       log "[FAIL] write shell cases"
       FAILURES=$((FAILURES + 1))
     fi
+  fi
   fi
 fi
 

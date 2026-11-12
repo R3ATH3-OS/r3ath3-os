@@ -33,6 +33,8 @@ pub enum LoadError {
     Limits,
     Export,
     TooBig,
+    /// The arena is already borrowed. Not a module limit. The shell says `busy`.
+    Busy,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,6 +69,7 @@ impl LoadError {
             Self::Limits => "limits",
             Self::Export => "export",
             Self::TooBig => "too-big",
+            Self::Busy => "busy",
         }
     }
 }
@@ -112,6 +115,25 @@ impl<'m, 'a> Instance<'m, 'a> {
             Err(trap) => {
                 self.dead = true;
                 Err(trap)
+            }
+        }
+    }
+
+    /// `call_with_fuel`, plus how much of `fuel` the call consumed.
+    pub fn call_metered(
+        &mut self,
+        export: &str,
+        args: &[i64],
+        fuel: u32,
+    ) -> (Result<Option<i64>, Trap>, u32) {
+        if self.dead {
+            return (Err(Trap::Dead), 0);
+        }
+        match exec::call_metered(self.module, self.arena, export, args, fuel) {
+            Ok((value, used)) => (Ok(value), used),
+            Err((trap, used)) => {
+                self.dead = true;
+                (Err(trap), used)
             }
         }
     }
@@ -179,8 +201,8 @@ fn export_index(arena: &Arena, name: &str) -> Option<usize> {
     None
 }
 
-/// `None` when the arena is already taken. That does not happen in this
-/// milestone: one shell, one app. A load failure is `Some(Err(_))`.
+/// `None` when the arena is already taken. The shell reports that as
+/// `not loaded: busy`. A load failure is `Some(Err(_))`.
 pub fn with_instance<R>(
     module: &[u8],
     f: impl FnOnce(Result<Instance<'_, '_>, LoadError>) -> R,

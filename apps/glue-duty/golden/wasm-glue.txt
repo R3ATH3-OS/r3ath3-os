@@ -1,0 +1,30 @@
+R3ATH3_STAGE rust_main
+R3ATH3_WASM_GLUE start seed=1
+R3ATH3_WASM_GLUE step=1 state=1 frame=ba65d333083bfb6e shift 1 score 0 cleaned 0 gum-up 0%
+R3ATH3_WASM_GLUE step=100 state=1 frame=26bb9a881eb9a5c0 shift 1 score 1074 cleaned 6 gum-up 0%
+R3ATH3_WASM_GLUE step=200 state=1 frame=5ddce26b49a49ec1 shift 1 score 1350 cleaned 9 gum-up 0%
+R3ATH3_WASM_GLUE step=300 state=2 frame=36608d3d2ae0d183 shift 1 score 2406 cleaned 17 gum-up 78%
+R3ATH3_WASM_GLUE step=310 state=1 frame=78e937edcb58db99 shift 1 score 2406 cleaned 17 gum-up 78%
+R3ATH3_WASM_GLUE step=347 state=4 frame=adaf1f13ba38bed9 shift 1 score 2666 cleaned 19 gum-up 100%
+R3ATH3_WASM_GLUE step=375 state=1 frame=c706d7469c3f526c shift 1 score 0 cleaned 0 gum-up 0%
+R3ATH3_WASM_GLUE step=400 state=1 frame=1c6e17243c151302 shift 1 score 0 cleaned 0 gum-up 0%
+R3ATH3_WASM_GLUE step=500 state=1 frame=d3b56177a7c73ca9 shift 1 score 1284 cleaned 7 gum-up 0%
+R3ATH3_WASM_GLUE step=600 state=1 frame=77690814d5b11da0 shift 1 score 4372 cleaned 15 gum-up 0%
+R3ATH3_WASM_GLUE step=700 state=1 frame=5ae334dbfdf81123 shift 1 score 4759 cleaned 18 gum-up 31%
+R3ATH3_WASM_GLUE step=762 state=4 frame=c0475268a42a5021 shift 1 score 4986 cleaned 20 gum-up 100%
+R3ATH3_WASM_GLUE step=800 state=4 frame=c0475268a42a5021 shift 1 score 4986 cleaned 20 gum-up 100%
+R3ATH3_WASM_GLUE step=900 state=4 frame=c0475268a42a5021 shift 1 score 4986 cleaned 20 gum-up 100%
+R3ATH3_WASM_GLUE step=1000 state=4 frame=c0475268a42a5021 shift 1 score 4986 cleaned 20 gum-up 100%
+R3ATH3_WASM_GLUE step=1001 state=1 frame=c706d7469c3f526c shift 1 score 0 cleaned 0 gum-up 0%
+R3ATH3_WASM_GLUE step=1100 state=1 frame=f4bb909bb57e8963 shift 1 score 212 cleaned 2 gum-up 0%
+R3ATH3_WASM_GLUE step=1200 state=1 frame=2ef1de771029595a shift 1 score 1245 cleaned 9 gum-up 0%
+R3ATH3_WASM_GLUE step=1300 state=1 frame=b0522aa36173a157 shift 1 score 2262 cleaned 16 gum-up 69%
+R3ATH3_WASM_GLUE step=1323 state=4 frame=89a0c387f51c4bd9 shift 1 score 2262 cleaned 16 gum-up 100%
+R3ATH3_WASM_GLUE step=1400 state=4 frame=89a0c387f51c4bd9 shift 1 score 2262 cleaned 16 gum-up 100%
+R3ATH3_WASM_GLUE step=1500 state=4 frame=89a0c387f51c4bd9 shift 1 score 2262 cleaned 16 gum-up 100%
+R3ATH3_WASM_GLUE step=1600 state=4 frame=89a0c387f51c4bd9 shift 1 score 2262 cleaned 16 gum-up 100%
+R3ATH3_WASM_GLUE step=1700 state=4 frame=89a0c387f51c4bd9 shift 1 score 2262 cleaned 16 gum-up 100%
+R3ATH3_WASM_GLUE step=1800 state=4 frame=89a0c387f51c4bd9 shift 1 score 2262 cleaned 16 gum-up 100%
+R3ATH3_WASM_GLUE step=1900 state=4 frame=89a0c387f51c4bd9 shift 1 score 2262 cleaned 16 gum-up 100%
+R3ATH3_WASM_GLUE step=2000 state=4 frame=89a0c387f51c4bd9 shift 1 score 2262 cleaned 16 gum-up 100%
+R3ATH3_WASM_GLUE ok steps=2000

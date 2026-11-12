@@ -91,6 +91,29 @@ pub static SPIN: &[u8] = &[
     0x00, 0x41, 0x00, 0x0B, 0x05, 0x00, 0x41, 0xD0, 0x0F, 0x0B,
 ];
 
+#[cfg(any(feature = "shell", feature = "wasm-glue"))]
+pub static GLUE_DUTY: &[u8] = include_bytes!("../../build/apps/glue_duty.wasm");
+
+#[cfg(any(feature = "shell", feature = "wasm-glue"))]
+pub static APPS: &[App] = &[
+    App {
+        name: "glue-duty",
+        desc: "Glue Duty, the belt-scrub game, in text mode",
+        bytes: GLUE_DUTY,
+    },
+    App {
+        name: "hello",
+        desc: "a static screen; the smallest app",
+        bytes: HELLO,
+    },
+    App {
+        name: "spin",
+        desc: "loops forever; the fuel limit stops it",
+        bytes: SPIN,
+    },
+];
+
+#[cfg(not(any(feature = "shell", feature = "wasm-glue")))]
 pub static APPS: &[App] = &[
     App {
         name: "hello",
@@ -134,7 +157,7 @@ pub fn run_app(app: &'static App) -> bool {
         Err(error) => End::NotLoaded(error),
         Ok(mut inst) => host_loop(app.name, &mut inst),
     });
-    let outcome = outcome.unwrap_or(End::NotLoaded(LoadError::Limits));
+    let outcome = outcome.unwrap_or(End::NotLoaded(LoadError::Busy));
     let ran = matches!(outcome, End::Quit(_, _) | End::Trap(_));
     finish(app.name, outcome);
     ran
