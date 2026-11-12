@@ -24,7 +24,7 @@
 
 ## Next, in order
 10. **Storage.** A RAM disk first, then NVMe, so the audit log and saved data survive a reboot.
-   In progress: docs/STORAGE.md (part A: RAM disk).
+   In progress: docs/STORAGE.md (part A merged in PR #10; part B: emulated NVMe).
 11. **WebAssembly runtime.** A sandbox for apps and for AI tools, running under the gate's permissions. Game logic is written once and runs on R3@TH3 and on the web.
     - The first native app is Glue Duty.
     - Then Watch Mechanic, The Movement (a system monitor), the shop terminal, and a Patterns trainer.

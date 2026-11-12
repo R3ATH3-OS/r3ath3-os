@@ -6,7 +6,7 @@ This document is the spec for the kernel heap and the physical frame allocator. 
 
 ## 1. Facts this design rests on
 
-- The boot stub (`kernel/src/boot.rs`) identity-maps 0–1 GiB with 2 MiB pages and calls `kernel_main` on a 16 KiB stack. The kernel links at 1 MiB (`kernel/linker.ld`).
+- The boot stub (`kernel/src/boot.rs`) identity-maps 0–1 GiB with 2 MiB pages and calls `kernel_main` on a 16 KiB stack. The kernel links at 1 MiB (`kernel/linker.ld`). The map is not uniformly write-back: the 2 MiB page at `0x3000_0000` is uncached (PWT and PCD). That page is the NVMe MMIO window. The NVMe driver takes five DMA frames from `frames::alloc` only when a controller is found.
 - The smoke harness boots QEMU with `-m 64M`. The identity map is 1 GiB, but only about 64 MiB of it is RAM. The frame allocator never hands out a frame just because it is mapped. It uses the real memory map.
 - QEMU enters through PVH. At `_start`, `%ebx` holds the physical address of the `hvm_start_info` struct, which carries the memory map.
 - There are no crates.io dependencies. The toolchain is rustc/cargo 1.83.0 targeting `x86_64-unknown-none`, which ships `core` and `alloc`, so `extern crate alloc` needs nothing new.

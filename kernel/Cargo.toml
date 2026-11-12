@@ -49,7 +49,10 @@ recorder-core = ["recorder"]
 # `sched` is required because `IrqCell` lives in `context.rs`.
 store = ["sched", "recorder"]
 store-core = ["store"]
-shell = ["sched", "gate", "recorder", "store"]
+# Internal. Not a test mode. Implied by `shell` and `nvme-core`.
+nvme = ["sched"]
+nvme-core = ["nvme"]
+shell = ["sched", "gate", "recorder", "store", "nvme"]
 
 [profile.dev]
 panic = "abort"

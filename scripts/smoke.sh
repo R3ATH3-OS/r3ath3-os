@@ -14,9 +14,10 @@
 # Scheduler: coop 0x70 → 225, preempt 0x71 → 227, sleep 0x72 → 229,
 # full 0x73 → 231, exit 0x74 → 233, reap 0x75 → 235.
 # Gate: core 0x78 → 241, expire 0x79 → 243.
-# Flight recorder: core 0x7A → 245. Store: core 0x7B → 247. The shell writes
-# the live record through to a RAM disk. A reboot erases both.
-# Unused odd statuses: 203–207, 219–223, 237–239, 249, 251, 253, 255.
+# Flight recorder: core 0x7A → 245. Store: core 0x7B → 247. NVMe: core 0x7C → 249.
+# With no NVMe controller the shell uses the RAM disk, and a reboot erases it.
+# With QEMU's emulated NVMe disk, earlier boots stay in the image.
+# Unused odd statuses: 203–207, 219–223, 237–239, 251, 253, 255.
 # A triple-fault or silent reset does not print the fault line and does not
 # use those statuses (this QEMU build has exited 0 on triple fault).
 set -u
@@ -56,6 +57,7 @@ GATE_CORE_STATUS=241
 GATE_EXPIRE_STATUS=243
 RECORDER_CORE_STATUS=245
 STORE_CORE_STATUS=247
+NVME_CORE_STATUS=249
 RAM_BYTES=67108864
 HEAP_BYTES=1048576
 HEAP_LINE='R3ATH3_HEAP ok size=1048576 used=([0-9]+) align_max=4096'
@@ -842,6 +844,36 @@ def recorder_core_log():
 
 def judge_recorder_core(text):
     return text == recorder_core_log()
+
+def nvme_core_log():
+    return (
+        b"R3ATH3_STAGE rust_main\n"
+        b"R3ATH3_NVME_CORE step=1 found class=010802 bar0=30000000\n"
+        b"R3ATH3_NVME_CORE step=2 ready lba_bytes=512 blocks=4096\n"
+        b"R3ATH3_NVME_CORE step=3 read lba=0 zero=yes\n"
+        b"R3ATH3_NVME_CORE step=4 write lba=7 readback=same\n"
+        b"R3ATH3_NVME_CORE step=5 write lba=4095 readback=same\n"
+        b"R3ATH3_NVME_CORE step=6 lba=4096 driver=range device=sct0-sc80\n"
+        b"R3ATH3_NVME_CORE step=7 flush=ok\n"
+        b"R3ATH3_NVME_CORE ok steps=7\n"
+    )
+
+def judge_nvme_core(text):
+    return text == nvme_core_log()
+
+def nvme_image_ok(data):
+    if len(data) != 2097152:
+        return False
+    expect = bytearray(2097152)
+    for lba in (7, 4095):
+        off = lba * 512
+        for index in range(512):
+            expect[off + index] = (index * 7 + lba) & 0xFF
+    return data == bytes(expect)
+
+def same_sha256(left, right):
+    import hashlib
+    return hashlib.sha256(left).digest() == hashlib.sha256(right).digest()
 PY
 }
 
@@ -917,6 +949,12 @@ judge_store_core() {
   local status="$1" file="$2"
   [[ "$status" -eq "$STORE_CORE_STATUS" ]] || return 1
   load_harness_py judge_store_core "$file"
+}
+
+judge_nvme_core() {
+  local status="$1" file="$2"
+  [[ "$status" -eq "$NVME_CORE_STATUS" ]] || return 1
+  load_harness_py judge_nvme_core "$file"
 }
 
 # Status must equal want. alias is "s1=live" or empty. ref is a log path or empty.
@@ -1627,6 +1665,109 @@ PY
     if judge_exact "$SHELL_CMD_STATUS" "$OUT/task/log-usage.expected" "$SHELL_CMD_STATUS" "$OUT/task/store-usage.expected"; then ok=1; fi
     if judge_exact "$SHELL_CMD_STATUS" "$OUT/task/store-usage.expected" "$SHELL_CMD_STATUS" "$OUT/task/shell-usage.expected"; then ok=1; fi
     if judge_exact "$SHELL_CMD_STATUS" "$OUT/task/shell-usage.expected" "$SHELL_CMD_STATUS" "$OUT/task/store-usage.expected"; then ok=1; fi
+    python3 - "$OUT/harness_py.py" "$dir" <<'PY'
+import importlib.util, sys
+path, out = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("harness_py", path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+good = mod.nvme_core_log()
+open(out + "/nvme-core.log", "wb").write(good)
+lines = good.splitlines(True)
+open(out + "/nvme-core-short.log", "wb").write(b"".join(lines[:6] + lines[7:]))
+image = bytearray(2097152)
+for lba in (7, 4095):
+    off = lba * 512
+    for index in range(512):
+        image[off + index] = (index * 7 + lba) & 0xFF
+open(out + "/nvme-core.img", "wb").write(image)
+changed = bytearray(image)
+changed[7 * 512] ^= 0x01
+open(out + "/nvme-core-lba7.img", "wb").write(changed)
+other = bytearray(image)
+other[100 * 512] = 1
+open(out + "/nvme-core-lba100.img", "wb").write(other)
+PY
+    judge_nvme_core "$NVME_CORE_STATUS" "$dir/nvme-core.log" || ok=1
+    if judge_nvme_core "$STORE_CORE_STATUS" "$dir/nvme-core.log"; then ok=1; fi
+    if judge_nvme_core "$NVME_CORE_STATUS" "$dir/nvme-core-short.log"; then ok=1; fi
+    if ! python3 - "$OUT/harness_py.py" "$dir" "$OUT" <<'PY'
+import importlib.util, re, sys
+path, selftest, out = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("harness_py", path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+good = open(selftest + "/nvme-core.img", "rb").read()
+if not mod.nvme_image_ok(good):
+    sys.exit(1)
+if mod.nvme_image_ok(open(selftest + "/nvme-core-lba7.img", "rb").read()):
+    sys.exit(1)
+if mod.nvme_image_ok(open(selftest + "/nvme-core-lba100.img", "rb").read()):
+    sys.exit(1)
+boot1 = mod.fill_store(open(out + "/task/store-reboot.boot1.expected", "rb").read())
+boot2 = mod.fill_store(open(out + "/task/store-reboot.boot2.expected", "rb").read())
+expected2 = open(out + "/task/store-reboot.boot2.expected", "rb").read()
+if not mod.judge_store(boot2, expected2, None, boot1):
+    sys.exit(1)
+text = boot2.decode("ascii")
+start = text.index("r3> boots 1\n")
+end = text.index("boot 1 ok ", start)
+chunk_lines = text[start:end].splitlines()
+records = []
+index = 1
+while index < len(chunk_lines):
+    header = re.fullmatch(r"#([0-9]+) t=[0-9]+ (.+) link=[0-9a-f]{16}", chunk_lines[index])
+    if header is None:
+        index += 1
+        continue
+    records.append((int(header.group(1)), header.group(2), chunk_lines[index + 1][2:]))
+    index += 2
+prev = mod.BASIS
+links = {}
+new = []
+for number, tag, body in records:
+    tick = 1000 * number
+    link = mod.fnv_link(prev, number, tick, tag.encode("ascii"), body.encode("ascii"))
+    links[number] = link
+    new.append("#%d t=%d %s link=%016x" % (number, tick, tag, link))
+    new.append("  " + body)
+    prev = link
+lines = text.splitlines()
+s1 = lines.index("r3> boots 1")
+ok_at = next(i for i, line in enumerate(lines) if line.startswith("boot 1 ok "))
+rewritten = lines[:]
+rewritten[s1 + 1:ok_at] = new
+rewritten[ok_at] = re.sub(r"head=[0-9a-f]{16}", "head=%016x" % links[max(links)], lines[ok_at])
+listed = next(i for i, line in enumerate(lines) if line.startswith("boot 1 entries="))
+rewritten[listed] = re.sub(r"head=[0-9a-f]{16}", "head=%016x" % links[5], lines[listed])
+different = ("\n".join(rewritten) + "\n").encode("ascii")
+if mod.judge_store(different, expected2, None, boot1):
+    sys.exit(1)
+tamper = mod.fill_store(open(out + "/task/store-tamper.boot2.expected", "rb").read())
+tamper_expected = open(out + "/task/store-tamper.boot2.expected", "rb").read()
+if not mod.judge_store(tamper, tamper_expected):
+    sys.exit(1)
+zero = tamper.decode("ascii")
+spot = zero.index("boot 2 entries=0 ")
+head = re.search(r"head=([0-9a-f]{16})", zero[spot:]).group(1)
+if head != "cbf29ce484222325":
+    sys.exit(1)
+bad_head = zero.replace("boot 2 entries=0 lost=0 head=" + head, "boot 2 entries=0 lost=0 head=0000000000000001", 1)
+if mod.judge_store(bad_head.encode("ascii"), tamper_expected):
+    sys.exit(1)
+if mod.judge_store(tamper, expected2):
+    sys.exit(1)
+blob = b"NOTR3ATH" + bytes(32)
+changed = bytearray(blob)
+changed[0] ^= 0x01
+if not mod.same_sha256(blob, blob):
+    sys.exit(1)
+if mod.same_sha256(blob, bytes(changed)):
+    sys.exit(1)
+PY
+    then
+      ok=1
+    fi
   fi
 
   if [[ "$ok" -eq 0 ]]; then
@@ -1658,6 +1799,7 @@ build_kernel() {
 run_qemu() {
   local name="$1"
   local seconds="$2"
+  local disk="${3:-}"
   local elf="$OUT/$name.elf"
   local log_file="$OUT/$name.serial.log"
   local err_file="$OUT/$name.qemu.err"
@@ -1669,19 +1811,39 @@ run_qemu() {
   set +e
   # SIGTERM at $seconds. If the guest ignores it, SIGKILL follows 5s later
   # (timeout status 137). A guest that exits on SIGTERM still returns 124.
-  timeout --foreground --kill-after=5s "$seconds" qemu-system-x86_64 \
-    -machine pc,accel=tcg \
-    -cpu qemu64 \
-    -m 64M \
-    -smp 1 \
-    -kernel "$elf" \
-    -nic none \
-    -display none \
-    -vga none \
-    -serial stdio \
-    -no-reboot \
-    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-    >"$log_file" 2>"$err_file"
+  # A disk path adds the emulated NVMe controller. No pre-existing case
+  # passes one, so those command lines stay as they are.
+  if [[ -n "$disk" ]]; then
+    timeout --foreground --kill-after=5s "$seconds" qemu-system-x86_64 \
+      -machine pc,accel=tcg \
+      -cpu qemu64 \
+      -m 64M \
+      -smp 1 \
+      -kernel "$elf" \
+      -nic none \
+      -display none \
+      -vga none \
+      -serial stdio \
+      -no-reboot \
+      -drive "file=${disk},if=none,id=r3disk,format=raw" \
+      -device nvme,serial=r3ath3,drive=r3disk \
+      -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+      >"$log_file" 2>"$err_file"
+  else
+    timeout --foreground --kill-after=5s "$seconds" qemu-system-x86_64 \
+      -machine pc,accel=tcg \
+      -cpu qemu64 \
+      -m 64M \
+      -smp 1 \
+      -kernel "$elf" \
+      -nic none \
+      -display none \
+      -vga none \
+      -serial stdio \
+      -no-reboot \
+      -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+      >"$log_file" 2>"$err_file"
+  fi
   local status=$?
   set -e
   echo "$status"
@@ -2944,6 +3106,106 @@ write_bytes(
     "store-usage.expected",
     prefix + "".join(typed(cmd, output) for cmd, output in usage_store) + "exit\n" + exit_cmd,
 )
+
+reboot_boot1 = (
+    "R3ATH3_STAGE rust_main\n"
+    "R3ATH3_SHELL_READY\n"
+    "R3@TH3 shell. Type help for commands.\n"
+    "store: formatted a blank nvme disk\n"
+    "store: nvme disk; this boot is saved as boot 1 of 64\n"
+    "r3> save note kept\n"
+    "saved note to nvme\n"
+    "r3> grant ai1 say\n"
+    "granted ai1 say\n"
+    "r3> \n"
+    "ai1 says: hi\n"
+    "R3GATE reply agent=ai1 seq=1 verb=say result=done\n"
+    "r3> log\n"
+    "log entries=4 of 128 lost=0 head=H\n"
+    "#1 t=T human last=ok link=L\n"
+    "  save note kept\n"
+    "#2 t=T gate link=L\n"
+    "  grant ai1 say\n"
+    "#3 t=T human last=ok link=L\n"
+    "  grant ai1 say\n"
+    "#4 t=T agent ai1 link=L\n"
+    "  say seq=1 done text=hi\n"
+    "r3> exit\n"
+    "R3ATH3_SHELL_EXIT last=ok\n"
+)
+reboot_boot2 = (
+    "R3ATH3_STAGE rust_main\n"
+    "R3ATH3_SHELL_READY\n"
+    "R3@TH3 shell. Type help for commands.\n"
+    "store: nvme disk; this boot is saved as boot 2 of 64\n"
+    "r3> show note\n"
+    "note = kept\n"
+    "r3> boots\n"
+    "boot 1 entries=5 lost=0 head=H chain=ok prev=-\n"
+    "boot 2 entries=1 lost=0 head=H chain=ok prev=ok\n"
+    "boots 2 of 64 used; this is boot 2\n"
+    "r3> boots 1\n"
+    "#1 t=T human last=ok link=L\n"
+    "  save note kept\n"
+    "#2 t=T gate link=L\n"
+    "  grant ai1 say\n"
+    "#3 t=T human last=ok link=L\n"
+    "  grant ai1 say\n"
+    "#4 t=T agent ai1 link=L\n"
+    "  say seq=1 done text=hi\n"
+    "#5 t=T human last=ok link=L\n"
+    "  log\n"
+    "boot 1 ok entries=5 lost=0 head=H\n"
+    "r3> exit\n"
+    "R3ATH3_SHELL_EXIT last=ok\n"
+)
+tamper_boot2 = (
+    "R3ATH3_STAGE rust_main\n"
+    "R3ATH3_SHELL_READY\n"
+    "R3@TH3 shell. Type help for commands.\n"
+    "store: nvme disk; this boot is saved as boot 2 of 64\n"
+    "r3> boots\n"
+    "boot 1 entries=2 lost=0 head=H chain=#3 prev=-\n"
+    "boot 2 entries=0 lost=0 head=H chain=ok prev=ok\n"
+    "boots 2 of 64 used; this is boot 2\n"
+    "r3> boots 1\n"
+    "#1 t=T human last=ok link=L\n"
+    "  save note kept\n"
+    "#2 t=T gate link=L\n"
+    "  grant ai1 say\n"
+    "boot 1: chain broken at #3\n"
+    "r3> exit\n"
+    "R3ATH3_SHELL_EXIT last=cmd\n"
+)
+baddisk = (
+    "R3ATH3_STAGE rust_main\n"
+    "R3ATH3_SHELL_READY\n"
+    "R3@TH3 shell. Type help for commands.\n"
+    "store: nvme disk not used (superblock); using the ram disk, erased by a reboot\n"
+    "r3> store\n"
+    "store device=ram blocks=512 boots=1 of 15 saved=0 of 16\n"
+    "store: ram disk, erased by a reboot; this boot is boot 1\n"
+    "store: nvme disk not used (superblock)\n"
+    "r3> exit\n"
+    "R3ATH3_SHELL_EXIT last=ok\n"
+)
+write_text(
+    "store-reboot.boot1.steps",
+    "line save note kept\nline grant ai1 say\nai R3GATE ASK ai1 1 say hi\nline log\nline exit\n",
+)
+write_text(
+    "store-reboot.boot2.steps",
+    "line show note\nline boots\nline boots 1\nline exit\n",
+)
+write_text(
+    "store-tamper.boot2.steps",
+    "line boots\nline boots 1\nline exit\n",
+)
+write_text("store-baddisk.steps", "line store\nline exit\n")
+write_bytes("store-reboot.boot1.expected", reboot_boot1)
+write_bytes("store-reboot.boot2.expected", reboot_boot2)
+write_bytes("store-tamper.boot2.expected", tamper_boot2)
+write_bytes("store-baddisk.expected", baddisk)
 PY
 }
 
@@ -3230,13 +3492,13 @@ PY
   fi
 }
 
-expect_gate() {
+# Runs one gate transcript. Prints the QEMU status. An optional disk path
+# attaches the emulated NVMe controller. Judging stays in expect_gate.
+gate_qemu() {
   local name="$1"
   local seconds="$2"
   local steps="$3"
-  local expected="$4"
-  local want="$5"
-  local kind="${6:-exact}"
+  local disk="${4:-}"
   local log_file="$OUT/$name.serial.log"
   local err_file="$OUT/$name.qemu.err"
   local sock="$OUT/$name.mon.sock"
@@ -3245,9 +3507,11 @@ expect_gate() {
   rm -f "$sock" "$ser" "$log_file"
   set +e
   timeout --foreground --kill-after=5s "$seconds" python3 - \
-    "$elf" "$log_file" "$err_file" "$seconds" "$steps" "$sock" "$ser" "$OUT/harness_py.py" <<'PY'
+    "$elf" "$log_file" "$err_file" "$seconds" "$steps" "$sock" "$ser" "$OUT/harness_py.py" "$disk" <<'PY'
 import importlib.util, os, signal, socket, subprocess, sys, time
-elf, out_log, err_log, seconds, steps_path, sock_path, ser_path, harness_path = sys.argv[1:]
+args = sys.argv[1:]
+elf, out_log, err_log, seconds, steps_path, sock_path, ser_path, harness_path = args[:8]
+disk = args[8] if len(args) > 8 else ""
 spec = importlib.util.spec_from_file_location("harness_py", harness_path)
 harness = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(harness)
@@ -3257,19 +3521,22 @@ for path in (out_log, ser_path, sock_path):
     except FileNotFoundError:
         pass
 err_f = open(err_log, "wb")
-proc = subprocess.Popen(
-    [
-        "qemu-system-x86_64", "-machine", "pc,accel=tcg", "-cpu", "qemu64",
-        "-m", "64M", "-smp", "1", "-kernel", elf, "-nic", "none",
-        "-display", "none", "-vga", "std",
-        "-chardev", "socket,id=com1,path=" + ser_path + ",server=on,wait=on",
-        "-serial", "chardev:com1",
-        "-monitor", "unix:" + sock_path + ",server,nowait",
-        "-no-reboot",
-        "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
-    ],
-    stdout=subprocess.DEVNULL, stderr=err_f,
-)
+cmd = [
+    "qemu-system-x86_64", "-machine", "pc,accel=tcg", "-cpu", "qemu64",
+    "-m", "64M", "-smp", "1", "-kernel", elf, "-nic", "none",
+    "-display", "none", "-vga", "std",
+    "-chardev", "socket,id=com1,path=" + ser_path + ",server=on,wait=on",
+    "-serial", "chardev:com1",
+    "-monitor", "unix:" + sock_path + ",server,nowait",
+    "-no-reboot",
+]
+if disk:
+    cmd += [
+        "-drive", "file=%s,if=none,id=r3disk,format=raw" % disk,
+        "-device", "nvme,serial=r3ath3,drive=r3disk",
+    ]
+cmd += ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]
+proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=err_f)
 buf = b""
 ser = None
 deadline = time.time() + float(seconds)
@@ -3494,6 +3761,20 @@ sys.exit(code if code is not None else 124)
 PY
   local status=$?
   set -e
+  echo "$status"
+}
+
+expect_gate() {
+  local name="$1"
+  local seconds="$2"
+  local steps="$3"
+  local expected="$4"
+  local want="$5"
+  local kind="${6:-exact}"
+  local log_file="$OUT/$name.serial.log"
+  local err_file="$OUT/$name.qemu.err"
+  local status
+  status="$(gate_qemu "$name" "$seconds" "$steps")"
   local passed=0
   case "$kind" in
     exact)
@@ -3536,11 +3817,162 @@ PY
   fi
 }
 
+make_image() {
+  local path="$1"
+  local kind="$2"
+  python3 - "$path" "$kind" <<'PY'
+import sys
+path, kind = sys.argv[1:]
+data = bytearray(2097152)
+if kind == "badsuper":
+    data[:8] = b"NOTR3ATH"
+elif kind != "blank":
+    raise SystemExit("bad image kind")
+open(path, "wb").write(data)
+PY
+}
+
+apply_mutation() {
+  local img="$1"
+  local mutation="$2"
+  if [[ "$mutation" == "none" ]]; then
+    return 0
+  fi
+  case "$mutation" in
+    flip:*)
+      python3 - "$img" "${mutation#flip:}" <<'PY'
+import sys
+path, offset = sys.argv[1], int(sys.argv[2])
+data = bytearray(open(path, "rb").read())
+data[offset] ^= 0x01
+open(path, "wb").write(data)
+PY
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+expect_nvme_core() {
+  local name="nvme-core"
+  local img="$OUT/$name.img"
+  rm -f "$img" "$OUT/$name.serial.log" "$OUT/$name.qemu.err"
+  make_image "$img" blank
+  local status
+  status="$(run_qemu "$name" 12 "$img")"
+  local image_ok=1
+  if ! python3 - "$OUT/harness_py.py" "$img" <<'PY'
+import importlib.util, sys
+path, image = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("harness_py", path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(0 if mod.nvme_image_ok(open(image, "rb").read()) else 1)
+PY
+  then
+    image_ok=0
+  fi
+  if judge_nvme_core "$status" "$OUT/$name.serial.log" && [[ "$image_ok" -eq 1 ]]; then
+    log "[PASS] $name exit=$status"
+  else
+    log "[FAIL] $name exit=$status"
+    log "----- serial -----"
+    cat "$OUT/$name.serial.log" 2>/dev/null || true
+    log "----- qemu stderr -----"
+    cat "$OUT/$name.qemu.err" 2>/dev/null || true
+    FAILURES=$((FAILURES + 1))
+  fi
+}
+
+expect_reboot() {
+  local name="$1"
+  local steps1="$2"
+  local expected1="$3"
+  local want1="$4"
+  local mutation="$5"
+  local steps2="$6"
+  local expected2="$7"
+  local want2="$8"
+  local img="$OUT/$name.img"
+  rm -f "$img" \
+    "$OUT/$name.boot1.serial.log" "$OUT/$name.boot1.qemu.err" \
+    "$OUT/$name.boot2.serial.log" "$OUT/$name.boot2.qemu.err"
+  make_image "$img" blank
+  local status
+  status="$(gate_qemu "$name.boot1" 20 "$steps1" "$img")"
+  if ! judge_shell_store "$status" "$OUT/$name.boot1.serial.log" "$expected1" "$want1" "" ""; then
+    log "[FAIL] $name exit=$status"
+    log "----- boot 1 -----"
+    cat "$OUT/$name.boot1.serial.log" 2>/dev/null || true
+    log "----- expected -----"
+    cat "$expected1" 2>/dev/null || true
+    log "----- qemu stderr -----"
+    cat "$OUT/$name.boot1.qemu.err" 2>/dev/null || true
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  if ! apply_mutation "$img" "$mutation"; then
+    log "[FAIL] $name mutation"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  local status2
+  status2="$(gate_qemu "$name.boot2" 20 "$steps2" "$img")"
+  if judge_shell_store "$status2" "$OUT/$name.boot2.serial.log" "$expected2" "$want2" "" "$OUT/$name.boot1.serial.log"; then
+    log "[PASS] $name exit=$status,$status2"
+  else
+    log "[FAIL] $name exit=$status,$status2"
+    log "----- boot 2 -----"
+    cat "$OUT/$name.boot2.serial.log" 2>/dev/null || true
+    log "----- expected -----"
+    cat "$expected2" 2>/dev/null || true
+    log "----- qemu stderr -----"
+    cat "$OUT/$name.boot2.qemu.err" 2>/dev/null || true
+    FAILURES=$((FAILURES + 1))
+  fi
+}
+
+expect_baddisk() {
+  local name="store-baddisk"
+  local img="$OUT/$name.img"
+  local before="$OUT/$name.before"
+  rm -f "$img" "$before" "$OUT/$name.serial.log" "$OUT/$name.qemu.err"
+  make_image "$img" badsuper
+  cp "$img" "$before"
+  local status
+  status="$(gate_qemu "$name" 12 "$OUT/task/store-baddisk.steps" "$img")"
+  local same=1
+  if ! python3 - "$OUT/harness_py.py" "$before" "$img" <<'PY'
+import importlib.util, sys
+path, left, right = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("harness_py", path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+sys.exit(0 if mod.same_sha256(open(left, "rb").read(), open(right, "rb").read()) else 1)
+PY
+  then
+    same=0
+  fi
+  if judge_exact "$status" "$OUT/$name.serial.log" "$SHELL_OK_STATUS" "$OUT/task/store-baddisk.expected" && [[ "$same" -eq 1 ]]; then
+    log "[PASS] $name exit=$status"
+  else
+    log "[FAIL] $name exit=$status"
+    log "----- serial -----"
+    cat "$OUT/$name.serial.log" 2>/dev/null || true
+    log "----- expected -----"
+    cat "$OUT/task/store-baddisk.expected" 2>/dev/null || true
+    log "----- qemu stderr -----"
+    cat "$OUT/$name.qemu.err" 2>/dev/null || true
+    FAILURES=$((FAILURES + 1))
+  fi
+}
+
 expect_case() {
   local name="$1"
   local judge="$2"
   local status
-  status="$(run_qemu "$name" "$3")"
+  status="$(run_qemu "$name" "$3" "${4:-}")"
   if "$judge" "$status" "$OUT/$name.serial.log"; then
     log "[PASS] $name exit=$status"
   else
@@ -3666,6 +4098,9 @@ else
   if build_kernel store-core store-core; then
     expect_case store-core judge_store_core 12
   fi
+  if build_kernel nvme-core nvme-core; then
+    expect_nvme_core
+  fi
   if build_kernel shell shell; then
     if write_shell_cases; then
       expect_shell shell-basic 12 "$OUT/task/shell-basic.steps" "$OUT/task/shell-basic.expected" "$SHELL_OK_STATUS" exact
@@ -3695,6 +4130,15 @@ else
       expect_shell shell-sched-args 12 "$OUT/task/shell-sched-args.steps" "$OUT/task/shell-sched-args.expected" "$SHELL_CMD_STATUS" exact
       expect_gate store-ram 20 "$OUT/task/store-ram.steps" "$OUT/task/store-ram.expected" "$SHELL_OK_STATUS" store:s1
       expect_shell store-usage 40 "$OUT/task/store-usage.steps" "$OUT/task/store-usage.expected" "$SHELL_CMD_STATUS" exact
+      expect_reboot store-reboot \
+        "$OUT/task/store-reboot.boot1.steps" "$OUT/task/store-reboot.boot1.expected" "$SHELL_OK_STATUS" \
+        none \
+        "$OUT/task/store-reboot.boot2.steps" "$OUT/task/store-reboot.boot2.expected" "$SHELL_OK_STATUS"
+      expect_reboot store-tamper \
+        "$OUT/task/store-reboot.boot1.steps" "$OUT/task/store-reboot.boot1.expected" "$SHELL_OK_STATUS" \
+        flip:4914 \
+        "$OUT/task/store-tamper.boot2.steps" "$OUT/task/store-tamper.boot2.expected" "$SHELL_CMD_STATUS"
+      expect_baddisk
     else
       log "[FAIL] write shell cases"
       FAILURES=$((FAILURES + 1))
