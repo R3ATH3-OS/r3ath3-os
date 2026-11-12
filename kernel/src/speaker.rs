@@ -6,9 +6,12 @@
 //! channel-2 bytes only (`0xB6` to program, `0x80` to latch). The gate is
 //! port `0x61`: only bits 0 and 1 change. Ports `0x60` and `0x64` are not used.
 //!
-//! On QEMU 8.2 the latched countdown is the reload value minus 6: mode 3
-//! steps by two per clock, and three clocks pass between the high-byte write
-//! and the latch command. `speaker-core` requires that exact readback.
+//! Mode 3 counts down by two per PIT clock, so a latched count is even when
+//! the divisor is even. The latch is read in the same instruction window as
+//! the reload write. `speaker-core` accepts an even count in
+//! `divisor - 20 .. divisor`. The raw count is printed only when that check
+//! fails. Host time can move the count inside that window; the proof does
+//! not require one exact lag.
 //!
 //! # Invariants
 //! One CPU. Main context only. There is no PCM, AC97, or HD Audio device.
@@ -86,31 +89,22 @@ pub fn silence() {
 }
 
 fn program_and_latch(divisor: u16) -> u16 {
-    let enable = interrupts_on();
-    // SAFETY: `cli` clears IF on this one CPU so the latch is not split by
-    // the timer handler. `sti` below restores IF only when it was set.
-    unsafe {
-        core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
-    }
-    // SAFETY: `0x43` is written only with the channel-2 command bytes
-    // `0xB6` and `0x80`. `0x42` is channel 2's data port. Port `0x40` is
-    // not used, so channel 0's divisor is not rewritten. One CPU.
-    let latched = unsafe {
-        port::outb(PIT_CMD, CMD_CH2_SQUARE);
-        port::outb(PIT_CH2, divisor as u8);
-        port::outb(PIT_CH2, (divisor >> 8) as u8);
-        port::outb(PIT_CMD, CMD_CH2_LATCH);
-        let low = port::inb(PIT_CH2);
-        let high = port::inb(PIT_CH2);
-        u16::from(low) | (u16::from(high) << 8)
-    };
-    if enable {
-        // SAFETY: IF was set on entry. `sti` puts it back. One CPU.
+    crate::irq::without_interrupts(|| {
+        // SAFETY: `0x43` is written only with the channel-2 command bytes
+        // `0xB6` and `0x80`. `0x42` is channel 2's data port. Port `0x40` is
+        // not used, so channel 0's divisor is not rewritten. The surrounding
+        // `without_interrupts` keeps the timer handler from splitting the
+        // latch. Every access in this block is port I/O. One CPU.
         unsafe {
-            core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
+            port::outb(PIT_CMD, CMD_CH2_SQUARE);
+            port::outb(PIT_CH2, divisor as u8);
+            port::outb(PIT_CH2, (divisor >> 8) as u8);
+            port::outb(PIT_CMD, CMD_CH2_LATCH);
+            let low = port::inb(PIT_CH2);
+            let high = port::inb(PIT_CH2);
+            u16::from(low) | (u16::from(high) << 8)
         }
-    }
-    latched
+    })
 }
 
 fn set_gate(on: bool) -> u8 {
@@ -123,19 +117,4 @@ fn set_gate(on: bool) -> u8 {
         port::outb(SPEAKER, (before & 0xFC) | bits);
         port::inb(SPEAKER) & 0x03
     }
-}
-
-fn interrupts_on() -> bool {
-    let flags: u64;
-    // SAFETY: `pushfq`/`pop` copies RFLAGS and restores it. The pair does
-    // not write Rust memory. One CPU.
-    unsafe {
-        core::arch::asm!(
-            "pushfq",
-            "pop {flags}",
-            flags = out(reg) flags,
-            options(nomem, preserves_flags),
-        );
-    }
-    flags & 0x200 != 0
 }

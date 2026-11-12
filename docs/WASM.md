@@ -97,9 +97,9 @@ unsafe impl Sync for ArenaCell {}
 let result = f(unsafe { &mut *ARENA.0.get() });
 ```
 
-`rg -n 'unsafe|asm!' kernel/src` was 122 lines at the end of milestone 11. Those two are the only lines milestone 11 adds in the kernel. Comments in `arena.rs` do not contain the substring `unsafe`. Milestone 12 part A brings the count to 141; the new lines are only in `fb.rs` and `speaker.rs` (`docs/FRAMEBUFFER.md`).
+`rg -n 'unsafe|asm!' kernel/src` was 122 lines at the end of milestone 11. Those two are the only lines milestone 11 adds in the kernel. Comments in `arena.rs` do not contain the substring `unsafe`. Milestone 12 part A brings the count to 145; the framebuffer and speaker lines are only in `fb.rs` and `speaker.rs` (`docs/FRAMEBUFFER.md`).
 
-On the shell build, `mem` reported `frames_total=15943` on main (`3ac0fe5`) and `frames_total=15773` on the milestone 11 part A head. The drop is 170 frames, inside the 128–176 bound. Milestone 11 part B measured `frames_total=15765`, inside 15749..=15773. Milestone 12 part A adds a 64,000-byte framebuffer in `.bss` (16 frames). The same shell command now reports `frames_total=15749`, and `shell-mem` requires 15741..=15757 (`docs/FRAMEBUFFER.md`). Builds without `wasm` do not include the arena. Builds without `fb` do not include the pixel buffer. `judge_shell_mem` itself does not check that window: its self-test still uses a synthetic `frames_total` of 16000.
+On the shell build, `mem` reported `frames_total=15943` on main (`3ac0fe5`) and `frames_total=15773` on the milestone 11 part A head. The drop is 170 frames, inside the 128–176 bound. Milestone 11 part B measured `frames_total=15765`, inside 15749..=15773. Milestone 12 part A adds a 64,000-byte framebuffer in `.bss` and an 8 KiB font save plus the text DAC. The same shell command now reports `frames_total=15746`, and `shell-mem` requires 15741..=15757 (`docs/FRAMEBUFFER.md`). Builds without `wasm` do not include the arena. Builds without `fb` do not include the pixel buffer or the font save. `judge_shell_mem` itself does not check that window: its self-test still uses a synthetic `frames_total` of 16000.
 
 The shell's slot 0 stack is 16 KiB and has no canary. This tree adds no assembly to measure the high-water mark, so that mark is not verified. The interpreter does not recurse in Rust.
 
@@ -157,12 +157,12 @@ Grid bytes: `0x00` is a space, `0x20`–`0x7E` are themselves, anything else is 
 2. Load. On `LoadError`, print `app <name>: not loaded: <word>` and return. A taken arena is `not loaded: busy`. `last` becomes cmd.
 3. ABI check. On failure, print `app <name>: stopped: abi` and return. `last` becomes cmd.
 4. `r3_init`. A trap stops the app.
-5. Paint the grid from `r3_text` (the data segment is already applied). An out-of-range offset is `memory`. If the module exports `r3_pixels`, copy those 64,000 bytes, enter mode 13h, and blit. Without that export, stay in text mode.
+5. Paint the grid from `r3_text` (the data segment is already applied). An out-of-range offset is `memory`. If the module exports `r3_pixels`, copy those 64,000 bytes, enter mode 13h only when graphics mode is not already on, and blit. Without that export, stay in text mode.
 6. Call `r3_step` once. A trap stops the app here, before the ready line and before any state line. `spin` takes this path: the first step is the infinite loop, fuel runs out, and the end line is `app spin: stopped: trap fuel`.
 7. Remember that state. It is the baseline and is not printed.
 8. Print `R3ATH3_APP_READY name=<name>` on serial only. The screen is already painted, so the harness can `xp` as soon as it sees this line.
 9. Loop, one step per 10 ticks. While waiting, drain `pop_key` and `yield_now`. `q` ends the app. Any other `Char`, Backspace, or Enter is passed to `r3_key` in order. Then `r3_step`. If the state differs from the baseline or from the previous printed state, print `R3ATH3_APP_STATE name=<name> state=<s>` on serial only, then paint the grid.
-10. Clear the VGA text buffer and print one line on both channels. If graphics mode was entered, restore VGA text mode 3 first. `hello`'s summary length is 0, so quit prints `app hello: quit`. A length from 1 to 60 prints `app <name>: quit; <text>`. A trap prints `app <name>: stopped: trap <word>`.
+10. Clear the VGA text buffer and print one line on both channels. If graphics mode was entered, restore VGA text mode 3 first, including the plane-2 font and DAC entries 0–63. `hello`'s summary length is 0, so quit prints `app hello: quit`. A length from 1 to 60 prints `app <name>: quit; <text>`. A trap prints `app <name>: stopped: trap <word>`.
 
 A quit and a trap both set `last` to ok. The shell then prints `r3> ` the way it does after any other command. It does not reprint the banner.
 
@@ -285,4 +285,4 @@ On seed 1 that reaches `SHIFT_DONE` at step 750 (shift 1) and `next_shift` at st
 
 Each `r3_step` is given the full 1,000,000 fuel budget and must use at most 250,000. The proof does not print the fuel count.
 
-`app-glue` launches `glue-duty`, dumps the title screen, sends Space (state 1), `p` (state 2), `p` (state 1), and `q`. The end line is `app glue-duty: quit; shift 1 score 0 cleaned 0 gum-up 0%`. Quit is success, so the case exits 209. On this shell build `mem` reports `frames_total=15749`.
+`app-glue` launches `glue-duty`, dumps the title screen, sends Space (state 1), `p` (state 2), `p` (state 1), and `q`. The end line is `app glue-duty: quit; shift 1 score 0 cleaned 0 gum-up 0%`. Quit is success, so the case exits 209. On this shell build `mem` reports `frames_total=15746`.

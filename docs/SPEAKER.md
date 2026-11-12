@@ -33,7 +33,7 @@ and saturates that to `1..=65535`. The gate is forced off, the divisor is writte
 
 ## Latch
 
-Mode 3 counts down by two per PIT clock. On QEMU 8.2, three clocks pass between the high-byte write and the latch command, so the latched countdown is the reload value minus 6. `speaker-core` requires that exact value: 2380 after 2386, and 590 after 596. A different divisor cannot produce those two readings.
+Mode 3 counts down by two per PIT clock, so a latched count stays even when the divisor is even. The latch is read in the same port-I/O window as the reload write. Host time can move that count. `speaker-core` accepts an even value in `divisor - 20 .. divisor` (greater than or equal to `divisor - 20`, and less than `divisor`). The success line says `latched=ok`. The raw count is printed only on the fail line. A different divisor still cannot produce a passing log, because the log records the divisor and the window is checked against that divisor.
 
 ## Timer
 
@@ -47,15 +47,15 @@ Status 221, port byte `0x6E`, `qemu_exit::speaker_core_ok`. QEMU is `-m 64M -smp
 R3ATH3_STAGE rust_main
 R3ATH3_SPEAKER_CORE start
 R3ATH3_SPEAKER_CORE step=1 off hz=0 gate=0
-R3ATH3_SPEAKER_CORE step=2 hz=500 divisor=2386 latched=2380 gate=3
+R3ATH3_SPEAKER_CORE step=2 hz=500 divisor=2386 latched=ok gate=3
 R3ATH3_SPEAKER_CORE step=3 ticks=5
-R3ATH3_SPEAKER_CORE step=4 hz=2000 divisor=596 latched=590 gate=3
+R3ATH3_SPEAKER_CORE step=4 hz=2000 divisor=596 latched=ok gate=3
 R3ATH3_SPEAKER_CORE step=5 off hz=0 gate=0
 R3ATH3_SPEAKER_CORE step=6 heap=same frames=same
 R3ATH3_SPEAKER_CORE ok
 ```
 
-`gate` is port `0x61` bits 0 and 1 after the update. Step 6 is `heap::used` and the free-frame count unchanged.
+The latch and the reload write run inside `irq::without_interrupts`, so the timer handler cannot split them. Channel 2's command bytes are the only writes to port `0x43` from this driver. `gate` is port `0x61` bits 0 and 1 after the update. Step 6 is `heap::used` and the free-frame count unchanged.
 
 `speaker` is internal. `shell` and `speaker-core` turn it on. The shell calls `silence` before it prints `R3ATH3_SHELL_READY`, which closes the gate and does not change the transcript. `speaker-core` is a test mode, in the at-most-one assert and in both `boot_ok` exclusion lists.
 

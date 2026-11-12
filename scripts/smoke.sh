@@ -280,12 +280,13 @@ sys.exit(0)
 PY
 }
 
-# The 64 KiB mode-13h buffer is 16 frames. Milestone 11's shell reported
-# frames_total=15765. This shell reports 15749. Eight frames of slack on
-# either side keep a one-page code change inside the window and reject
-# another 64 KiB of .bss. This is not part of judge_shell_mem: that
-# judge's self-test uses a synthetic frames_total of 16000 and must keep
-# passing.
+# The 64 KiB mode-13h buffer is 16 frames. The plane-2 font save and the
+# text DAC add 3 more. Milestone 11's shell reported frames_total=15765.
+# This shell reports 15746, which sits inside the existing window
+# 15741..=15757. That window is eight frames either side of the earlier
+# 15749 figure. It rejects another 64 KiB of .bss. This is not part of
+# judge_shell_mem: that judge's self-test uses a synthetic frames_total
+# of 16000 and must keep passing.
 shell_frames_in_bound() {
   python3 - "$1" <<'PY'
 import re, sys
@@ -1835,6 +1836,8 @@ PY
     judge_fb_core "$FB_CORE_STATUS" "$OUT/task/fb-core.expected" || ok=1
     sed 's/sum=8160000/sum=0/' "$OUT/task/fb-core.expected" >"$dir/fb-core-sum.log"
     if judge_fb_core "$FB_CORE_STATUS" "$dir/fb-core-sum.log"; then ok=1; fi
+    sed 's/font=c8dbddd1/font=00000000/g' "$OUT/task/fb-core.expected" >"$dir/fb-core-font.log"
+    if judge_fb_core "$FB_CORE_STATUS" "$dir/fb-core-font.log"; then ok=1; fi
     if judge_fb_core "$SPEAKER_CORE_STATUS" "$OUT/task/fb-core.expected"; then ok=1; fi
     grep -v 'R3ATH3_FB_CORE ok' "$OUT/task/fb-core.expected" >"$dir/fb-core-nook.log"
     if judge_fb_core "$FB_CORE_STATUS" "$dir/fb-core-nook.log"; then ok=1; fi
@@ -3420,8 +3423,10 @@ fb_core = (
     "R3ATH3_FB_CORE step=2 direct sum=8160000 px0=1 px319=190 px63999=254\n"
     "R3ATH3_FB_CORE step=3 dac0=0,0,0 dac1=0,0,21 dac255=63,63,63\n"
     "R3ATH3_FB_CORE step=4 guest sum=7999385 px0=0 px251=0 px63999=245 absent=ok\n"
-    "R3ATH3_FB_CORE step=5 text gc6=0e crtc9=4f cell=0a41\n"
-    "R3ATH3_FB_CORE step=6 heap=same frames=same\n"
+    "R3ATH3_FB_CORE step=5 text gc6=0e crtc9=4f cell=0a41 font=c8dbddd1 dac07=42,42,42 dac3a=21,63,21 dac3f=63,63,63\n"
+    "app pixels: quit\n"
+    "R3ATH3_FB_CORE step=6 finish gc6=0e crtc9=4f font=c8dbddd1 dac07=42,42,42 dac3a=21,63,21 dac3f=63,63,63\n"
+    "R3ATH3_FB_CORE step=7 heap=same frames=same\n"
     "R3ATH3_FB_CORE ok\n"
 )
 write_bytes("fb-core.expected", fb_core)
@@ -3429,9 +3434,9 @@ speaker_core = (
     "R3ATH3_STAGE rust_main\n"
     "R3ATH3_SPEAKER_CORE start\n"
     "R3ATH3_SPEAKER_CORE step=1 off hz=0 gate=0\n"
-    "R3ATH3_SPEAKER_CORE step=2 hz=500 divisor=2386 latched=2380 gate=3\n"
+    "R3ATH3_SPEAKER_CORE step=2 hz=500 divisor=2386 latched=ok gate=3\n"
     "R3ATH3_SPEAKER_CORE step=3 ticks=5\n"
-    "R3ATH3_SPEAKER_CORE step=4 hz=2000 divisor=596 latched=590 gate=3\n"
+    "R3ATH3_SPEAKER_CORE step=4 hz=2000 divisor=596 latched=ok gate=3\n"
     "R3ATH3_SPEAKER_CORE step=5 off hz=0 gate=0\n"
     "R3ATH3_SPEAKER_CORE step=6 heap=same frames=same\n"
     "R3ATH3_SPEAKER_CORE ok\n"

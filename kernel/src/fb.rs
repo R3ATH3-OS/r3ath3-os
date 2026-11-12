@@ -10,7 +10,11 @@
 //! usually sits above the 1 GiB map. Higher resolution is later.
 //!
 //! Graphics mode is only while a pixel path runs. `enter_text` restores VGA
-//! text mode 3 (80×25). The shell stays a text shell.
+//! text mode 3 (80×25), the plane-2 font, and DAC entries 0–63. Chain-4
+//! writes at `0xA0000` overwrite the glyphs the text renderer reads from
+//! plane 2, and the graphics palette overwrites the text colors. Both are
+//! saved on the first `enter_graphics` and written back in `enter_text`.
+//! The shell stays a text shell.
 //!
 //! # Invariants
 //! One CPU. Main context only. IRQ handlers do not enter this module.
@@ -67,13 +71,47 @@ pub struct FbInfo {
 
 struct FrameBuf(UnsafeCell<[u8; LEN]>);
 
-// SAFETY: one CPU. Only the main context borrows the buffer. IRQ handlers
-// do not enter this module, and a preemption cannot run a second borrower
-// because no other task calls in. The shell task is the only shell caller.
+// SAFETY: one CPU. `with_bytes` is the only borrower. `BUSY` is set before
+// the reference is created and cleared before `with_bytes` returns, so the
+// reference does not escape and a second borrow cannot start. IRQ handlers
+// do not enter this module.
 unsafe impl Sync for FrameBuf {}
 
 static BUFFER: FrameBuf = FrameBuf(UnsafeCell::new([0; LEN]));
+static BUSY: AtomicBool = AtomicBool::new(false);
 static GRAPHICS: AtomicBool = AtomicBool::new(false);
+
+const FONT_BYTES: usize = 256 * 32;
+const DAC_TEXT_BYTES: usize = 64 * 3;
+/// Sequencer map mask: write plane 2 only.
+const FONT_SEQ_MAP: u8 = 0x04;
+/// Sequencer memory mode: extended memory, odd/even off, chain-4 off.
+const FONT_SEQ_MODE: u8 = 0x06;
+/// Graphics read-map select: plane 2.
+const FONT_GC_READ: u8 = 0x02;
+/// Graphics mode: write mode 0, host odd/even off.
+const FONT_GC_MODE: u8 = 0x00;
+/// Graphics misc: map `0xA0000` for 64 KiB, odd/even off.
+const FONT_GC_MISC: u8 = 0x05;
+
+struct TextSave {
+    font: [u8; FONT_BYTES],
+    dac: [u8; DAC_TEXT_BYTES],
+    ready: bool,
+}
+
+struct TextSaveCell(UnsafeCell<TextSave>);
+
+// SAFETY: one CPU, main context only. `enter_graphics` and `enter_text` are
+// the only borrowers, and they do not nest. IRQ handlers do not enter this
+// module.
+unsafe impl Sync for TextSaveCell {}
+
+static TEXT_SAVE: TextSaveCell = TextSaveCell(UnsafeCell::new(TextSave {
+    font: [0; FONT_BYTES],
+    dac: [0; DAC_TEXT_BYTES],
+    ready: false,
+}));
 
 /// Mode 13h. Misc, five sequencer, 25 CRTC, nine graphics, 21 attribute.
 const MODE_13H: [u8; 61] = [
@@ -101,10 +139,18 @@ pub fn info() -> FbInfo {
     }
 }
 
-pub fn bytes() -> &'static mut [u8] {
-    // SAFETY: one CPU, main context only. The caller drops this slice before
-    // the next borrow. IRQ handlers do not enter this module.
-    unsafe { &mut *BUFFER.0.get() }
+/// Borrow the software buffer. `None` means a borrow is already in progress.
+pub fn with_bytes<R>(f: impl FnOnce(&mut [u8]) -> R) -> Option<R> {
+    if BUSY.swap(true, Ordering::Acquire) {
+        return None;
+    }
+    // SAFETY: `BUSY` was false and is now true, so this is the only live
+    // reference to the software buffer. The closure returns before the flag
+    // is cleared, and the reference does not escape. One CPU. IRQ handlers
+    // do not enter this module.
+    let result = f(unsafe { &mut *BUFFER.0.get() });
+    BUSY.store(false, Ordering::Release);
+    Some(result)
 }
 
 pub fn in_graphics() -> bool {
@@ -112,39 +158,44 @@ pub fn in_graphics() -> bool {
 }
 
 /// Program mode 13h and the stable DAC palette. Does not clear the buffer.
+/// The first call saves the plane-2 font and DAC entries 0–63.
 pub fn enter_graphics() {
+    save_text_state();
     write_regs(&MODE_13H);
     write_palette();
     GRAPHICS.store(true, Ordering::Relaxed);
 }
 
-/// Program VGA text mode 3 (80×25). Does not clear the text buffer.
+/// Program VGA text mode 3 (80×25) and write back the saved font and DAC.
+/// Does not clear the text buffer.
 pub fn enter_text() {
     write_regs(&MODE_TEXT);
+    restore_text_state();
     GRAPHICS.store(false, Ordering::Relaxed);
 }
 
 /// Copy `src` into the software buffer. `src` must be exactly `LEN` bytes.
+/// `false` means the length was wrong or the buffer was already borrowed.
 pub fn copy_from(src: &[u8]) -> bool {
     if src.len() != LEN {
         return false;
     }
-    bytes().copy_from_slice(src);
-    true
+    with_bytes(|dst| dst.copy_from_slice(src)).is_some()
 }
 
-/// Copy the software buffer to `0xA0000`.
+/// Copy the software buffer to `0xA0000`. A busy buffer is left unblitted.
 pub fn blit() {
-    let src = bytes();
-    // SAFETY: `0xA0000` is the VGA window inside the identity map. `src` is
-    // the 64,000-byte software buffer, so every index stays inside that
-    // 64 KiB window. One CPU, main context only.
-    unsafe {
-        let hw = HW_BASE as *mut u8;
-        for (index, byte) in src.iter().enumerate() {
-            hw.add(index).write_volatile(*byte);
+    let _ = with_bytes(|src| {
+        // SAFETY: `0xA0000` is the VGA window inside the identity map. `src`
+        // is the 64,000-byte software buffer, so every index stays inside
+        // that 64 KiB window. One CPU, main context only.
+        unsafe {
+            let hw = HW_BASE as *mut u8;
+            for (index, byte) in src.iter().enumerate() {
+                hw.add(index).write_volatile(*byte);
+            }
         }
-    }
+    });
 }
 
 pub fn hw_byte(index: usize) -> Option<u8> {
@@ -216,6 +267,145 @@ pub fn text_cell_roundtrip(value: u16) -> u16 {
     unsafe {
         TEXT_BASE.write_volatile(value);
         TEXT_BASE.read_volatile()
+    }
+}
+
+/// FNV-1a of the 8 KiB plane-2 font (256 glyphs, 32 bytes each).
+pub fn font_fnv() -> u32 {
+    let mut hash = 0x811c_9dc5u32;
+    with_plane2(|plane| {
+        for index in 0..FONT_BYTES {
+            // SAFETY: `index < 8192` and plane 2 is mapped at `0xA0000` for
+            // this call. The address stays inside that window. One CPU, main
+            // context only.
+            let byte = unsafe { plane.add(index).read_volatile() };
+            hash ^= u32::from(byte);
+            hash = hash.wrapping_mul(0x0100_0193);
+        }
+    });
+    hash
+}
+
+/// Sum of the plane-2 font. Zero means the read did not see a font.
+pub fn font_sum() -> u32 {
+    let mut sum = 0u32;
+    with_plane2(|plane| {
+        for index in 0..FONT_BYTES {
+            // SAFETY: same window as `font_fnv`. One CPU, main context only.
+            let byte = unsafe { plane.add(index).read_volatile() };
+            sum = sum.wrapping_add(u32::from(byte));
+        }
+    });
+    sum
+}
+
+fn save_text_state() {
+    // SAFETY: one CPU, main context only. This is the only live borrow of
+    // the save area, and it ends before return. IRQ handlers do not enter
+    // this module.
+    let saved = unsafe { &mut *TEXT_SAVE.0.get() };
+    if saved.ready {
+        return;
+    }
+    read_font(&mut saved.font);
+    read_dac_text(&mut saved.dac);
+    saved.ready = true;
+}
+
+fn restore_text_state() {
+    // SAFETY: same as `save_text_state`. The borrow ends before return.
+    let saved = unsafe { &*TEXT_SAVE.0.get() };
+    if !saved.ready {
+        return;
+    }
+    write_font(&saved.font);
+    write_dac_text(&saved.dac);
+}
+
+fn read_font(dst: &mut [u8; FONT_BYTES]) {
+    with_plane2(|plane| {
+        for (index, slot) in dst.iter_mut().enumerate() {
+            // SAFETY: `index < 8192` inside the plane-2 window at `0xA0000`.
+            // One CPU, main context only.
+            *slot = unsafe { plane.add(index).read_volatile() };
+        }
+    });
+}
+
+fn write_font(src: &[u8; FONT_BYTES]) {
+    with_plane2(|plane| {
+        for (index, byte) in src.iter().enumerate() {
+            // SAFETY: `index < 8192` inside the plane-2 window at `0xA0000`.
+            // One CPU, main context only.
+            unsafe { plane.add(index).write_volatile(*byte) };
+        }
+    });
+}
+
+/// Map plane 2 at `0xA0000`, run `f`, then put sequencer 2/4 and graphics
+/// controller 4/5/6 back.
+fn with_plane2<R>(f: impl FnOnce(*mut u8) -> R) -> R {
+    // SAFETY: sequencer 2 and 4 and graphics-controller 4, 5, and 6 select
+    // the VGA plane. The values below map plane 2 at `0xA0000` for `f`.
+    // Those five registers are written back before return. One CPU, main
+    // context only. Not a PIT or PS/2 port.
+    unsafe {
+        port::outb(SEQ_INDEX, 2);
+        let seq_map = port::inb(SEQ_DATA);
+        port::outb(SEQ_INDEX, 4);
+        let seq_mode = port::inb(SEQ_DATA);
+        port::outb(GC_INDEX, 4);
+        let gc_read = port::inb(GC_DATA);
+        port::outb(GC_INDEX, 5);
+        let gc_mode = port::inb(GC_DATA);
+        port::outb(GC_INDEX, 6);
+        let gc_misc = port::inb(GC_DATA);
+        port::outb(SEQ_INDEX, 2);
+        port::outb(SEQ_DATA, FONT_SEQ_MAP);
+        port::outb(SEQ_INDEX, 4);
+        port::outb(SEQ_DATA, FONT_SEQ_MODE);
+        port::outb(GC_INDEX, 4);
+        port::outb(GC_DATA, FONT_GC_READ);
+        port::outb(GC_INDEX, 5);
+        port::outb(GC_DATA, FONT_GC_MODE);
+        port::outb(GC_INDEX, 6);
+        port::outb(GC_DATA, FONT_GC_MISC);
+        let result = f(HW_BASE as *mut u8);
+        port::outb(SEQ_INDEX, 2);
+        port::outb(SEQ_DATA, seq_map);
+        port::outb(SEQ_INDEX, 4);
+        port::outb(SEQ_DATA, seq_mode);
+        port::outb(GC_INDEX, 4);
+        port::outb(GC_DATA, gc_read);
+        port::outb(GC_INDEX, 5);
+        port::outb(GC_DATA, gc_mode);
+        port::outb(GC_INDEX, 6);
+        port::outb(GC_DATA, gc_misc);
+        result
+    }
+}
+
+fn read_dac_text(dst: &mut [u8; DAC_TEXT_BYTES]) {
+    // SAFETY: `0x3C7` selects DAC entry 0 and `0x3C9` reads three 6-bit
+    // channels per entry, auto-incrementing through entry 63. One CPU, main
+    // context only. Not a PIT or PS/2 port.
+    unsafe {
+        port::outb(DAC_READ_INDEX, 0);
+        for slot in dst.iter_mut() {
+            *slot = port::inb(DAC_DATA) & 0x3F;
+        }
+    }
+}
+
+fn write_dac_text(src: &[u8; DAC_TEXT_BYTES]) {
+    // SAFETY: `0x3C8` selects DAC entry 0 and `0x3C9` writes three 6-bit
+    // channels per entry, auto-incrementing through entry 63. Entries 64–255
+    // are left as the graphics palette. One CPU, main context only.
+    unsafe {
+        port::outb(DAC_WRITE_INDEX, 0);
+        for &byte in src {
+            port::outb(DAC_DATA, byte & 0x3F);
+        }
     }
 }
 

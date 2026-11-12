@@ -1,5 +1,5 @@
 //! `fb-core` proof. Mode 13h, software-buffer blit, DAC, guest `r3_pixels`,
-//! then text mode restored. Safe code only.
+//! text mode restored (font and DAC), and the shell `finish` path. Safe code only.
 
 use core::fmt::Write;
 
@@ -20,10 +20,19 @@ pub fn run() -> ! {
     let free_before = frames::stats().1;
     let _ = write!(serial::Writer, "R3ATH3_FB_CORE start\n");
 
+    let font_before = fb::font_fnv();
+    let dac07 = fb::dac(0x07);
+    let dac3a = fb::dac(0x3A);
+    let dac3f = fb::dac(0x3F);
+    if fb::font_sum() == 0 {
+        fail(5, "font-empty");
+    }
+
     fb::enter_graphics();
     let view = fb::info();
-    let buf_ptr = fb::bytes().as_mut_ptr();
-    let buf_len = fb::bytes().len();
+    let Some((buf_ptr, buf_len)) = fb::with_bytes(|buf| (buf.as_mut_ptr(), buf.len())) else {
+        fail(1, "busy");
+    };
     if view.width != fb::WIDTH
         || view.height != fb::HEIGHT
         || view.stride != fb::STRIDE
@@ -45,11 +54,13 @@ pub fn run() -> ! {
         "R3ATH3_FB_CORE step=1 mode=13h width=320 height=200 stride=320 format=indexed8 gc6=05 crtc9=41\n"
     );
 
-    {
-        let buf = fb::bytes();
+    let filled = fb::with_bytes(|buf| {
         for (index, byte) in buf.iter_mut().enumerate() {
             *byte = direct_byte(index);
         }
+    });
+    if filled.is_none() {
+        fail(2, "busy");
     }
     fb::blit();
     if fb::hardware_sum() != DIRECT_SUM
@@ -83,7 +94,7 @@ pub fn run() -> ! {
         || fb::hw_byte(0) != Some(0)
         || fb::hw_byte(251) != Some(0)
         || fb::hw_byte(63999) != Some(245)
-        || fb::bytes()[1] != 1
+        || byte_at(1) != Some(1)
     {
         fail_sum(4, fb::hardware_sum(), GUEST_SUM);
     }
@@ -92,7 +103,7 @@ pub fn run() -> ! {
         Ok(true) => fail(4, "hello-export"),
         Err(detail) => fail(4, detail),
     }
-    if fb::bytes()[1] != 1 || !fb::in_graphics() {
+    if byte_at(1) != Some(1) || !fb::in_graphics() {
         fail(4, "absent");
     }
     let _ = write!(
@@ -101,23 +112,33 @@ pub fn run() -> ! {
     );
 
     fb::enter_text();
-    let gc6 = fb::gc(0x06);
-    let crtc9 = fb::crtc(0x09);
-    let cell = fb::text_cell_roundtrip(0x0A41);
-    if fb::in_graphics() || gc6 != 0x0E || crtc9 != 0x4F || cell != 0x0A41 {
-        fail_text(gc6, crtc9, cell);
+    if !text_restored(font_before, dac07, dac3a, dac3f) {
+        fail_restore(5, font_before, dac07, dac3a, dac3f);
     }
     let _ = write!(
         serial::Writer,
-        "R3ATH3_FB_CORE step=5 text gc6=0e crtc9=4f cell=0a41\n"
+        "R3ATH3_FB_CORE step=5 text gc6=0e crtc9=4f cell=0a41 font={font_before:08x} dac07={},{},{} dac3a={},{},{} dac3f={},{},{}\n",
+        dac07.0, dac07.1, dac07.2, dac3a.0, dac3a.1, dac3a.2, dac3f.0, dac3f.1, dac3f.2
+    );
+
+    fb::enter_graphics();
+    fb::blit();
+    apps::finish_for_proof();
+    if !finish_restored(font_before, dac07, dac3a, dac3f) {
+        fail_restore(6, font_before, dac07, dac3a, dac3f);
+    }
+    let _ = write!(
+        serial::Writer,
+        "R3ATH3_FB_CORE step=6 finish gc6=0e crtc9=4f font={font_before:08x} dac07={},{},{} dac3a={},{},{} dac3f={},{},{}\n",
+        dac07.0, dac07.1, dac07.2, dac3a.0, dac3a.1, dac3a.2, dac3f.0, dac3f.1, dac3f.2
     );
 
     if heap::used() != heap_before || frames::stats().1 != free_before {
-        fail(6, "changed");
+        fail(7, "changed");
     }
     let _ = write!(
         serial::Writer,
-        "R3ATH3_FB_CORE step=6 heap=same frames=same\n"
+        "R3ATH3_FB_CORE step=7 heap=same frames=same\n"
     );
     let _ = write!(serial::Writer, "R3ATH3_FB_CORE ok\n");
     qemu_exit::fb_core_ok();
@@ -149,6 +170,41 @@ fn load_hello() -> Result<bool, &'static str> {
 
 fn trap_word(trap: Trap) -> &'static str {
     trap.word()
+}
+
+fn byte_at(index: usize) -> Option<u8> {
+    fb::with_bytes(|buf| buf[index])
+}
+
+fn text_restored(
+    font: u32,
+    dac07: (u8, u8, u8),
+    dac3a: (u8, u8, u8),
+    dac3f: (u8, u8, u8),
+) -> bool {
+    !fb::in_graphics()
+        && fb::gc(0x06) == 0x0E
+        && fb::crtc(0x09) == 0x4F
+        && fb::text_cell_roundtrip(0x0A41) == 0x0A41
+        && fb::font_fnv() == font
+        && fb::dac(0x07) == dac07
+        && fb::dac(0x3A) == dac3a
+        && fb::dac(0x3F) == dac3f
+}
+
+fn finish_restored(
+    font: u32,
+    dac07: (u8, u8, u8),
+    dac3a: (u8, u8, u8),
+    dac3f: (u8, u8, u8),
+) -> bool {
+    !fb::in_graphics()
+        && fb::gc(0x06) == 0x0E
+        && fb::crtc(0x09) == 0x4F
+        && fb::font_fnv() == font
+        && fb::dac(0x07) == dac07
+        && fb::dac(0x3A) == dac3a
+        && fb::dac(0x3F) == dac3f
 }
 
 fn direct_byte(index: usize) -> u8 {
@@ -188,10 +244,37 @@ fn fail_dac(d0: (u8, u8, u8), d1: (u8, u8, u8), d255: (u8, u8, u8)) -> ! {
     qemu_exit::fail();
 }
 
-fn fail_text(gc6: u8, crtc9: u8, cell: u16) -> ! {
+fn fail_restore(
+    step: u8,
+    font: u32,
+    dac07: (u8, u8, u8),
+    dac3a: (u8, u8, u8),
+    dac3f: (u8, u8, u8),
+) -> ! {
     let _ = write!(
         serial::Writer,
-        "R3ATH3_FB_CORE fail step=5 detail=text gc6={gc6:02x} crtc9={crtc9:02x} cell={cell:04x}\n"
+        "R3ATH3_FB_CORE fail step={step} detail=restore gc6={:02x} crtc9={:02x} font={:08x} want={font:08x} dac07={},{},{} want={},{},{} dac3a={},{},{} want={},{},{} dac3f={},{},{} want={},{},{}\n",
+        fb::gc(0x06),
+        fb::crtc(0x09),
+        fb::font_fnv(),
+        fb::dac(0x07).0,
+        fb::dac(0x07).1,
+        fb::dac(0x07).2,
+        dac07.0,
+        dac07.1,
+        dac07.2,
+        fb::dac(0x3A).0,
+        fb::dac(0x3A).1,
+        fb::dac(0x3A).2,
+        dac3a.0,
+        dac3a.1,
+        dac3a.2,
+        fb::dac(0x3F).0,
+        fb::dac(0x3F).1,
+        fb::dac(0x3F).2,
+        dac3f.0,
+        dac3f.1,
+        dac3f.2
     );
     qemu_exit::fail();
 }

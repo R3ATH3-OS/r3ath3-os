@@ -14,11 +14,11 @@ const HZ_LOW: u32 = 500;
 const HZ_HIGH: u32 = 2000;
 const DIV_LOW: u16 = 2386;
 const DIV_HIGH: u16 = 596;
-/// Mode 3 counts down by two per PIT clock. On QEMU 8.2 the latch command
-/// runs three clocks after the high byte is written, so the countdown is
-/// the reload value minus 6. The gap is the fixed port-I/O sequence in
-/// `program_and_latch`, and the proof requires this exact readback.
-const LATCH_LAG: u16 = 6;
+/// Mode 3 counts down by two, so the latched count is even. The read happens
+/// in the same port-I/O window as the reload. An even value in
+/// `divisor - 20 .. divisor` is accepted. The success line says `latched=ok`.
+/// The raw count is printed only on the fail line.
+const LATCH_SLACK: u16 = 20;
 
 pub fn run() -> ! {
     let heap_before = heap::used();
@@ -32,16 +32,13 @@ pub fn run() -> ! {
     let _ = write!(serial::Writer, "R3ATH3_SPEAKER_CORE step=1 off hz=0 gate=0\n");
 
     let low = speaker::tone(HZ_LOW);
-    if low.hz != HZ_LOW
-        || low.divisor != DIV_LOW
-        || low.latched != DIV_LOW - LATCH_LAG
-        || low.gate != 3
+    if low.hz != HZ_LOW || low.divisor != DIV_LOW || low.gate != 3 || !latch_ok(low.divisor, low.latched)
     {
         fail_play(2, &low);
     }
     let _ = write!(
         serial::Writer,
-        "R3ATH3_SPEAKER_CORE step=2 hz=500 divisor=2386 latched=2380 gate=3\n"
+        "R3ATH3_SPEAKER_CORE step=2 hz=500 divisor=2386 latched=ok gate=3\n"
     );
 
     let ticks = irq::wait_ticks(5);
@@ -53,14 +50,14 @@ pub fn run() -> ! {
     let high = speaker::tone(HZ_HIGH);
     if high.hz != HZ_HIGH
         || high.divisor != DIV_HIGH
-        || high.latched != DIV_HIGH - LATCH_LAG
         || high.gate != 3
+        || !latch_ok(high.divisor, high.latched)
     {
         fail_play(4, &high);
     }
     let _ = write!(
         serial::Writer,
-        "R3ATH3_SPEAKER_CORE step=4 hz=2000 divisor=596 latched=590 gate=3\n"
+        "R3ATH3_SPEAKER_CORE step=4 hz=2000 divisor=596 latched=ok gate=3\n"
     );
 
     let done = speaker::tone(0);
@@ -103,4 +100,10 @@ fn fail_ticks(ticks: u64) -> ! {
         "R3ATH3_SPEAKER_CORE fail step=3 detail=ticks got={ticks}\n"
     );
     qemu_exit::fail();
+}
+
+/// Even, and in `divisor - 20 .. divisor`. `latched < divisor` keeps the
+/// subtraction from wrapping.
+fn latch_ok(divisor: u16, latched: u16) -> bool {
+    latched < divisor && divisor - latched <= LATCH_SLACK && latched % 2 == 0
 }

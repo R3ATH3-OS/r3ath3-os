@@ -6,7 +6,7 @@
 #![allow(dead_code)]
 
 use crate::wasm::{Instance, ValType};
-#[cfg(feature = "shell")]
+#[cfg(any(feature = "shell", feature = "fb-core"))]
 use crate::wasm::LoadError;
 #[cfg(any(feature = "shell", feature = "wasm-glue", feature = "fb-core"))]
 use crate::wasm::Trap;
@@ -15,7 +15,7 @@ use crate::wasm::Trap;
 use crate::irq::{self, Key};
 #[cfg(feature = "shell")]
 use crate::sched;
-#[cfg(feature = "shell")]
+#[cfg(any(feature = "shell", feature = "fb-core"))]
 use crate::vga;
 
 pub struct App {
@@ -165,7 +165,7 @@ pub fn run_app(app: &'static App) -> bool {
     ran
 }
 
-#[cfg(feature = "shell")]
+#[cfg(any(feature = "shell", feature = "fb-core"))]
 enum End {
     NotLoaded(LoadError),
     Abi,
@@ -261,7 +261,7 @@ fn present(inst: &mut Instance<'_, '_>) -> Result<(), Trap> {
     Ok(())
 }
 
-#[cfg(feature = "shell")]
+#[cfg(any(feature = "shell", feature = "fb-core"))]
 fn finish(name: &str, end: End) {
     if crate::fb::in_graphics() {
         crate::fb::enter_text();
@@ -302,6 +302,12 @@ fn finish(name: &str, end: End) {
     }
 }
 
+/// `fb-core` leaves graphics through the same `finish` the shell uses.
+#[cfg(feature = "fb-core")]
+pub(crate) fn finish_for_proof() {
+    finish("pixels", End::Quit([0; 60], 0));
+}
+
 #[cfg(feature = "shell")]
 fn quit_end(inst: &mut Instance<'_, '_>) -> End {
     match read_summary(inst) {
@@ -336,7 +342,7 @@ pub(crate) fn read_summary(inst: &mut Instance<'_, '_>) -> Result<([u8; 60], usi
     Ok((text, len))
 }
 
-#[cfg(feature = "shell")]
+#[cfg(any(feature = "shell", feature = "fb-core"))]
 fn both(bytes: &[u8]) {
     crate::serial::write_bytes(bytes);
     for &byte in bytes {
@@ -346,7 +352,7 @@ fn both(bytes: &[u8]) {
 
 /// Guest summary bytes on the way to serial or VGA. `0x00` is a space.
 /// Bytes outside `0x20..=0x7E` are `?`. Printable bytes pass through.
-#[cfg(any(feature = "shell", feature = "wasm-glue"))]
+#[cfg(any(feature = "shell", feature = "wasm-glue", feature = "fb-core"))]
 pub(crate) fn printable(byte: u8) -> u8 {
     if byte == 0x00 {
         b' '
@@ -374,7 +380,9 @@ pub fn blit_exported(inst: &mut Instance<'_, '_>) -> Result<bool, Trap> {
     let Some(start) = offset_of(offset, memory.len(), crate::fb::LEN) else {
         return Err(Trap::Memory);
     };
-    crate::fb::enter_graphics();
+    if !crate::fb::in_graphics() {
+        crate::fb::enter_graphics();
+    }
     if !crate::fb::copy_from(&memory[start..start + crate::fb::LEN]) {
         return Err(Trap::Memory);
     }

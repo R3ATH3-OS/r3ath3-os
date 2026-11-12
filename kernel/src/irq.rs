@@ -162,7 +162,7 @@ pub fn ticks() -> u64 {
 
 /// Run `f` with IF clear, then restore IF only if it was set on entry.
 /// Safe code has no other way to disable interrupts.
-#[cfg(feature = "sched")]
+#[cfg(any(feature = "sched", feature = "speaker"))]
 pub fn without_interrupts<R>(f: impl FnOnce() -> R) -> R {
     let flags = read_flags();
     // SAFETY: `cli` clears IF on this one CPU. The restore below sets IF
@@ -184,7 +184,7 @@ pub fn without_interrupts<R>(f: impl FnOnce() -> R) -> R {
     result
 }
 
-#[cfg(feature = "sched")]
+#[cfg(any(feature = "sched", feature = "speaker"))]
 fn read_flags() -> u64 {
     let flags: u64;
     // SAFETY: `pushfq`/`pop` copy RFLAGS into `flags`. The pair is balanced
