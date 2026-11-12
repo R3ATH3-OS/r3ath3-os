@@ -4,7 +4,8 @@
 //! This binary boots, reports CPU exceptions on serial, sets up a bump-allocated
 //! kernel heap and a physical frame allocator, and exits QEMU. The `shell`
 //! feature reads the keyboard instead of taking that exit.
-//! No model, agent, or capability check runs in ring 0.
+//! The model stays outside ring 0. The human gate, when the shell is built,
+//! checks agent requests inside the kernel.
 
 #![no_std]
 #![no_main]
@@ -16,6 +17,10 @@ mod boot;
 mod context;
 mod exceptions;
 mod frames;
+#[cfg(feature = "gate")]
+mod gate;
+#[cfg(any(feature = "gate-core", feature = "gate-expire"))]
+mod gatetest;
 mod heap;
 mod irq;
 mod mem;
@@ -37,7 +42,8 @@ mod sched;
     feature = "sched-preempt",
     feature = "sched-sleep",
     feature = "sched-full",
-    feature = "sched-exit"
+    feature = "sched-exit",
+    feature = "sched-reap"
 ))]
 mod schedtest;
 #[cfg(any(feature = "script", feature = "kbd-script", feature = "shell"))]
@@ -71,6 +77,9 @@ const _: () = {
         + cfg!(feature = "sched-sleep") as u8
         + cfg!(feature = "sched-full") as u8
         + cfg!(feature = "sched-exit") as u8
+        + cfg!(feature = "sched-reap") as u8
+        + cfg!(feature = "gate-core") as u8
+        + cfg!(feature = "gate-expire") as u8
         + cfg!(feature = "shell") as u8;
     assert!(modes <= 1, "enable at most one test feature");
 };
@@ -101,7 +110,11 @@ pub extern "C" fn kernel_main() -> ! {
     {
         // Cooperative proofs leave the timer hook unable to switch. Every
         // other sched build, including the shell, preempts once per tick.
-        let preempt = !cfg!(any(feature = "sched-coop", feature = "sched-full"));
+        let preempt = !cfg!(any(
+            feature = "sched-coop",
+            feature = "sched-full",
+            feature = "sched-reap"
+        ));
         sched::init(preempt);
     }
 
@@ -165,6 +178,15 @@ pub extern "C" fn kernel_main() -> ! {
     #[cfg(feature = "sched-exit")]
     schedtest::run_exit();
 
+    #[cfg(feature = "sched-reap")]
+    schedtest::run_reap();
+
+    #[cfg(feature = "gate-core")]
+    gatetest::run_core();
+
+    #[cfg(feature = "gate-expire")]
+    gatetest::run_expire();
+
     #[cfg(feature = "shell")]
     shell::run();
 
@@ -189,6 +211,9 @@ pub extern "C" fn kernel_main() -> ! {
         feature = "sched-sleep",
         feature = "sched-full",
         feature = "sched-exit",
+        feature = "sched-reap",
+        feature = "gate-core",
+        feature = "gate-expire",
         feature = "shell"
     )))]
     boot_ok();
@@ -215,6 +240,9 @@ pub extern "C" fn kernel_main() -> ! {
     feature = "sched-sleep",
     feature = "sched-full",
     feature = "sched-exit",
+    feature = "sched-reap",
+    feature = "gate-core",
+    feature = "gate-expire",
     feature = "shell"
 )))]
 fn boot_ok() -> ! {

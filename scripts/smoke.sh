@@ -10,9 +10,11 @@
 # 197, frame exhaustion 0x63 → 199, memory init error 0x64 → 201. The heap
 # overflow panic case reuses the panic status 35 on purpose.
 # Shell: exit ok 0x68 → 209, command error 0x69 → 211, line overflow 0x6A → 213,
-# script error 0x6B → 215, halt 0x6C → 217. 0x6D–0x6F (219–223) stay unused.
+# script error 0x6B → 215, halt 0x6C → 217.
 # Scheduler: coop 0x70 → 225, preempt 0x71 → 227, sleep 0x72 → 229,
-# full 0x73 → 231, exit 0x74 → 233.
+# full 0x73 → 231, exit 0x74 → 233, reap 0x75 → 235.
+# Gate: core 0x78 → 241, expire 0x79 → 243.
+# Unused odd statuses: 203–207, 219–223, 237–239, 245–255.
 # A triple-fault or silent reset does not print the fault line and does not
 # use those statuses (this QEMU build has exited 0 on triple fault).
 set -u
@@ -47,6 +49,9 @@ SCHED_PREEMPT_STATUS=227
 SCHED_SLEEP_STATUS=229
 SCHED_FULL_STATUS=231
 SCHED_EXIT_STATUS=233
+SCHED_REAP_STATUS=235
+GATE_CORE_STATUS=241
+GATE_EXPIRE_STATUS=243
 RAM_BYTES=67108864
 HEAP_BYTES=1048576
 HEAP_LINE='R3ATH3_HEAP ok size=1048576 used=([0-9]+) align_max=4096'
@@ -361,6 +366,48 @@ def judge_sched_exit(text):
         b"R3ATH3_STAGE rust_main\n"
         b"R3ATH3_SCHED_EXIT ok rounds=2 spawned=12 ran=12 free=6 heap_delta=0\n"
     )
+
+def judge_sched_reap(text):
+    return text == (
+        b"R3ATH3_STAGE rust_main\n"
+        b"R3ATH3_SCHED_REAP waiters=2 reaped_by=W1 w2_reaped=no free=6\n"
+        b"R3ATH3_SCHED_REAP stale_gen=kept same_gen=reaped\n"
+        b"R3ATH3_SCHED_REAP ok\n"
+    )
+
+def judge_gate_core(text):
+    return text == (
+        b"R3ATH3_STAGE rust_main\n"
+        b"R3ATH3_GATE_CORE step=1 refused=no-badge\n"
+        b"R3ATH3_GATE_CORE step=2 run=read\n"
+        b"R3ATH3_GATE_CORE step=3 refused=no-permission\n"
+        b"R3ATH3_GATE_CORE step=4 pending rq=1\n"
+        b"R3ATH3_GATE_CORE step=5 refused=busy\n"
+        b"R3ATH3_GATE_CORE step=6 wrong=no-pending approved rq=1 action=spawn-nap\n"
+        b"R3ATH3_GATE_CORE step=7 replay=no-pending\n"
+        b"R3ATH3_GATE_CORE step=8 denied rq=2\n"
+        b"R3ATH3_GATE_CORE step=9 cancelled rq=3 then=no-pending next=no-permission\n"
+        b"R3ATH3_GATE_CORE step=10 run=read\n"
+        b"R3ATH3_GATE_CORE step=11 expired rq=4 at=130\n"
+        b"R3ATH3_GATE_CORE step=12 recheck=cancelled rq=5\n"
+        b"R3ATH3_GATE_CORE step=13 removed refused=no-badge full=e\n"
+        b"R3ATH3_GATE_CORE step=14 parse=ok,syntax,too-long,verb,arg,syntax,syntax\n"
+        b"R3ATH3_GATE_CORE ok steps=14\n"
+    )
+
+def judge_gate_expire(text):
+    lines = _lines(text)
+    if len(lines) != 2 or lines[0] != b"R3ATH3_STAGE rust_main":
+        return False
+    match = re.fullmatch(
+        rb"R3ATH3_GATE_EXPIRE ok rq=1 timeout=50 waited=([0-9]+) early_polls=([0-9]+)",
+        lines[1],
+    )
+    if not match:
+        return False
+    waited = int(match.group(1))
+    early = int(match.group(2))
+    return 50 <= waited <= 150 and early >= 1
 PY
 }
 
@@ -406,6 +453,24 @@ judge_sched_exit() {
   local status="$1" file="$2"
   [[ "$status" -eq "$SCHED_EXIT_STATUS" ]] || return 1
   load_harness_py judge_sched_exit "$file"
+}
+
+judge_sched_reap() {
+  local status="$1" file="$2"
+  [[ "$status" -eq "$SCHED_REAP_STATUS" ]] || return 1
+  load_harness_py judge_sched_reap "$file"
+}
+
+judge_gate_core() {
+  local status="$1" file="$2"
+  [[ "$status" -eq "$GATE_CORE_STATUS" ]] || return 1
+  load_harness_py judge_gate_core "$file"
+}
+
+judge_gate_expire() {
+  local status="$1" file="$2"
+  [[ "$status" -eq "$GATE_EXPIRE_STATUS" ]] || return 1
+  load_harness_py judge_gate_expire "$file"
 }
 
 judge_exact() {
@@ -627,6 +692,20 @@ reject(b"hi\nxxr3> ", 0, b"hi")
 reject(b"\nr3> ", 0, b"help")
 if not all(checks):
     sys.exit(1)
+keys = []
+def kaccept(data, start):
+    keys.append(mod.keys_at_prompt(data, start))
+def kreject(data, start):
+    keys.append(not mod.keys_at_prompt(data, start))
+sample = b"x\nr3> "
+kaccept(sample, 0)
+kreject(sample, len(sample))
+kreject(b"xr3> ", 0)
+kreject(b"\nr3> x", 0)
+kreject(b"xxr3> ", 0)
+kreject("x\nr3> ", 0)
+if not all(keys):
+    sys.exit(1)
 PY
   then
     ok=1
@@ -744,6 +823,65 @@ EOF
   if judge_sched_full "$SCHED_EXIT_STATUS" "$dir/sched-full.log"; then ok=1; fi
   if judge_sched_exit "$SCHED_FULL_STATUS" "$dir/sched-exit.log"; then ok=1; fi
 
+  printf '%s\n' \
+    "R3ATH3_STAGE rust_main" \
+    "R3ATH3_SCHED_REAP waiters=2 reaped_by=W1 w2_reaped=no free=6" \
+    "R3ATH3_SCHED_REAP stale_gen=kept same_gen=reaped" \
+    "R3ATH3_SCHED_REAP ok" >"$dir/sched-reap.log"
+  sed '1d' "$dir/sched-reap.log" >"$dir/sched-reap-short.log"
+  python3 - "$dir/sched-reap.log" "$dir/sched-reap-swap.log" <<'PY'
+import sys
+src, dst = sys.argv[1:]
+lines = open(src, "rb").read().splitlines(True)
+lines[1], lines[2] = lines[2], lines[1]
+open(dst, "wb").write(b"".join(lines))
+PY
+  judge_sched_reap "$SCHED_REAP_STATUS" "$dir/sched-reap.log" || ok=1
+  if judge_sched_reap "$GATE_CORE_STATUS" "$dir/sched-reap.log"; then ok=1; fi
+  if judge_sched_reap "$SCHED_REAP_STATUS" "$dir/sched-reap-short.log"; then ok=1; fi
+  if judge_sched_reap "$SCHED_REAP_STATUS" "$dir/sched-reap-swap.log"; then ok=1; fi
+
+  cat >"$dir/gate-core.log" <<'EOF'
+R3ATH3_STAGE rust_main
+R3ATH3_GATE_CORE step=1 refused=no-badge
+R3ATH3_GATE_CORE step=2 run=read
+R3ATH3_GATE_CORE step=3 refused=no-permission
+R3ATH3_GATE_CORE step=4 pending rq=1
+R3ATH3_GATE_CORE step=5 refused=busy
+R3ATH3_GATE_CORE step=6 wrong=no-pending approved rq=1 action=spawn-nap
+R3ATH3_GATE_CORE step=7 replay=no-pending
+R3ATH3_GATE_CORE step=8 denied rq=2
+R3ATH3_GATE_CORE step=9 cancelled rq=3 then=no-pending next=no-permission
+R3ATH3_GATE_CORE step=10 run=read
+R3ATH3_GATE_CORE step=11 expired rq=4 at=130
+R3ATH3_GATE_CORE step=12 recheck=cancelled rq=5
+R3ATH3_GATE_CORE step=13 removed refused=no-badge full=e
+R3ATH3_GATE_CORE step=14 parse=ok,syntax,too-long,verb,arg,syntax,syntax
+R3ATH3_GATE_CORE ok steps=14
+EOF
+  sed '3d' "$dir/gate-core.log" >"$dir/gate-core-short.log"
+  python3 - "$dir/gate-core.log" "$dir/gate-core-swap.log" <<'PY'
+import sys
+src, dst = sys.argv[1:]
+lines = open(src, "rb").read().splitlines(True)
+lines[1], lines[2] = lines[2], lines[1]
+open(dst, "wb").write(b"".join(lines))
+PY
+  judge_gate_core "$GATE_CORE_STATUS" "$dir/gate-core.log" || ok=1
+  if judge_gate_core "$GATE_EXPIRE_STATUS" "$dir/gate-core.log"; then ok=1; fi
+  if judge_gate_core "$GATE_CORE_STATUS" "$dir/gate-core-short.log"; then ok=1; fi
+  if judge_gate_core "$GATE_CORE_STATUS" "$dir/gate-core-swap.log"; then ok=1; fi
+
+  printf '%s\n' "R3ATH3_STAGE rust_main" "R3ATH3_GATE_EXPIRE ok rq=1 timeout=50 waited=50 early_polls=9" >"$dir/gate-expire.log"
+  printf '%s\n' "R3ATH3_STAGE rust_main" "R3ATH3_GATE_EXPIRE ok rq=1 timeout=50 waited=49 early_polls=9" >"$dir/gate-expire-early.log"
+  printf '%s\n' "R3ATH3_STAGE rust_main" "R3ATH3_GATE_EXPIRE ok rq=1 timeout=50 waited=200 early_polls=9" >"$dir/gate-expire-late.log"
+  printf '%s\n' "R3ATH3_STAGE rust_main" "R3ATH3_GATE_EXPIRE ok rq=1 timeout=50 waited=50 early_polls=0" >"$dir/gate-expire-zero.log"
+  judge_gate_expire "$GATE_EXPIRE_STATUS" "$dir/gate-expire.log" || ok=1
+  if judge_gate_expire "$GATE_CORE_STATUS" "$dir/gate-expire.log"; then ok=1; fi
+  if judge_gate_expire "$GATE_EXPIRE_STATUS" "$dir/gate-expire-early.log"; then ok=1; fi
+  if judge_gate_expire "$GATE_EXPIRE_STATUS" "$dir/gate-expire-late.log"; then ok=1; fi
+  if judge_gate_expire "$GATE_EXPIRE_STATUS" "$dir/gate-expire-zero.log"; then ok=1; fi
+
   if ! write_shell_cases; then
     ok=1
   else
@@ -754,6 +892,25 @@ EOF
     if judge_exact "$SHELL_OK_STATUS" "$OUT/task/shell-edge.expected" "$SHELL_OVERFLOW_STATUS" "$OUT/task/shell-edge.expected"; then ok=1; fi
     if judge_exact "$SHELL_OK_STATUS" "$OUT/task/shell-ps.expected" "$SHELL_OK_STATUS" "$OUT/task/shell-wait.expected"; then ok=1; fi
     if judge_exact "$SHELL_CMD_STATUS" "$OUT/task/shell-usage.expected" "$SHELL_CMD_STATUS" "$OUT/task/shell-sched-error.expected"; then ok=1; fi
+    judge_exact "$SHELL_OK_STATUS" "$OUT/task/gate-approve.expected" "$SHELL_OK_STATUS" "$OUT/task/gate-approve.expected" || ok=1
+    judge_exact "$SHELL_OK_STATUS" "$OUT/task/gate-noperm.expected" "$SHELL_OK_STATUS" "$OUT/task/gate-noperm.expected" || ok=1
+    judge_exact "$SHELL_OK_STATUS" "$OUT/task/gate-revoke.expected" "$SHELL_OK_STATUS" "$OUT/task/gate-revoke.expected" || ok=1
+    judge_exact "$SHELL_CMD_STATUS" "$OUT/task/gate-sneak.expected" "$SHELL_CMD_STATUS" "$OUT/task/gate-sneak.expected" || ok=1
+    judge_exact "$SHELL_HALT_STATUS" "$OUT/task/gate-halt.expected" "$SHELL_HALT_STATUS" "$OUT/task/gate-halt.expected" || ok=1
+    judge_exact "$SHELL_CMD_STATUS" "$OUT/task/gate-usage.expected" "$SHELL_CMD_STATUS" "$OUT/task/gate-usage.expected" || ok=1
+    judge_exact "$SHELL_CMD_STATUS" "$OUT/task/shell-sched-args.expected" "$SHELL_CMD_STATUS" "$OUT/task/shell-sched-args.expected" || ok=1
+    if judge_exact "$SHELL_CMD_STATUS" "$OUT/task/gate-approve.expected" "$SHELL_OK_STATUS" "$OUT/task/gate-approve.expected"; then ok=1; fi
+    if judge_exact "$SHELL_CMD_STATUS" "$OUT/task/gate-noperm.expected" "$SHELL_OK_STATUS" "$OUT/task/gate-noperm.expected"; then ok=1; fi
+    if judge_exact "$SHELL_CMD_STATUS" "$OUT/task/gate-revoke.expected" "$SHELL_OK_STATUS" "$OUT/task/gate-revoke.expected"; then ok=1; fi
+    if judge_exact "$SHELL_OK_STATUS" "$OUT/task/gate-sneak.expected" "$SHELL_CMD_STATUS" "$OUT/task/gate-sneak.expected"; then ok=1; fi
+    if judge_exact "$SHELL_OK_STATUS" "$OUT/task/gate-halt.expected" "$SHELL_HALT_STATUS" "$OUT/task/gate-halt.expected"; then ok=1; fi
+    if judge_exact "$SHELL_OK_STATUS" "$OUT/task/gate-usage.expected" "$SHELL_CMD_STATUS" "$OUT/task/gate-usage.expected"; then ok=1; fi
+    if judge_exact "$SHELL_OK_STATUS" "$OUT/task/shell-sched-args.expected" "$SHELL_CMD_STATUS" "$OUT/task/shell-sched-args.expected"; then ok=1; fi
+    if judge_exact "$SHELL_OK_STATUS" "$OUT/task/gate-approve.expected" "$SHELL_OK_STATUS" "$OUT/task/gate-noperm.expected"; then ok=1; fi
+    if judge_exact "$SHELL_OK_STATUS" "$OUT/task/gate-revoke.expected" "$SHELL_OK_STATUS" "$OUT/task/gate-approve.expected"; then ok=1; fi
+    if judge_exact "$SHELL_CMD_STATUS" "$OUT/task/gate-sneak.expected" "$SHELL_CMD_STATUS" "$OUT/task/gate-usage.expected"; then ok=1; fi
+    if judge_exact "$SHELL_CMD_STATUS" "$OUT/task/shell-sched-args.expected" "$SHELL_CMD_STATUS" "$OUT/task/shell-sched-error.expected"; then ok=1; fi
+    if judge_exact "$SHELL_HALT_STATUS" "$OUT/task/gate-halt.expected" "$SHELL_HALT_STATUS" "$OUT/task/shell-halt.expected"; then ok=1; fi
   fi
 
   if [[ "$ok" -eq 0 ]]; then
@@ -1209,6 +1366,11 @@ help_text = (
     "ps          list tasks\n"
     "spawn DEMO  start demo task spin or nap\n"
     "wait ID     wait for a task to exit\n"
+    "badges      list AI badges and the waiting request\n"
+    "grant A P   give agent A permission P\n"
+    "revoke A P  take permission P (or all) from agent A\n"
+    "approve N   let gate request N run\n"
+    "deny N      refuse gate request N\n"
     "run SCRIPT  run a task script, lines separated by ;\n"
     "exit        leave the shell with the last status\n"
     "halt        stop the machine\n"
@@ -1550,6 +1712,225 @@ for row in range(HEIGHT):
     chunk = console.cells[row * WIDTH : (row + 1) * WIDTH]
     lines.append(" ".join(f"{cell:04X}" for cell in chunk))
 open(out + "/task/shell-screen.vga", "w", encoding="ascii").write("\n".join(lines) + "\n")
+
+nap_explain = "start demo task nap (sleeps 0.2 s, then exits)"
+spin_explain = "start demo task spin (runs forever; no way to stop it)"
+halt_explain = "stop the machine (ends this session)"
+ps_two = (
+    "task id=0 name=shell state=running\n"
+    "task id=1 name=idle state=ready\n"
+)
+exit_cmd = "R3ATH3_SHELL_EXIT last=cmd\n"
+
+def pending_block(rq, agent, explain, seq, verb):
+    return (
+        "\n"
+        + "gate: request %d from %s wants to:\n" % (rq, agent)
+        + "gate:   %s\n" % explain
+        + "gate: type approve %d or deny %d within 60 s\n" % (rq, rq)
+        + "R3GATE reply agent=%s seq=%d verb=%s result=pending rq=%d\n" % (agent, seq, verb, rq)
+        + p
+    )
+
+def refused(agent, human, seq, verb, reason):
+    return (
+        "\n"
+        + "gate: refused %s: %s\n" % (agent, human)
+        + "R3GATE reply agent=%s seq=%d verb=%s result=denied reason=%s\n" % (agent, seq, verb, reason)
+        + p
+    )
+
+def bad_line(reason, agent="-", seq="-", verb="-"):
+    return (
+        "\n"
+        + "gate: ignored a bad request line (%s)\n" % reason
+        + "R3GATE reply agent=%s seq=%s verb=%s result=bad reason=%s\n" % (agent, seq, verb, reason)
+        + p
+    )
+
+def typed(text, output):
+    return text + "\n" + output + "\n" + p
+
+write_text(
+    "gate-approve.steps",
+    "line grant ai1 spawn\nai R3GATE ASK ai1 1 spawn nap\nline ps\nline approve 1\nline wait 2\nline exit\n",
+)
+write_bytes(
+    "gate-approve.expected",
+    prefix
+    + typed("grant ai1 spawn", "granted ai1 spawn")
+    + pending_block(1, "ai1", nap_explain, 1, "spawn")
+    + typed("ps", ps_two[:-1])
+    + "approve 1\n"
+    + "gate: request 1 approved: started task 2 (nap)\n"
+    + "R3GATE reply agent=ai1 seq=1 verb=spawn result=done rq=1 id=2\n"
+    + p
+    + typed("wait 2", "exited id=2")
+    + "exit\n"
+    + exit_ok,
+)
+
+write_text(
+    "gate-noperm.steps",
+    "ai R3GATE ASK ai1 1 read\n"
+    "line grant ai1 read\n"
+    "ai R3GATE ASK ai1 2 spawn nap\n"
+    "ai R3GATE ASK ai1 3 read\n"
+    "line badges\n"
+    "line ps\n"
+    "line exit\n",
+)
+write_bytes(
+    "gate-noperm.expected",
+    prefix
+    + refused("ai1", "no badge", 1, "read", "no-badge")
+    + typed("grant ai1 read", "granted ai1 read")
+    + refused("ai1", "no permission to spawn", 2, "spawn", "no-permission")
+    + "\n"
+    + "gate: ai1 read the work orders\n"
+    + "R3GATE data seq=3 n=1 text=WO-1 check spindle oil level on mill 2\n"
+    + "R3GATE data seq=3 n=2 text=WO-2 replace air filter on compressor A\n"
+    + "R3GATE data seq=3 n=3 text=WO-3 log hours for weekly maintenance\n"
+    + "R3GATE reply agent=ai1 seq=3 verb=read result=done\n"
+    + p
+    + typed("badges", "badge ai1 may=read\nno pending request")
+    + typed("ps", ps_two[:-1])
+    + "exit\n"
+    + exit_ok,
+)
+
+write_text(
+    "gate-revoke.steps",
+    "line grant ai1 spawn\n"
+    "line grant ai1 say\n"
+    "ai R3GATE ASK ai1 1 spawn nap\n"
+    "line revoke ai1 spawn\n"
+    "line approve 1\n"
+    "ai R3GATE ASK ai1 2 spawn nap\n"
+    "ai R3GATE ASK ai1 3 say still here\n"
+    "line revoke ai1 all\n"
+    "ai R3GATE ASK ai1 4 say hi\n"
+    "line badges\n"
+    "line ps\n"
+    "line exit\n",
+)
+write_bytes(
+    "gate-revoke.expected",
+    prefix
+    + typed("grant ai1 spawn", "granted ai1 spawn")
+    + typed("grant ai1 say", "granted ai1 say")
+    + pending_block(1, "ai1", nap_explain, 1, "spawn")
+    + "revoke ai1 spawn\n"
+    + "revoked ai1 spawn\n"
+    + "gate: request 1 cancelled: ai1 may no longer spawn\n"
+    + "R3GATE reply agent=ai1 seq=1 verb=spawn result=denied rq=1 reason=revoked\n"
+    + p
+    + typed("approve 1", "error: no pending request 1")
+    + refused("ai1", "no permission to spawn", 2, "spawn", "no-permission")
+    + "\n"
+    + "ai1 says: still here\n"
+    + "R3GATE reply agent=ai1 seq=3 verb=say result=done\n"
+    + p
+    + typed("revoke ai1 all", "revoked ai1 all")
+    + refused("ai1", "no badge", 4, "say", "no-badge")
+    + typed("badges", "no badges\nno pending request")
+    + typed("ps", ps_two[:-1])
+    + "exit\n"
+    + exit_ok,
+)
+
+long_say = "R3GATE ASK ai1 2 say " + ("x" * 70)
+write_text(
+    "gate-sneak.steps",
+    "ai halt\n"
+    "ai R3GATE ASK ai1 1 approve 1\n"
+    "ai " + long_say + "\n"
+    "line grant ai1 spawn\n"
+    "ai R3GATE ASK ai1 3 spawn spin\n"
+    "ai R3GATE ASK ai1 4 spawn nap\n"
+    "ai R3GATE ASK ai1 5 halt\n"
+    "line approve 2\n"
+    "line approve\n"
+    "line deny 1\n"
+    "line ps\n"
+    "line approve 1\n"
+    "line exit\n",
+)
+write_bytes(
+    "gate-sneak.expected",
+    prefix
+    + bad_line("syntax")
+    + bad_line("verb", "ai1", "1", "-")
+    + bad_line("too-long")
+    + typed("grant ai1 spawn", "granted ai1 spawn")
+    + pending_block(1, "ai1", spin_explain, 3, "spawn")
+    + refused("ai1", "another request is waiting", 4, "spawn", "busy")
+    + refused("ai1", "no permission to halt", 5, "halt", "no-permission")
+    + typed("approve 2", "error: no pending request 2")
+    + typed("approve", "error: usage: approve N")
+    + "deny 1\n"
+    + "gate: request 1 denied\n"
+    + "R3GATE reply agent=ai1 seq=3 verb=spawn result=denied rq=1 reason=human\n"
+    + p
+    + typed("ps", ps_two[:-1])
+    + typed("approve 1", "error: no pending request 1")
+    + "exit\n"
+    + exit_cmd,
+)
+
+write_text(
+    "gate-halt.steps",
+    "line grant ai1 halt\nai R3GATE ASK ai1 1 halt\nline badges\nline approve 1\n",
+)
+write_bytes(
+    "gate-halt.expected",
+    prefix
+    + typed("grant ai1 halt", "granted ai1 halt")
+    + pending_block(1, "ai1", halt_explain, 1, "halt")
+    + typed("badges", "badge ai1 may=halt\npending rq=1 agent=ai1 action=halt")
+    + "approve 1\n"
+    + "gate: request 1 approved: stopping the machine\n"
+    + "R3GATE reply agent=ai1 seq=1 verb=halt result=done rq=1\n"
+    + "R3ATH3_SHELL_HALT\n",
+)
+
+usage_steps = [
+    ("grant", "error: usage: grant AGENT PERM"),
+    ("grant ai1", "error: usage: grant AGENT PERM"),
+    ("grant ai1 fly", "error: unknown permission: fly"),
+    ("grant AI1 read", "error: bad agent name: AI1"),
+    ("grant abcdefghi read", "error: bad agent name: abcdefghi"),
+    ("grant a read", "granted a read"),
+    ("grant b read", "granted b read"),
+    ("grant c read", "granted c read"),
+    ("grant d read", "granted d read"),
+    ("grant e read", "error: badge table full"),
+    ("revoke", "error: usage: revoke AGENT PERM"),
+    ("revoke zz read", "error: no badge zz"),
+    ("revoke a fly", "error: unknown permission: fly"),
+    ("approve x", "error: no pending request x"),
+    ("deny", "error: usage: deny N"),
+    ("badges x", "error: usage: badges"),
+]
+write_text("gate-usage.steps", "".join("line " + text + "\n" for text, _ in usage_steps) + "line exit\n")
+usage_body = "".join(typed(text, output) for text, output in usage_steps)
+write_bytes("gate-usage.expected", prefix + usage_body + "exit\n" + exit_cmd)
+
+write_text(
+    "shell-sched-args.steps",
+    "line wait\nline wait 2 3\nline wait abc\nline wait 99\nline spawn a b\nline exit\n",
+)
+write_bytes(
+    "shell-sched-args.expected",
+    prefix
+    + typed("wait", "error: usage: wait ID")
+    + typed("wait 2 3", "error: usage: wait ID")
+    + typed("wait abc", "error: no task abc")
+    + typed("wait 99", "error: no task 99")
+    + typed("spawn a b", "error: usage: spawn DEMO")
+    + "exit\n"
+    + exit_cmd,
+)
 PY
 }
 
@@ -1836,6 +2217,283 @@ PY
   fi
 }
 
+expect_gate() {
+  local name="$1"
+  local seconds="$2"
+  local steps="$3"
+  local expected="$4"
+  local want="$5"
+  local log_file="$OUT/$name.serial.log"
+  local err_file="$OUT/$name.qemu.err"
+  local sock="$OUT/$name.mon.sock"
+  local ser="$OUT/$name.ser.sock"
+  local elf="$OUT/shell.elf"
+  rm -f "$sock" "$ser" "$log_file"
+  set +e
+  timeout --foreground --kill-after=5s "$seconds" python3 - \
+    "$elf" "$log_file" "$err_file" "$seconds" "$steps" "$sock" "$ser" "$OUT/harness_py.py" <<'PY'
+import importlib.util, os, signal, socket, subprocess, sys, time
+elf, out_log, err_log, seconds, steps_path, sock_path, ser_path, harness_path = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("harness_py", harness_path)
+harness = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(harness)
+for path in (out_log, ser_path, sock_path):
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+err_f = open(err_log, "wb")
+proc = subprocess.Popen(
+    [
+        "qemu-system-x86_64", "-machine", "pc,accel=tcg", "-cpu", "qemu64",
+        "-m", "64M", "-smp", "1", "-kernel", elf, "-nic", "none",
+        "-display", "none", "-vga", "std",
+        "-chardev", "socket,id=com1,path=" + ser_path + ",server=on,wait=on",
+        "-serial", "chardev:com1",
+        "-monitor", "unix:" + sock_path + ",server,nowait",
+        "-no-reboot",
+        "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+    ],
+    stdout=subprocess.DEVNULL, stderr=err_f,
+)
+buf = b""
+ser = None
+deadline = time.time() + float(seconds)
+
+def read_serial():
+    global buf
+    if ser is None:
+        return buf
+    while True:
+        try:
+            chunk = ser.recv(4096)
+        except BlockingIOError:
+            break
+        except InterruptedError:
+            continue
+        if not chunk:
+            break
+        buf += chunk
+    return buf
+
+def flush_log():
+    try:
+        read_serial()
+    except Exception:
+        pass
+    try:
+        open(out_log, "wb").write(buf)
+    except OSError:
+        pass
+
+def stop(_signum, _frame):
+    flush_log()
+    if proc.poll() is None:
+        proc.kill()
+    sys.exit(124)
+
+signal.signal(signal.SIGTERM, stop)
+
+def fail(code, message):
+    sys.stderr.write(message + "\n")
+    try:
+        err_f.write((message + "\n").encode())
+        err_f.flush()
+    except OSError:
+        pass
+    if proc.poll() is None:
+        proc.kill()
+        proc.wait()
+    flush_log()
+    sys.exit(code)
+
+def connect(path, tries, delay):
+    for _ in range(tries):
+        if os.path.exists(path):
+            candidate = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                candidate.connect(path)
+                return candidate
+            except OSError:
+                candidate.close()
+        if proc.poll() is not None:
+            break
+        time.sleep(delay)
+    return None
+
+ser_conn = connect(ser_path, 50, 0.05)
+if ser_conn is None:
+    fail(1, "serial socket did not connect: " + ser_path)
+ser = ser_conn
+ser.setblocking(False)
+mon = connect(sock_path, 50, 0.05)
+if mon is None:
+    fail(1, "monitor socket did not appear: " + sock_path)
+mon.settimeout(0.2)
+try:
+    mon.recv(4096)
+except Exception:
+    pass
+
+READY_ECHO = b"R3ATH3_SHELL_READY\nR3@TH3 shell. Type help for commands."
+
+def step_settled(data, start, echo, keys_mode):
+    if keys_mode:
+        return harness.keys_at_prompt(data, start)
+    return harness.idle_at_prompt(data, start, echo)
+
+def wait_stable(start, echo, keys_mode):
+    limit = time.time() + 5
+    while time.time() < limit and time.time() < deadline:
+        data = read_serial()
+        if step_settled(data, start, echo, keys_mode):
+            time.sleep(0.05)
+            data2 = read_serial()
+            if len(data2) == len(data) and step_settled(data2, start, echo, keys_mode):
+                return True
+            continue
+        if proc.poll() is not None:
+            return False
+        time.sleep(0.02)
+    return False
+
+def wait_ai(start):
+    limit = time.time() + 5
+    while time.time() < limit and time.time() < deadline:
+        data = read_serial()
+        if b"R3GATE reply " in data[start:] and harness.prompt_anchored(data):
+            time.sleep(0.05)
+            data2 = read_serial()
+            if len(data2) == len(data) and b"R3GATE reply " in data2[start:] and harness.prompt_anchored(data2):
+                return True
+            continue
+        if proc.poll() is not None:
+            return False
+        time.sleep(0.02)
+    return False
+
+PLAIN = {
+    " ": "spc",
+    "-": "minus",
+    "=": "equal",
+    ";": "semicolon",
+    "'": "apostrophe",
+}
+SHIFTED = {
+    "!": "1", "@": "2", "#": "3", "$": "4", "%": "5",
+    "^": "6", "&": "7", "*": "8", "(": "9", ")": "0",
+    "_": "minus", "+": "equal", ":": "semicolon", '"': "apostrophe",
+}
+
+def qcodes_for_text(text):
+    keys = []
+    for ch in text:
+        if ("a" <= ch <= "z") or ("0" <= ch <= "9"):
+            keys.append(ch)
+        elif "A" <= ch <= "Z":
+            keys.append("shift-" + ch.lower())
+        elif ch in PLAIN:
+            keys.append(PLAIN[ch])
+        elif ch in SHIFTED:
+            keys.append("shift-" + SHIFTED[ch])
+        else:
+            fail(2, "no qcode for " + repr(ch))
+    keys.append("ret")
+    return keys
+
+steps = []
+for raw in open(steps_path, "r", encoding="utf-8"):
+    raw = raw.rstrip("\n")
+    if raw == "" or raw.startswith("#"):
+        continue
+    if raw == "line":
+        steps.append(("line", qcodes_for_text(""), b""))
+    elif raw.startswith("line "):
+        steps.append(("line", qcodes_for_text(raw[5:]), raw[5:].encode("utf-8")))
+    elif raw.startswith("keys "):
+        steps.append(("keys", raw[5:].split(), None))
+    elif raw.startswith("ai "):
+        steps.append(("ai", raw[3:], None))
+    else:
+        fail(2, "bad step " + raw)
+
+ready_deadline = min(deadline, time.time() + 5)
+ready = False
+while time.time() < ready_deadline:
+    if proc.poll() is not None:
+        break
+    data = read_serial()
+    if harness.idle_at_prompt(data, 0, READY_ECHO):
+        time.sleep(0.05)
+        data2 = read_serial()
+        if len(data2) == len(data) and harness.idle_at_prompt(data2, 0, READY_ECHO):
+            ready = True
+            break
+        continue
+    time.sleep(0.02)
+if not ready:
+    fail(124, "timed out waiting for the shell prompt")
+
+def send_keys(keys):
+    for key in keys:
+        try:
+            mon.sendall(("sendkey " + key + "\n").encode())
+        except OSError:
+            return False
+        time.sleep(0.03)
+    return True
+
+for index, (kind, payload, echo) in enumerate(steps):
+    last = index + 1 == len(steps)
+    if kind in ("line", "keys"):
+        start = len(read_serial())
+        if not send_keys(payload):
+            fail(1, "monitor closed while sending keys")
+        if not last and not wait_stable(start, echo, kind == "keys"):
+            fail(124, "timed out waiting for the next prompt")
+    elif kind == "ai":
+        start = len(read_serial())
+        view = memoryview((payload + "\n").encode("utf-8"))
+        try:
+            for offset in range(0, len(view), 8):
+                ser.sendall(view[offset:offset + 8])
+                time.sleep(0.001)
+        except OSError:
+            fail(1, "serial closed while sending an agent line")
+        if not wait_ai(start):
+            fail(124, "timed out waiting for the gate reply")
+    else:
+        fail(2, "unknown step " + kind)
+
+while proc.poll() is None:
+    read_serial()
+    if time.time() > deadline:
+        fail(124, "timed out waiting for QEMU to exit")
+    time.sleep(0.02)
+code = proc.wait()
+try:
+    mon.close()
+except OSError:
+    pass
+flush_log()
+sys.exit(code if code is not None else 124)
+PY
+  local status=$?
+  set -e
+  if judge_exact "$status" "$log_file" "$want" "$expected"; then
+    log "[PASS] $name exit=$status"
+  else
+    log "[FAIL] $name exit=$status"
+    log "----- serial -----"
+    cat "$log_file" 2>/dev/null || true
+    log "----- expected -----"
+    cat "$expected" 2>/dev/null || true
+    log "----- qemu stderr -----"
+    cat "$err_file" 2>/dev/null || true
+    FAILURES=$((FAILURES + 1))
+  fi
+}
+
 expect_case() {
   local name="$1"
   local judge="$2"
@@ -1951,6 +2609,15 @@ else
   if build_kernel sched-exit sched-exit; then
     expect_case sched-exit judge_sched_exit 12
   fi
+  if build_kernel sched-reap sched-reap; then
+    expect_case sched-reap judge_sched_reap 12
+  fi
+  if build_kernel gate-core gate-core; then
+    expect_case gate-core judge_gate_core 12
+  fi
+  if build_kernel gate-expire gate-expire; then
+    expect_case gate-expire judge_gate_expire 12
+  fi
   if build_kernel shell shell; then
     if write_shell_cases; then
       expect_shell shell-basic 12 "$OUT/task/shell-basic.steps" "$OUT/task/shell-basic.expected" "$SHELL_OK_STATUS" exact
@@ -1967,6 +2634,13 @@ else
       expect_shell shell-sched-error 20 "$OUT/task/shell-sched-error.steps" "$OUT/task/shell-sched-error.expected" "$SHELL_CMD_STATUS" exact
       expect_shell shell-usage 12 "$OUT/task/shell-usage.steps" "$OUT/task/shell-usage.expected" "$SHELL_CMD_STATUS" exact
       expect_shell shell-edge 20 "$OUT/task/shell-edge.steps" "$OUT/task/shell-edge.expected" "$SHELL_OVERFLOW_STATUS" exact
+      expect_gate gate-approve 12 "$OUT/task/gate-approve.steps" "$OUT/task/gate-approve.expected" "$SHELL_OK_STATUS"
+      expect_gate gate-noperm 12 "$OUT/task/gate-noperm.steps" "$OUT/task/gate-noperm.expected" "$SHELL_OK_STATUS"
+      expect_gate gate-revoke 12 "$OUT/task/gate-revoke.steps" "$OUT/task/gate-revoke.expected" "$SHELL_OK_STATUS"
+      expect_gate gate-sneak 12 "$OUT/task/gate-sneak.steps" "$OUT/task/gate-sneak.expected" "$SHELL_CMD_STATUS"
+      expect_gate gate-halt 12 "$OUT/task/gate-halt.steps" "$OUT/task/gate-halt.expected" "$SHELL_HALT_STATUS"
+      expect_gate gate-usage 20 "$OUT/task/gate-usage.steps" "$OUT/task/gate-usage.expected" "$SHELL_CMD_STATUS"
+      expect_shell shell-sched-args 12 "$OUT/task/shell-sched-args.steps" "$OUT/task/shell-sched-args.expected" "$SHELL_CMD_STATUS" exact
     else
       log "[FAIL] write shell cases"
       FAILURES=$((FAILURES + 1))

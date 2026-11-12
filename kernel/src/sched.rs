@@ -92,6 +92,9 @@ impl Task {
 
 struct Table {
     tasks: [Task; MAX_TASKS],
+    /// Incarnation of each slot. `spawn` increments it. `Task::vacant` does
+    /// not, so a reap leaves the generation in place for the next spawn.
+    gens: [u32; MAX_TASKS],
     current: usize,
     preempt: bool,
     /// Set at the end of `init`. The PIT is already running before `init`.
@@ -102,6 +105,7 @@ impl Table {
     const fn empty() -> Self {
         Self {
             tasks: [Task::vacant(); MAX_TASKS],
+            gens: [0; MAX_TASKS],
             current: 0,
             preempt: false,
             live: false,
@@ -163,6 +167,7 @@ pub fn spawn(name: &'static str, entry: fn(usize), arg: usize) -> Result<usize, 
             let Some(slot) = (2..MAX_TASKS).find(|&id| table.tasks[id].state == State::Free) else {
                 return Err(SpawnError::Full);
             };
+            table.gens[slot] = table.gens[slot].wrapping_add(1);
             context::prepare(slot, entry, arg);
             table.tasks[slot] = Task {
                 state: State::Ready,
@@ -231,30 +236,72 @@ pub fn sleep_ticks(n: u64) {
 }
 
 /// Block until task `id` has exited, then reap its slot.
-pub fn wait(id: usize) -> Result<(), WaitError> {
+///
+/// `Ok(true)` means this call reaped the slot. `Ok(false)` means another
+/// waiter already reaped it. Both mean the task this call waited for has
+/// exited. On wake, the slot is reaped only when it is still `Exited` and
+/// still the same incarnation (`gens[id]`) recorded before the block. The
+/// immediate path, already `Exited` on entry, reaps as before.
+pub fn wait(id: usize) -> Result<bool, WaitError> {
     irq::without_interrupts(|| {
-        let switch = TABLE.with(|table| -> Result<Option<(usize, usize)>, WaitError> {
+        let plan = TABLE.with(|table| -> Result<WaitPlan, WaitError> {
             if !(2..MAX_TASKS).contains(&id) || table.tasks[id].state == State::Free {
                 return Err(WaitError::NoTask);
             }
             if table.tasks[id].state == State::Exited {
                 table.tasks[id] = Task::vacant();
-                return Ok(None);
+                return Ok(WaitPlan::Reaped);
             }
+            let seen = table.gens[id];
             let cur = table.current;
             table.tasks[cur].state = State::Blocked;
             table.tasks[cur].waiting_on = Some(id);
             let next = pick_next(table, cur);
-            Ok(arm(table, next))
+            Ok(WaitPlan::Blocked {
+                seen,
+                switch: arm(table, next),
+            })
         })?;
-        resume(switch);
-        TABLE.with(|table| {
-            if table.tasks[id].state == State::Exited {
-                table.tasks[id] = Task::vacant();
+        match plan {
+            WaitPlan::Reaped => Ok(true),
+            WaitPlan::Blocked { seen, switch } => {
+                resume(switch);
+                Ok(TABLE.with(|table| reap_on_wake(table, id, seen)))
             }
-        });
-        Ok(())
+        }
     })
+}
+
+enum WaitPlan {
+    Reaped,
+    Blocked {
+        seen: u32,
+        switch: Option<(usize, usize)>,
+    },
+}
+
+/// Reap slot `id` if it is `Exited` and still incarnation `seen`.
+fn reap_on_wake(table: &mut Table, id: usize, seen: u32) -> bool {
+    if table.tasks[id].state == State::Exited && table.gens[id] == seen {
+        table.tasks[id] = Task::vacant();
+        true
+    } else {
+        false
+    }
+}
+
+/// Prove the wake-side guard. The fixed scan cannot produce a stale
+/// generation, so `sched-reap` builds a local table and applies the rule.
+#[cfg(feature = "sched-reap")]
+pub fn selftest_stale_reap() {
+    let mut table = Table::empty();
+    table.tasks[2].state = State::Exited;
+    table.gens[2] = 5;
+    let kept = !reap_on_wake(&mut table, 2, 4) && table.tasks[2].state == State::Exited;
+    let reaped = reap_on_wake(&mut table, 2, 5) && table.tasks[2].state == State::Free;
+    if !kept || !reaped {
+        panic!("stale reap kept={kept} reaped={reaped}");
+    }
 }
 
 /// Called by the trampoline when a task entry returns. Does not return.

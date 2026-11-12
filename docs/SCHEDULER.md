@@ -1,5 +1,9 @@
 # Kernel task scheduler
 
+## 1. Purpose
+
+One CPU runs several tasks, cooperatively or one tick at a time, so the shell can start a demo and wait for it to finish.
+
 Suggested wording, not a certification and not a claim that the system exists yet: "An authentic Human–AI co-op OS".
 
 This document is the spec for the scheduler. If the code and this document disagree, the change is not done.
@@ -15,9 +19,9 @@ In this image:
 3. An idle task that runs only when nothing else is ready and calls `irq::idle_hlt`.
 4. Seven 16 KiB stacks in a static `.bss` pool, with a canary checked on every switch.
 5. Shell built-ins `ps`, `spawn DEMO` (`spin`, `nap`), and `wait ID`.
-6. Five `sched-*` proofs, each with its own QEMU status.
+6. Six `sched-*` proofs, each with its own QEMU status.
 
-Not in this image, and not added here: processes, address spaces, user mode (ring 3), memory protection, guard pages, page-table changes, SMP or APIC, priorities, per-task time accounting beyond the counters below, a mutex, semaphore, or channel, `kill`, Ctrl-C, background shell jobs that print, a growing task table, heap-allocated stacks, FPU/SSE context, unmasking any IRQ besides 0 and 1, any model or agent interface, the human gate, and the audit log. The default boot path is unchanged: boot marker, status 33.
+Not in this image, and not added here: processes, address spaces, user mode (ring 3), memory protection, guard pages, page-table changes, SMP or APIC, priorities, per-task time accounting beyond the counters below, a mutex, semaphore, or channel, `kill`, Ctrl-C, background shell jobs that print, a growing task table, heap-allocated stacks, FPU/SSE context, unmasking any IRQ besides 0 and 1, a model runtime, and the audit log. The human gate is milestone 8 (`docs/GATE.md`). The default boot path is unchanged: boot marker, status 33.
 
 ## 3. Modules
 
@@ -25,16 +29,16 @@ Not in this image, and not added here: processes, address spaces, user mode (rin
 | --- | --- | --- |
 | `kernel/src/context.rs` | driver | Switch and trampoline `global_asm!`, the stack pool and canaries, the saved-RSP table, initial frames, `IrqCell<T>`. All new scheduler `unsafe` is here. |
 | `kernel/src/sched.rs` | safe | Task table, round-robin, `spawn`, `yield_now`, `sleep_ticks`, `sleep_until`, `wait`, `exit_current`, `on_tick`, `snapshot`. |
-| `kernel/src/schedtest.rs` | safe | The five `sched-*` bodies. |
+| `kernel/src/schedtest.rs` | safe | The six `sched-*` bodies. |
 | `kernel/src/irq.rs` | driver | Timer hook, `without_interrupts`, the `KbData` safety comment. `idle_hlt` and `ticks` are also compiled for `feature = "sched"`. |
-| `kernel/src/shell.rs` | safe | `ps`, `spawn`, `wait`. The key loop calls `sched::yield_now`. |
-| `kernel/src/qemu_exit.rs` | driver | Statuses 225, 227, 229, 231, 233. |
+| `kernel/src/shell.rs` | safe | `ps`, `spawn`, `wait`, and the gate commands in `docs/GATE.md`. The key loop calls `sched::yield_now`. |
+| `kernel/src/qemu_exit.rs` | driver | Statuses 225, 227, 229, 231, 233, and 235. |
 
 `context` and `sched` are compiled only with `feature = "sched"`. `sched` is internal: `shell = ["sched"]` and each `sched-*` feature depends on it. `sched` itself is not one of the "at most one" test features. A build without `sched` does not contain this code. The 27 non-shell cases are that proof.
 
 ## 4. Where it plugs in
 
-`kernel_main` is unchanged through `mem::init()`. On success, a `sched` build calls `sched::init(preempt)` before the feature dispatch. `preempt` is false for `sched-coop` and `sched-full`, and true for every other `sched` build, including `shell`. `init` prints nothing. It adopts the running boot context as task 0 (`main`, or `shell` in the shell build) on the boot stack, marks it `running`, prepares idle in slot 1 as `ready`, and sets the table live.
+`kernel_main` is unchanged through `mem::init()`. On success, a `sched` build calls `sched::init(preempt)` before the feature dispatch. `preempt` is false for `sched-coop`, `sched-full`, and `sched-reap`, and true for every other `sched` build, including `shell`. `init` prints nothing. It adopts the running boot context as task 0 (`main`, or `shell` in the shell build) on the boot stack, marks it `running`, prepares idle in slot 1 as `ready`, and sets the table live.
 
 The PIT is already running when `init` is called, because `exceptions::init` unmasked IRQ0. `on_tick` returns immediately until the table is live, so a tick during `mem::init` does not switch on an empty table.
 
@@ -57,7 +61,7 @@ Exactly one task is `Running`. The table lives in `context::IrqCell<Table>`. Eve
 - `yield_now`: current → `Ready`, then switch to `pick_next`. If that is the current task, it is set back to `Running` and no switch happens.
 - `sleep_until(t)`: if `t` is already `<= ticks()` the call returns. Otherwise current → `Sleeping`, `wake_at = t`, and switch. `ticks` is sampled with IF clear.
 - `sleep_ticks(n)`: `n == 0` returns. Otherwise `t = ticks().wrapping_add(n)`, sampled with IF clear, then the same path as `sleep_until`.
-- `wait(id)`: `id` must be 2–7 and not `Free`, else `Err(NoTask)`. If the slot is `Exited`, it is reaped (`Free`) and the call returns. Otherwise current → `Blocked`, `waiting_on = id`, and switch. On wake the slot is reaped if it is still `Exited`.
+- `wait(id)` returns `Result<bool, WaitError>`. `id` must be 2–7 and not `Free`, else `Err(NoTask)`. If the slot is `Exited`, it is reaped (`Free`) and the call returns `Ok(true)`. Otherwise current → `Blocked`, `waiting_on = id`, the generation is recorded, and switch. On wake the slot is reaped only through `reap_on_wake` when it is still `Exited` and the generation matches. `Ok(true)` means this call reaped the slot. `Ok(false)` means another waiter already reaped it. A waiter reaps on wake only if the slot still holds the same incarnation it waited for (a per-slot generation that `spawn` increments).
 - `exit_current` (the trampoline calls `sched_task_exit`, which calls this): state → `Exited`, every task `Blocked` on this id becomes `Ready`, then switch away. It does not return. An exited task keeps its slot until `wait` reaps it. Slots 0 and 1 never exit.
 
 `on_tick` runs from the IRQ0 handler, with IF clear, after EOI. It does not allocate, print, or touch VGA. Every `Sleeping` task with `wake_at <= ticks()` becomes `Ready`. If preemption is on and the current task is not idle, the current task becomes `Ready` and the hook does `yield_now`'s switch. `PREEMPTIONS` increments only when that switch actually leaves a non-idle task. If idle is running and any sleeper became ready, idle yields too, and that switch does not count as a preemption.
@@ -94,7 +98,7 @@ Task lines that smoke judges are written inside `irq::without_interrupts`, so a 
 
 The key loop calls `sched::yield_now` instead of `irq::idle_hlt`. With nothing else ready, `pick_next` returns the shell and `yield_now` returns at once, so a key is noticed within one tick (10 ms). With six `spin` tasks the shell runs once per round of quanta, at most 70 ms. When the shell is blocked in `wait` and nothing else is ready, idle halts.
 
-`help` is 11 lines. These three are inserted after `mem`:
+`help` is 16 lines. These three are inserted after `mem`. The five gate lines sit after `wait ID` (`docs/GATE.md`, `docs/SHELL.md`):
 
 ```
 ps          list tasks
@@ -121,6 +125,7 @@ Every line is `R3ATH3_SCHED_*`. An internal check that fails panics (status 35),
 3. **`sched-sleep` (preempt on).** `start = ticks()`. Spawn `L`, `M`, and `S` to `sleep_until(start + 30/20/10)`. On wake each prints `R3ATH3_SCHED_SLEEP name=<X> want=<w> elapsed=<ticks()-start>`. After all three are waited, the boot task prints `R3ATH3_SCHED_SLEEP ok count=3 idle_runs=<i>`.
 4. **`sched-full` (preempt off).** Six empty tasks spawn as ids 2–7. The seventh returns `Full`. After those six are waited, one more spawn returns id 2. The line is `R3ATH3_SCHED_FULL ok spawned=6 error=full after_reap=2`.
 5. **`sched-exit` (preempt on).** Two rounds of six tasks that increment `RAN` and return, each round waited. `heap::used` is recorded before round 1. The line is `R3ATH3_SCHED_EXIT ok rounds=2 spawned=12 ran=12 free=6 heap_delta=0`. `free` is the number of `Free` slots in 2–7. `heap_delta` is `heap::used()` minus the recorded value. A mismatch panics instead of printing that line.
+6. **`sched-reap` (preempt off).** `T` in slot 2 yields once and returns. `W1` in slot 3 and `W2` in slot 4 both `wait(2)`. The boot task waits on 3, then 4. `W1` reaps (`Ok(true)`). `W2` finds the slot `Free` (`Ok(false)`). The line is `R3ATH3_SCHED_REAP waiters=2 reaped_by=W1 w2_reaped=no free=6`. Then `selftest_stale_reap` prints `R3ATH3_SCHED_REAP stale_gen=kept same_gen=reaped`, then `R3ATH3_SCHED_REAP ok`. A local table holds slot 2 `Exited` at generation 5: a recorded generation of 4 keeps it `Exited`, and 5 reaps it.
 
 ## 8. Statuses
 
@@ -131,8 +136,9 @@ Every line is `R3ATH3_SCHED_*`. An internal check that fails panics (status 35),
 | `0x72` | 229 | `sched-sleep` ok | `sched_sleep_ok` |
 | `0x73` | 231 | `sched-full` ok | `sched_full_ok` |
 | `0x74` | 233 | `sched-exit` ok | `sched_exit_ok` |
+| `0x75` | 235 | `sched-reap` ok | `sched_reap_ok` |
 
-No collision with 33, 35, 95, 97, 99, 101, 103, 105, 124–127, 137, 161, 163, 177, 179, 181, 193, 195, 197, 199, 201, or 209–217. `0x65`–`0x67` (203–207) and `0x6D`–`0x6F` (219–223) stay unused. Each helper is compiled only for its feature. The shell keeps 209–217. New shell cases use those outcome statuses.
+No collision with 33, 35, 95, 97, 99, 101, 103, 105, 124–127, 137, 161, 163, 177, 179, 181, 193, 195, 197, 199, 201, 209–217, or the gate statuses 241 and 243. `0x65`–`0x67` (203–207), `0x6D`–`0x6F` (219–223), and `0x76`–`0x77` (237–239) stay unused. Each helper is compiled only for its feature. The shell keeps 209–217. New shell cases use those outcome statuses.
 
 A status names an outcome. A feature that can end its own run gets its own status. Shell commands are judged by exact transcript under the shell's outcome statuses, and a swap self-test proves those cases cannot pass for each other.
 
@@ -148,7 +154,7 @@ TCG drives the PIT from the host clock. Ticks arrive in bursts or gaps, and the 
 
 ## 10. Smoke
 
-`./scripts/smoke.sh` keeps every previous judge. Only `shell-basic`'s expected help text changes. Five new builds (`sched-coop`, `sched-preempt`, `sched-sleep`, `sched-full`, `sched-exit`) use `expect_case` / `run_qemu` (`-vga none`, `-serial stdio`, 12 s). New shell cases use `expect_shell` on `shell.elf`.
+`./scripts/smoke.sh` keeps every previous judge. Only `shell-basic`'s expected help text changes. The scheduler builds (`sched-coop`, `sched-preempt`, `sched-sleep`, `sched-full`, `sched-exit`, `sched-reap`) use `expect_case` / `run_qemu` (`-vga none`, `-serial stdio`, 12 s). Shell cases use `expect_shell` on `shell.elf`. Gate cases use `expect_gate` (`docs/GATE.md`).
 
 `P` below is the prompt `r3> `. Shell transcripts start with the usual three-line prefix plus that prompt.
 
@@ -159,6 +165,7 @@ TCG drives the PIT from the host clock. Ticks arrive in bursts or gaps, and the 
 | `sched-sleep` | 229 | Exactly three wake lines in order S, M, L with `want` 10, 20, 30. Each `want <= elapsed <= want+100`. `ok count=3`. `idle_runs > 0`. |
 | `sched-full` | 231 | Stage line plus the exact `ok` line. |
 | `sched-exit` | 233 | Stage line plus the exact `ok` line. |
+| `sched-reap` | 235 | Stage line, `R3ATH3_SCHED_REAP waiters=2 reaped_by=W1 w2_reaped=no free=6`, `R3ATH3_SCHED_REAP stale_gen=kept same_gen=reaped`, then `R3ATH3_SCHED_REAP ok`. |
 | `shell-ps` | 209 | Exact. `spawn spin` → `spawned id=2 name=spin`. `ps` → shell `running`, idle `ready`, spin `ready`. `echo alive` → `alive`. `exit` → `last=ok`. |
 | `shell-wait` | 209 | Exact. `spawn nap` → `spawned id=2 name=nap`. `wait 2` → `exited id=2`, whether `nap` had already exited or not. `ps` shows only ids 0 and 1. `exit` → `last=ok`. |
 | `shell-sched-error` | 211 | Exact, 20 s. `spawn` → usage. `spawn foo` → `error: unknown demo: foo`. `wait 5` → `error: no task 5`. `ps x` → `error: usage: ps`. Six `spawn spin` → ids 2–7. A seventh → `error: task table full`. `exit` → `last=cmd`. |
@@ -173,9 +180,9 @@ After a shell step is chosen, the harness records `start` as the log length **be
 
 The ready wait uses the same rule with `start = 0` and the echo `R3ATH3_SHELL_READY\nR3@TH3 shell. Type help for commands.`. Limits are unchanged: 5 s per step, status 124 on a miss. `xp` is not a prompt wait.
 
-The harness self-test accepts `idle_at_prompt` on a buffer ending in `\nr3> ` and on one ending in `\x1b[Hr3> `, and rejects `\nr3> x`, a prompt that does not start a line, and a log missing the step echo. It rejects a cooperative log with B1/A1 swapped; a preempt log with `preemptions=0`, with `hog_spins=0`, and with four worker lines; a sleep log in order M, S, L, with `elapsed=9 want=10`, and with `elapsed=200 want=10`. One positive log passes each of those three judges. Every new case's correct log with a wrong status fails, including `sched-full` judged as 233. The `shell-ps` transcript judged against `shell-wait`, and `shell-usage` against `shell-sched-error`, both fail.
+The harness self-test accepts `idle_at_prompt` on a buffer ending in `\nr3> ` and on one ending in `\x1b[Hr3> `, and rejects `\nr3> x`, a prompt that does not start a line, and a log missing the step echo. `keys_at_prompt` accepts `b"x\nr3> "` with `start=0` and rejects `start == len`, a buffer with no `\n` after `start`, a buffer ending in `\nr3> x`, a prompt that does not start a line, and a non-bytes value. It rejects a cooperative log with B1/A1 swapped; a preempt log with `preemptions=0`, with `hog_spins=0`, and with four worker lines; a sleep log in order M, S, L, with `elapsed=9 want=10`, and with `elapsed=200 want=10`. One positive log passes each of those three judges. A `sched-reap` log with one line removed, or with two lines swapped, fails. Every new case's correct log with a wrong status fails, including `sched-full` judged as 233 and `sched-reap` judged as 241. The `shell-ps` transcript judged against `shell-wait`, and `shell-usage` against `shell-sched-error`, both fail.
 
-Totals: 36 previous cases + 10 new = 46 QEMU cases, plus `harness-selftest` and 22 build lines (5 new). One clean-tree `./scripts/smoke.sh` is `SMOKE PASS`, `smoke_exit=0`, `dirty_entries=0` before and after.
+Totals: 56 QEMU cases, plus `harness-selftest` and 25 build lines. One clean-tree `./scripts/smoke.sh` is `SMOKE PASS`, `smoke_exit=0`, `dirty_entries=0` before and after.
 
 ## 11. Unsafe
 

@@ -137,6 +137,55 @@ pub fn run_full() -> ! {
     qemu_exit::sched_full_ok();
 }
 
+#[cfg(feature = "sched-reap")]
+pub fn run_reap() -> ! {
+    use core::sync::atomic::{AtomicU8, Ordering};
+
+    static W1_REAPED: AtomicU8 = AtomicU8::new(0);
+    static W2_REAPED: AtomicU8 = AtomicU8::new(0);
+
+    fn task_t(_: usize) {
+        sched::yield_now();
+    }
+
+    fn task_w1(_: usize) {
+        match sched::wait(2) {
+            Ok(true) => W1_REAPED.store(1, Ordering::Relaxed),
+            Ok(false) => W1_REAPED.store(2, Ordering::Relaxed),
+            Err(_) => panic!("w1 wait"),
+        }
+    }
+
+    fn task_w2(_: usize) {
+        match sched::wait(2) {
+            Ok(true) => W2_REAPED.store(1, Ordering::Relaxed),
+            Ok(false) => W2_REAPED.store(2, Ordering::Relaxed),
+            Err(_) => panic!("w2 wait"),
+        }
+    }
+
+    must_spawn("T", task_t, 0);
+    must_spawn("W1", task_w1, 0);
+    must_spawn("W2", task_w2, 0);
+    must_wait(3);
+    must_wait(4);
+    let w1 = W1_REAPED.load(Ordering::Relaxed);
+    let w2 = W2_REAPED.load(Ordering::Relaxed);
+    let free = sched::free_slots();
+    if w1 != 1 || w2 != 2 || free != 6 {
+        panic!("sched-reap w1={w1} w2={w2} free={free}");
+    }
+    emit(format_args!(
+        "R3ATH3_SCHED_REAP waiters=2 reaped_by=W1 w2_reaped=no free=6\n"
+    ));
+    sched::selftest_stale_reap();
+    emit(format_args!(
+        "R3ATH3_SCHED_REAP stale_gen=kept same_gen=reaped\n"
+    ));
+    emit(format_args!("R3ATH3_SCHED_REAP ok\n"));
+    qemu_exit::sched_reap_ok();
+}
+
 #[cfg(feature = "sched-exit")]
 pub fn run_exit() -> ! {
     static RAN: AtomicU64 = AtomicU64::new(0);

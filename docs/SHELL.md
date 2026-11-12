@@ -4,7 +4,7 @@ Suggested wording, not a certification and not a claim that the system exists ye
 
 This document is the spec for the `shell` feature. If the code and this document disagree, the change is not done.
 
-The shell is a human keyboard interface. It adds no model or agent input, no network, and no action gate. `run` executes only the existing fixed-buffer task language.
+The shell is a human keyboard interface. It adds no network and no model. `run` executes only the existing fixed-buffer task language. Agent requests arrive on COM1 and are decided by the gate in this task (`docs/GATE.md`). Agent bytes never enter the keyboard ring, the line editor, or `dispatch`.
 
 ## 1. Scope
 
@@ -12,17 +12,17 @@ In this image:
 
 1. A `shell` feature build: a line-editing prompt `r3> ` that reads the PS/2 keyboard and echoes to COM1 and to the VGA text console.
 2. A VGA text console: 80×25, cursor tracking, hardware cursor, scrolling, clear, backspace.
-3. Built-ins: `help`, `echo`, `clear`, `uptime`, `mem`, `ps`, `spawn`, `wait`, `run`, `exit`, `halt`.
+3. Built-ins: `help`, `echo`, `clear`, `uptime`, `mem`, `ps`, `spawn`, `wait`, `badges`, `grant`, `revoke`, `approve`, `deny`, `run`, `exit`, `halt`.
 4. Backspace, a fixed 76-byte line limit, an unknown-command error, and empty lines.
 5. `run` executes an inline task-language script and survives its errors. `script` and `kbd-script` output is unchanged.
 
-Not in this image: `ls`, `cat`, or any file system; processes or background jobs; command history; tab completion; arrow keys, Home, End, Delete, or editing mid-line; Ctrl-C or other control keys; Caps Lock; pipes, redirection, shell variables, globbing, or quoting rules in the shell itself; scrollback; colors other than green on black; serial input to the shell; a mouse; a GUI or framebuffer. The default boot path is unchanged: it still prints the boot marker and exits 33. The shell build runs the kernel scheduler (`docs/SCHEDULER.md`). `spawn` starts a demo task. It is not a process, and `wait` on `spin` blocks forever because there is no Ctrl-C.
+Not in this image: `ls`, `cat`, or any file system; processes or background jobs; command history; tab completion; arrow keys, Home, End, Delete, or editing mid-line; Ctrl-C or other control keys; Caps Lock; pipes, redirection, shell variables, globbing, or quoting rules in the shell itself; scrollback; colors other than green on black; keyboard input on the serial port; a mouse; a GUI or framebuffer. The default boot path is unchanged: it still prints the boot marker and exits 33. The shell build runs the kernel scheduler (`docs/SCHEDULER.md`) and the gate (`docs/GATE.md`). `spawn` starts a demo task. It is not a process, and `wait` on `spin` blocks forever because there is no Ctrl-C.
 
 ## 2. Where it plugs in
 
-`kernel_main` order is unchanged through `mem::init()`. On the `shell` feature, `sched::init(true)` then runs, and `shell::run()` does not return. `shell` is one of the test features in the "at most one" assert and in both `boot_ok` `cfg` lists. `script` is compiled for `script`, `kbd-script`, or `shell`. The `shell` feature depends on `sched`.
+`kernel_main` order is unchanged through `mem::init()`. On the `shell` feature, `sched::init(true)` then runs, and `shell::run()` does not return. `shell` is one of the test features in the "at most one" assert and in both `boot_ok` `cfg` lists. `script` is compiled for `script`, `kbd-script`, or `shell`. The `shell` feature depends on `sched` and `gate`.
 
-COM1 is the judged channel. It carries the prompt, echoed keys, command output, and `R3ATH3_*` lines. VGA shows the same transcript, except `R3ATH3_*` lines are serial-only. Line endings are `\n` only.
+COM1 is the judged channel and, in this build, the agent input. It carries the prompt, echoed keys, command output, `R3ATH3_*` lines, and `R3GATE` lines. VGA shows the same transcript, except `R3ATH3_*` and `R3GATE` lines are serial-only. Line endings are `\n` only. The kernel does not echo agent bytes.
 
 ## 3. VGA console
 
@@ -56,6 +56,7 @@ The line buffer is 76 bytes, so the 4-byte prompt plus the line fill one row. `l
 - Backspace at a non-empty line drops one byte, echoes `\x08 \x08` on COM1, and backspaces one VGA cell. Backspace on an empty line echoes nothing. Backspace does not clear overflow.
 - Enter echoes `\n` on both channels. If overflow is set, the shell prints `error: line too long (max 76)` and does not run the line. `last` becomes overflow. A line that is empty or only spaces does not run, and `last` stays as it was. Otherwise the line is split on ASCII spaces and dispatched. Leading and trailing spaces are ignored. The first word is the command, case-sensitive. Then the buffer and the overflow flag reset, and the prompt is printed again.
 - `exit` and `halt` do not return to the prompt.
+- The shell reads a key first. While the human line buffer is empty and not overflowed, it polls an expired gate request before it takes a buffered agent line. While the human is typing, the agent line stays buffered and is handled after Enter. At an idle prompt an agent event prints a newline first, then the human lines, then the `R3GATE` lines, then `r3> `. Agent events do not change `last`, except an approved spawn that finds the task table full, which sets `last` to cmd. When the shell is blocked in `wait`, agent lines and expiry wait until `wait` returns.
 
 ## 7. Built-ins
 
@@ -63,7 +64,7 @@ Output lines end in `\n` and go to both channels unless marked serial-only.
 
 | Command | Arguments | Output | `last` |
 | --- | --- | --- | --- |
-| `help` | none | The 11 lines below | ok |
+| `help` | none | The 16 lines below | ok |
 | `echo` | any | The words joined by single spaces. `echo` alone prints an empty line. Quotes are not special. | ok |
 | `clear` | none | Serial `\x1b[2J\x1b[H`; VGA clear | ok |
 | `uptime` | none | `uptime ticks=<n> hz=100 seconds=<s>.<cc>` with `n = irq::ticks()`, `s = n / 100`, and `cc = n % 100` as two digits | ok |
@@ -71,11 +72,16 @@ Output lines end in `\n` and go to both channels unless marked serial-only.
 | `ps` | none | One line per non-free slot, id order: `task id=<n> name=<name> state=<ready\|running\|sleeping\|blocked\|exited>` | ok |
 | `spawn` | one word, `spin` or `nap` | `spawned id=<n> name=<demo>` | ok |
 | `wait` | one decimal id | `exited id=<n>` after the slot is reaped | ok |
+| `badges` | none | One `badge` line per badge, then the pending request or `no pending request` | ok |
+| `grant` | `AGENT PERM` | `granted <A> <P>` | ok |
+| `revoke` | `AGENT PERM` or `AGENT all` | `revoked <A> <P\|all>`, then any cancellation | ok |
+| `approve` | one request number | The approved line and the `R3GATE reply` | ok |
+| `deny` | one request number | `gate: request <n> denied` and the `R3GATE reply` | ok |
 | `run` | the rest of the line after `run` and its following spaces, raw | Script lines (`text` plus `\n`) on both channels. On error: `error: script line=<n> reason=<word>` | ok, or script on error |
 | `exit` | none | Serial-only `R3ATH3_SHELL_EXIT last=<ok\|cmd\|overflow\|script>`, then the status in section 8 | n/a |
 | `halt` | none | Serial-only `R3ATH3_SHELL_HALT`, then status 217, whatever `last` is | n/a |
 
-An unknown first word prints `error: unknown command: <word>` and sets `last` to cmd. Extra arguments to `help`, `clear`, `uptime`, `mem`, `ps`, `exit`, or `halt`, or `run` with nothing after it, print `error: usage: <command>` (`error: usage: run SCRIPT` for `run`, `error: usage: ps` for `ps`). `spawn` with no word or extra words prints `error: usage: spawn DEMO`. Any other demo word prints `error: unknown demo: <word>`. A full table prints `error: task table full`. `wait` with a missing or extra argument prints `error: usage: wait ID`. A non-number, a value outside 2–7, or a free slot prints `error: no task <arg>` using the raw argument. Each of those errors sets `last` to cmd. The shell does not exit. `spin` loops and never returns. `nap` sleeps 20 ticks and returns. `wait` on `spin` blocks forever.
+An unknown first word prints `error: unknown command: <word>` and sets `last` to cmd. Extra arguments to `help`, `clear`, `uptime`, `mem`, `ps`, `badges`, `exit`, or `halt`, or `run` with nothing after it, print `error: usage: <command>` (`error: usage: run SCRIPT` for `run`, `error: usage: ps` for `ps`, `error: usage: badges` for `badges`). `spawn` with no word or extra words prints `error: usage: spawn DEMO`. Any other demo word prints `error: unknown demo: <word>`. A full table prints `error: task table full`. `wait` with a missing or extra argument prints `error: usage: wait ID`. A non-number, a value outside 2–7, or a free slot prints `error: no task <arg>` using the raw argument. `grant` and `revoke` with the wrong number of words print `error: usage: grant AGENT PERM` and `error: usage: revoke AGENT PERM`. A bad name prints `error: bad agent name: <A>`. An unknown permission prints `error: unknown permission: <P>`. A new name when four badges exist prints `error: badge table full`. `revoke` of an unknown name prints `error: no badge <A>`. `approve` and `deny` with the wrong number of words print `error: usage: approve N` and `error: usage: deny N`. A number that is not the pending request prints `error: no pending request <N>`. The name is checked before the permission. Each of those errors sets `last` to cmd. The shell does not exit. `spin` loops and never returns. `nap` sleeps 20 ticks and returns. `wait` on `spin` blocks forever. Gate line formats, reasons, and the verb table are in `docs/GATE.md`.
 
 `help` text, exactly:
 
@@ -88,6 +94,11 @@ mem         heap and frame use
 ps          list tasks
 spawn DEMO  start demo task spin or nap
 wait ID     wait for a task to exit
+badges      list AI badges and the waiting request
+grant A P   give agent A permission P
+revoke A P  take permission P (or all) from agent A
+approve N   let gate request N run
+deny N      refuse gate request N
 run SCRIPT  run a task script, lines separated by ;
 exit        leave the shell with the last status
 halt        stop the machine
@@ -121,15 +132,15 @@ QEMU turns an `out` of `V` to port `0xF4` into status `(V << 1) | 1`.
 | `0x6B` | 215 | `exit`, last `run` failed |
 | `0x6C` | 217 | `halt` |
 
-`0x65`–`0x67` (203–207) and `0x6D`–`0x6F` (219–223) are unused. None of these collide with 33, 35, 95, 97, 99, 101, 103, 105, 124–127, 137, 161, 163, 177, 179, 181, 193, 195, 197, 199, 201, or the scheduler statuses 225–233.
+`0x65`–`0x67` (203–207) and `0x6D`–`0x6F` (219–223) are unused. None of these collide with 33, 35, 95, 97, 99, 101, 103, 105, 124–127, 137, 161, 163, 177, 179, 181, 193, 195, 197, 199, 201, or the scheduler statuses 225–233 and 235, or the gate statuses 241 and 243.
 
-A status names an outcome. A feature that can end its own run gets its own status; shell commands are judged by exact transcript under the shell's outcome statuses, and a swap self-test proves those cases cannot pass for each other. 209 covers `shell-basic`, `shell-backspace`, `shell-run`, `shell-mem`, `shell-screen`, `shell-ps`, and `shell-wait`. 211 covers `shell-unknown`, `shell-sched-error`, and `shell-usage`. 213 covers `shell-overflow` and `shell-edge`. 215 and 217 stay one case each.
+A status names an outcome. A feature that can end its own run gets its own status; shell commands are judged by exact transcript under the shell's outcome statuses, and a swap self-test proves those cases cannot pass for each other. 209 covers `shell-basic`, `shell-backspace`, `shell-run`, `shell-mem`, `shell-screen`, `shell-ps`, `shell-wait`, `gate-approve`, `gate-noperm`, and `gate-revoke` (10). 211 covers `shell-unknown`, `shell-sched-error`, `shell-usage`, `gate-sneak`, `gate-usage`, and `shell-sched-args` (6). 213 covers `shell-overflow` and `shell-edge`. 215 stays one case. 217 covers `shell-halt` and `gate-halt`.
 
 ## 12. Smoke cases
 
-`./scripts/smoke.sh` runs the previous 27 cases unchanged, then fourteen shell cases on `shell.elf`, plus the five scheduler proofs in `docs/SCHEDULER.md`. The harness uses the same QEMU command line as the monitor cases (`-vga std`, serial file, monitor socket, `-m 64M`). It deletes that case's serial log before starting QEMU. A log left by an earlier run does not count: QEMU truncates the file only after it has started, and a ready check that reads the old bytes injects keys while `init_keyboard` is still draining the controller. The harness injects no keys until this boot's log contains `R3ATH3_SHELL_READY` and the first `r3> ` prompt from section 7, and that log length stays unchanged across two reads 50 ms apart. Keys are `sendkey` 30 ms apart.
+`./scripts/smoke.sh` runs 56 QEMU cases. The fourteen shell cases below, plus `shell-sched-args` and the six gate cases, run on `shell.elf`. Scheduler proofs are in `docs/SCHEDULER.md`. Gate proofs and `expect_gate` are in `docs/GATE.md`. Keyboard cases use the monitor (`-vga std`, serial file, monitor socket, `-m 64M`). The harness deletes that case's serial log before starting QEMU. A log left by an earlier run does not count: QEMU truncates the file only after it has started, and a ready check that reads the old bytes injects keys while `init_keyboard` is still draining the controller. The harness injects no keys until this boot's log contains `R3ATH3_SHELL_READY` and the first `r3> ` prompt from section 7, and that log length stays unchanged across two reads 50 ms apart. Keys are `sendkey` 30 ms apart. Gate cases use a serial socket with `wait=on` and connect to it before the monitor, so the boot lines are not lost.
 
-After a step is chosen, the harness records the log length **before** the first key, because the shell echoes while later keys are still in flight. It then waits, except on the last step (`exit` or `halt` does not print another prompt), until all of these hold: the bytes after that point contain the typed text followed by `\n` (a `keys` step instead needs the log to have grown and to contain a `\n`); the log ends in `r3> ` preceded by `\n` or `\x1b[H`; and the log length is unchanged across two reads 50 ms apart. The limit is 5 seconds per step. A missed wait is status 124. The `xp` step reads the VGA buffer and does not produce a prompt, so it is not a prompt-wait step. Timeouts are 20 seconds for `shell-overflow`, `shell-screen`, `shell-sched-error`, and `shell-edge`, and 12 seconds for the others.
+After a step is chosen, the harness records the log length **before** the first key, because the shell echoes while later keys are still in flight. It then waits, except on the last step (`exit` or `halt` does not print another prompt), until all of these hold: the bytes after that point contain the typed text followed by `\n` (a `keys` step instead needs the log to have grown and to contain a `\n`); the log ends in `r3> ` preceded by `\n` or `\x1b[H`; and the log length is unchanged across two reads 50 ms apart. The limit is 5 seconds per step. A missed wait is status 124. The `xp` step reads the VGA buffer and does not produce a prompt, so it is not a prompt-wait step. An `ai` step writes the request line on the serial socket and waits until a `R3GATE reply ` line has arrived and the log is idle at `r3> `, with the same 5 second limit. Timeouts are 20 seconds for `shell-overflow`, `shell-screen`, `shell-sched-error`, `shell-edge`, and `gate-usage`, and 12 seconds for the others. No shell case waits 60 seconds.
 
 | Case | Status | What it checks |
 | --- | --- | --- |
@@ -147,9 +158,16 @@ After a step is chosen, the harness records the log length **before** the first 
 | `shell-sched-error` | 211 | `spawn` usage, unknown demo, `wait 5` with no such task, `ps` usage, six `spin` tasks, then `error: task table full` |
 | `shell-usage` | 211 | `run`, `help x`, `uptime x`, `mem x`, `exit x`, and `halt x` each print a usage error and the shell stays up |
 | `shell-edge` | 213 | An exactly-76-byte `echo` line runs. 76 `a`s, then `b` and two backspaces, then Enter, still reports overflow, and the `b` is not echoed |
+| `shell-sched-args` | 211 | `wait` with no argument and with an extra argument, `wait abc`, `wait 99`, and `spawn a b` |
+| `gate-approve` | 209 | `spawn nap` does nothing while pending, then runs once after `approve 1`, and `wait 2` reaps it |
+| `gate-noperm` | 209 | No badge, then no spawn permission, then `read` returns the three work orders |
+| `gate-revoke` | 209 | Revoking `spawn` cancels the pending request in that command; `say` still works; `revoke all` removes the badge |
+| `gate-sneak` | 211 | Bad lines, `busy`, a denied `spin` that never runs, and a number that cannot be approved again |
+| `gate-halt` | 217 | Approve of `halt` prints the reply, then `R3ATH3_SHELL_HALT` |
+| `gate-usage` | 211 | Usage, bad names, unknown permissions, and a full badge table. 20 seconds |
 
-The screen dump is 25 lines of 80 `XXXX` hex cells. The harness self-test rejects a wrong shell status, a shortened transcript, mismatched `mem` numbers, a changed screen cell, a cell whose attribute is `0x07`, a `shell-ps` transcript judged as `shell-wait`, and a `shell-usage` transcript judged as `shell-sched-error`.
+The screen dump is 25 lines of 80 `XXXX` hex cells. The harness self-test rejects a wrong shell status, a shortened transcript, mismatched `mem` numbers, a changed screen cell, a cell whose attribute is `0x07`, a `shell-ps` transcript judged as `shell-wait`, and a `shell-usage` transcript judged as `shell-sched-error`. It also rejects each new transcript at the wrong status, and these swaps: `gate-approve` against `gate-noperm`, `gate-revoke` against `gate-approve`, `gate-sneak` against `gate-usage`, `shell-sched-args` against `shell-sched-error`, and `gate-halt` against `shell-halt`.
 
 ## 13. Unsafe
 
-New `unsafe` for the console is in `vga.rs` (`with_console`, volatile cell access, and the CRTC `port::outb` calls). `idle_hlt` and `without_interrupts` are in `irq.rs`. The scheduler's `unsafe` is in `context.rs` (`docs/SCHEDULER.md`). Each new block has a `// SAFETY:` comment. `shell.rs` and `script.rs` have no `unsafe`. The file list is in `docs/FOUNDATION.md`.
+New `unsafe` for the console is in `vga.rs` (`with_console`, volatile cell access, and the CRTC `port::outb` calls). `idle_hlt` and `without_interrupts` are in `irq.rs`. The scheduler's `unsafe` is in `context.rs` (`docs/SCHEDULER.md`). Each new block has a `// SAFETY:` comment. `shell.rs`, `script.rs`, `gate.rs`, and `gatetest.rs` have no `unsafe`. The file list is in `docs/FOUNDATION.md`.
