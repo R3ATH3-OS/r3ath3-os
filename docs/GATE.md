@@ -16,7 +16,7 @@ Honest limits, on purpose:
 - Revocation does not stop a task an earlier approval already started. There is no `kill`, and revocation does not undo output.
 - Badges do not survive a reboot. There is no storage until milestone 10.
 - There is no queue. One privileged request may wait. Another is `busy`.
-- There is no audit log yet. Every gate outcome the shell prints goes through `report`. Milestone 9 appends the record there.
+- The flight recorder (`docs/RECORDER.md`) appends every gate outcome in `report`. The record is RAM-only and is lost on reboot until milestone 10.
 - `next_rq` starts at 1 and uses wrapping addition. Wrapping is unreachable in a real session.
 
 ## 2. Scope
@@ -28,7 +28,7 @@ In this image:
 3. Human commands `badges`, `grant`, `revoke`, `approve`, and `deny`.
 4. Proofs `gate-core` (status 241) and `gate-expire` (status 243).
 
-Not in this image, and not added here: any model or agent runtime in the kernel; a host-side AI adapter beyond the smoke harness; the append-only audit log, replay, or a `selftest` command (milestone 9); persistence of badges; authentication or crypto for names; a queue of pending requests; permissions on files, storage, network, or WASM; letting an agent type shell commands or reach `dispatch`; a `run` or `cmd` verb; `kill`; COM2; unmasking IRQ4 or any IRQ besides 0 and 1; heap allocation in the gate or the shell; new `unsafe`. The default boot path is unchanged: boot marker, status 33.
+Not in this image, and not added here: any model or agent runtime in the kernel; a host-side AI adapter beyond the smoke harness; persistence of badges or of the flight recorder; authentication or crypto for names; a queue of pending requests; permissions on files, storage, network, or WASM; letting an agent type shell commands or reach `dispatch`; a `run` or `cmd` verb; an agent verb that reads the record; `kill`; COM2; unmasking IRQ4 or any IRQ besides 0 and 1; heap allocation in the gate or the shell; new `unsafe`. The default boot path is unchanged: boot marker, status 33. The flight recorder, `replay`, and `selftest` are specified in `docs/RECORDER.md`.
 
 ## 4. Permission model
 
@@ -108,7 +108,7 @@ For `read` only, before that reply:
 R3GATE data seq=<n> n=<1..3> text=<work order>
 ```
 
-A privileged request gets `result=pending rq=<n>` at once, then a second reply when it is decided: `done`, `denied reason=human|revoked|timeout`, or `failed reason=full` (approved, but the task table is full). Reasons are `no-badge`, `no-permission`, `busy`, `human`, `revoked`, `timeout`, `full`, `syntax`, `too-long`, `verb`, and `arg`.
+A privileged request gets `result=pending rq=<n>` at once, then a second reply when it is decided: `done`, `denied reason=human|revoked|timeout`, or `failed reason=full` (approved, but the task table is full). Reasons are `no-badge`, `no-permission`, `busy`, `human`, `revoked`, `timeout`, `full`, `log-full`, `syntax`, `too-long`, `verb`, and `arg`. `reason=log-full` is the flight recorder's reserve refusal: the shell prints `gate: ignored an agent line: flight recorder full`, does not call `gate.ask`, and records nothing. See `docs/RECORDER.md`.
 
 The human answers by typing `approve N` or `deny N`, naming the request number. A modal yes/no key is not used, so a key meant for something else cannot approve a request that just arrived.
 
@@ -132,11 +132,11 @@ Human lines are at most 80 columns. `say` text is printed after `<agent> says: `
 
 Order for each event: human lines, then `R3GATE data` lines for `read`, then the `R3GATE reply` line. An approved halt prints the human line, then `R3GATE reply … result=done`, then `R3ATH3_SHELL_HALT` and status 217.
 
-`fn report(out: &mut Out, ev: &GateEvent)` prints every gate outcome. `GateEvent` is `Asked`, `Refused`, `Bad`, `Ran`, `Approved`, `ApproveFailed`, `Denied`, `Cancelled`, `Expired`, `Granted`, or `Revoked`. Milestone 8 only prints. Milestone 9 appends the record in that function.
+`fn report(out: &mut Out, ev: &GateEvent)` prints every gate outcome and appends it to the flight recorder. `GateEvent` is `Asked`, `Refused`, `Bad`, `Ran`, `Approved`, `ApproveFailed`, `Denied`, `Cancelled`, `Expired`, `Granted`, or `Revoked`.
 
 ## 6. Shell commands
 
-`help` is 16 lines. These five sit after `wait ID` and before `run SCRIPT`:
+`help` is 19 lines. These five sit after `wait ID` and before `log`. The three recorder lines sit after `deny N` (`docs/RECORDER.md`, `docs/SHELL.md`):
 
 ```
 badges      list AI badges and the waiting request
@@ -151,7 +151,7 @@ deny N      refuse gate request N
 | `badges` | One `badge <agent> may=<p1,p2,…\|none>` line per badge in slot order. Bits print in the order read, say, spawn, halt. No badges: `no badges`. Then `pending rq=<n> agent=<a> action=<spawn spin\|spawn nap\|halt>` or `no pending request`. | Any argument: `error: usage: badges` |
 | `grant A P` | `granted <A> <P>` | Not exactly two words: `error: usage: grant AGENT PERM`. Bad name: `error: bad agent name: <A>`. Unknown verb: `error: unknown permission: <P>`. New name and 4 badges exist: `error: badge table full`. The name is checked before the permission. |
 | `revoke A P` / `revoke A all` | `revoked <A> <P\|all>`, then any cancellation line and its `R3GATE reply` | Not exactly two words: `error: usage: revoke AGENT PERM`. Bad name: `error: bad agent name: <A>`. Unknown verb other than `all`: `error: unknown permission: <P>`. No such badge: `error: no badge <A>`. |
-| `approve N` | The approved line and the `R3GATE reply` | Not exactly one word: `error: usage: approve N`. Not a number, or not the pending number: `error: no pending request <N>`. |
+| `approve N` | The approved line and the `R3GATE reply` | Not exactly one word: `error: usage: approve N`. A full flight recorder, before the number is parsed: `error: flight recorder full: approve refused`. Not a number, or not the pending number: `error: no pending request <N>`. |
 | `deny N` | `gate: request <n> denied` and the `R3GATE reply` | `error: usage: deny N`. `error: no pending request <N>`. |
 
 No shell path allocates. `shell-mem` keeps `heap_used <= 4096`.
@@ -189,7 +189,7 @@ The seven lines are `R3GATE ASK ai1 1 read`, `halt`, `R3GATE ASK ai1 2 say ` plu
 | `0x78` | 241 | `gate-core` ok | `gate_core_ok` |
 | `0x79` | 243 | `gate-expire` ok | `gate_expire_ok` |
 
-`0x76`–`0x77` (237–239) and `0x7A`–`0x7F` (245–255) stay unused. Each helper is compiled only for its feature. Gate shell cases use the shell outcome statuses 209, 211, and 217.
+`0x76`–`0x77` (237–239) and `0x7B`–`0x7F` (247–255) stay unused. `0x7A` (245) is `recorder-core` (`docs/RECORDER.md`). Each helper is compiled only for its feature. Gate shell cases use the shell outcome statuses 209, 211, and 217.
 
 ## 10. Determinism
 

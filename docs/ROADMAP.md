@@ -19,12 +19,13 @@
 5. Heap + frame allocator
 6. Interactive shell. Merged in PR #6 at 4de4b2a (36/36 smoke cases).
 7. Scheduler. Merged in PR #7 at f1d2a3d (46/46 smoke cases).
+8. Human gate. Merged in PR #8 at 64d7225 from tested head 92abe8c (56/56 smoke cases).
 
 ## Next, in order
-8. **Human gate.** AI agents hold limited, revocable permissions (for example, "may read work orders, may not run commands"). Every privileged action needs a human's approval, and a revocation takes effect immediately. Each action shows a plain-words explanation before the gate opens. In progress: docs/GATE.md.
 9. **Flight recorder + selftest.**
    - An append-only audit log of every human and AI action, which can be replayed step by step.
    - A `selftest` command that runs the feature checks on the machine and prints a report card.
+   In progress: docs/RECORDER.md.
 10. **Storage.** A RAM disk first, then NVMe, so the audit log and saved data survive a reboot.
 11. **WebAssembly runtime.** A sandbox for apps and for AI tools, running under the gate's permissions. Game logic is written once and runs on R3@TH3 and on the web.
     - The first native app is Glue Duty.

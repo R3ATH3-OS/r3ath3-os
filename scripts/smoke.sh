@@ -14,7 +14,9 @@
 # Scheduler: coop 0x70 → 225, preempt 0x71 → 227, sleep 0x72 → 229,
 # full 0x73 → 231, exit 0x74 → 233, reap 0x75 → 235.
 # Gate: core 0x78 → 241, expire 0x79 → 243.
-# Unused odd statuses: 203–207, 219–223, 237–239, 245–255.
+# Flight recorder: core 0x7A → 245. The shell's record is RAM-only and is lost
+# on reboot.
+# Unused odd statuses: 203–207, 219–223, 237–239, 247–255.
 # A triple-fault or silent reset does not print the fault line and does not
 # use those statuses (this QEMU build has exited 0 on triple fault).
 set -u
@@ -52,6 +54,7 @@ SCHED_EXIT_STATUS=233
 SCHED_REAP_STATUS=235
 GATE_CORE_STATUS=241
 GATE_EXPIRE_STATUS=243
+RECORDER_CORE_STATUS=245
 RAM_BYTES=67108864
 HEAP_BYTES=1048576
 HEAP_LINE='R3ATH3_HEAP ok size=1048576 used=([0-9]+) align_max=4096'
@@ -408,6 +411,179 @@ def judge_gate_expire(text):
     waited = int(match.group(1))
     early = int(match.group(2))
     return 50 <= waited <= 150 and early >= 1
+
+BASIS = 0xcbf29ce484222325
+PRIME = 0x100000001b3
+MASK = (1 << 64) - 1
+LOG_HEADER = re.compile(r"^#([0-9]+) t=([0-9]+) (.+) link=([0-9a-f]{16})$")
+LOG_SUMMARY = re.compile(r"^log entries=([0-9]+) of 128 lost=[0-9]+ head=([0-9a-f]{16})$")
+REPLAY_SUMMARY = re.compile(r"^replay ok entries=([0-9]+) lost=[0-9]+ head=([0-9a-f]{16})$")
+EXP_HEADER = re.compile(r"^#([0-9]+) t=T (.+) link=L$")
+EXP_LOG = re.compile(r"^(log entries=([0-9]+) of 128 lost=[0-9]+ head=)H$")
+EXP_REPLAY = re.compile(r"^(replay ok entries=([0-9]+) lost=[0-9]+ head=)H$")
+
+def fnv_link(prev, n, tick, tag, body):
+    digest = prev
+    data = (
+        n.to_bytes(4, "little")
+        + tick.to_bytes(8, "little")
+        + bytes([len(tag)])
+        + tag
+        + bytes([len(body)])
+        + body
+    )
+    for byte in data:
+        digest = ((digest ^ byte) * PRIME) & MASK
+    return digest
+
+def _ascii_lines(raw):
+    ends = raw.endswith(b"\n")
+    text = raw.decode("ascii")
+    lines = text.split("\n")
+    if ends:
+        if lines[-1] != "":
+            return None
+        lines = lines[:-1]
+    return lines, ends
+
+def judge_log(actual, expected):
+    try:
+        parsed = _ascii_lines(actual)
+        expected_text = expected.decode("ascii")
+    except UnicodeDecodeError:
+        return False
+    if parsed is None:
+        return False
+    if b"R3ATH3_PANIC" in actual or b"R3ATH3_BOOT_OK" in actual:
+        return False
+    lines, ends = parsed
+    entries = {}
+    heads = []
+    compared = []
+    index = 0
+    while index < len(lines):
+        header = LOG_HEADER.fullmatch(lines[index])
+        if header:
+            if index + 1 >= len(lines) or not lines[index + 1].startswith("  "):
+                return False
+            body = lines[index + 1][2:]
+            number = int(header.group(1))
+            tick = int(header.group(2))
+            tag = header.group(3)
+            link = int(header.group(4), 16)
+            record = (tick, tag, body, link)
+            if number in entries and entries[number] != record:
+                return False
+            entries[number] = record
+            compared.append("#%d t=T %s link=L" % (number, tag))
+            compared.append(lines[index + 1])
+            index += 2
+            continue
+        summary = LOG_SUMMARY.fullmatch(lines[index]) or REPLAY_SUMMARY.fullmatch(lines[index])
+        if summary:
+            count = int(summary.group(1))
+            head = int(summary.group(2), 16)
+            heads.append((count, head))
+            compared.append(lines[index][:summary.start(2)] + "H" + lines[index][summary.end(2):])
+            index += 1
+            continue
+        compared.append(lines[index])
+        index += 1
+    links = {}
+    if entries:
+        max_n = max(entries)
+        if set(entries) != set(range(1, max_n + 1)):
+            return False
+        prev = BASIS
+        for number in range(1, max_n + 1):
+            tick, tag, body, link = entries[number]
+            if number > 1 and tick < entries[number - 1][0]:
+                return False
+            expect = fnv_link(prev, number, tick, tag.encode("ascii"), body.encode("ascii"))
+            if expect != link:
+                return False
+            links[number] = expect
+            prev = expect
+    else:
+        max_n = 0
+    for count, head in heads:
+        if count == 0:
+            if head != BASIS:
+                return False
+        elif count > max_n or head != links[count]:
+            return False
+    rendered = "\n".join(compared) + ("\n" if ends else "")
+    return rendered == expected_text
+
+def fill_log(expected):
+    parsed = _ascii_lines(expected)
+    if parsed is None:
+        raise ValueError("expected log is not ascii text")
+    lines, ends = parsed
+    info = {}
+    index = 0
+    while index < len(lines):
+        header = EXP_HEADER.fullmatch(lines[index])
+        if header:
+            number = int(header.group(1))
+            tag = header.group(2)
+            body = lines[index + 1][2:]
+            if number in info and info[number] != (tag, body):
+                raise ValueError("inconsistent entry")
+            info[number] = (tag, body)
+            index += 2
+            continue
+        index += 1
+    max_n = max(info) if info else 0
+    prev = BASIS
+    chain = {}
+    ticks = {}
+    for number in range(1, max_n + 1):
+        tag, body = info[number]
+        ticks[number] = 10 * number
+        link = fnv_link(prev, number, ticks[number], tag.encode("ascii"), body.encode("ascii"))
+        chain[number] = link
+        prev = link
+    out = []
+    index = 0
+    while index < len(lines):
+        header = EXP_HEADER.fullmatch(lines[index])
+        if header:
+            number = int(header.group(1))
+            out.append("#%d t=%d %s link=%016x" % (number, ticks[number], header.group(2), chain[number]))
+            out.append(lines[index + 1])
+            index += 2
+            continue
+        summary = EXP_LOG.fullmatch(lines[index]) or EXP_REPLAY.fullmatch(lines[index])
+        if summary:
+            count = int(summary.group(2))
+            head = BASIS if count == 0 else chain[count]
+            out.append("%s%016x" % (summary.group(1), head))
+            index += 1
+            continue
+        out.append(lines[index])
+        index += 1
+    return ("\n".join(out) + ("\n" if ends else "")).encode("ascii")
+
+def recorder_core_log():
+    return (
+        b"R3ATH3_STAGE rust_main\n"
+        b"R3ATH3_RECORDER_CORE step=1 len=0 lost=0 head=cbf29ce484222325 verify=ok\n"
+        b"R3ATH3_RECORDER_CORE step=2 n=1 link=ebb95e48118d0282\n"
+        b"R3ATH3_RECORDER_CORE step=3 n=2 link=4d9b4cc92b89320a verify=ok\n"
+        b"R3ATH3_RECORDER_CORE step=4 len=4 agent_before=yes agent_after=no\n"
+        b"R3ATH3_RECORDER_CORE step=5 len=6 full=yes lost=1 head=68712f5597559a1a\n"
+        b"R3ATH3_RECORDER_CORE step=6 bad=4 noted=1 len=0 lost=5\n"
+        b"R3ATH3_RECORDER_CORE step=7 tamper=3 verify=broken at=3 upto2=ok\n"
+        b"R3ATH3_RECORDER_CORE step=8 get0=none get7=none get1=10,human last=ok,help\n"
+        b"R3ATH3_RECORDER_CORE step=9 card=selftest frames   FAIL no free frame\n"
+        b"R3ATH3_RECORDER_CORE step=10 card=selftest: 6 of 7 ok, 1 failed\n"
+        b"R3ATH3_RECORDER_CORE step=11 expired=ai1 halt seq=1 rq=4 denied reason=timeout|failed=ai1 spawn-spin seq=7 rq=5 failed reason=full\n"
+        b"R3ATH3_RECORDER_CORE ok steps=11\n"
+    )
+
+def judge_recorder_core(text):
+    return text == recorder_core_log()
 PY
 }
 
@@ -471,6 +647,34 @@ judge_gate_expire() {
   local status="$1" file="$2"
   [[ "$status" -eq "$GATE_EXPIRE_STATUS" ]] || return 1
   load_harness_py judge_gate_expire "$file"
+}
+
+judge_recorder_core() {
+  local status="$1" file="$2"
+  [[ "$status" -eq "$RECORDER_CORE_STATUS" ]] || return 1
+  load_harness_py judge_recorder_core "$file"
+}
+
+# Status must equal want. Masks t=, link=, and head= on header and summary
+# lines, then recomputes every masked value from the transcript.
+judge_shell_log() {
+  local status="$1" file="$2" expected="$3" want="$4"
+  [[ "$status" -eq "$want" ]] || return 1
+  if grep -F -q "R3ATH3_PANIC" "$file"; then
+    return 1
+  fi
+  if grep -F -q "$MARKER" "$file"; then
+    return 1
+  fi
+  python3 - "$OUT/harness_py.py" "$file" "$expected" <<'PY'
+import importlib.util, sys
+path, actual, expected = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("harness_py", path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+ok = mod.judge_log(open(actual, "rb").read(), open(expected, "rb").read())
+sys.exit(0 if ok else 1)
+PY
 }
 
 judge_exact() {
@@ -882,6 +1086,30 @@ PY
   if judge_gate_expire "$GATE_EXPIRE_STATUS" "$dir/gate-expire-late.log"; then ok=1; fi
   if judge_gate_expire "$GATE_EXPIRE_STATUS" "$dir/gate-expire-zero.log"; then ok=1; fi
 
+  python3 - "$OUT/harness_py.py" "$dir" <<'PY'
+import importlib.util, sys
+path, out = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("harness_py", path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+good = mod.recorder_core_log()
+open(out + "/recorder-core.log", "wb").write(good)
+lines = good.splitlines(True)
+open(out + "/recorder-core-short.log", "wb").write(b"".join(lines[:2] + lines[3:]))
+swapped = lines[:]
+swapped[1], swapped[2] = swapped[2], swapped[1]
+open(out + "/recorder-core-swap.log", "wb").write(b"".join(swapped))
+digit = bytearray(good)
+spot = digit.find(b"link=ebb95e48118d0282")
+digit[spot + len(b"link=")] = ord("0") if digit[spot + len(b"link=")] != ord("0") else ord("1")
+open(out + "/recorder-core-digit.log", "wb").write(digit)
+PY
+  judge_recorder_core "$RECORDER_CORE_STATUS" "$dir/recorder-core.log" || ok=1
+  if judge_recorder_core "$GATE_EXPIRE_STATUS" "$dir/recorder-core.log"; then ok=1; fi
+  if judge_recorder_core "$RECORDER_CORE_STATUS" "$dir/recorder-core-short.log"; then ok=1; fi
+  if judge_recorder_core "$RECORDER_CORE_STATUS" "$dir/recorder-core-swap.log"; then ok=1; fi
+  if judge_recorder_core "$RECORDER_CORE_STATUS" "$dir/recorder-core-digit.log"; then ok=1; fi
+
   if ! write_shell_cases; then
     ok=1
   else
@@ -911,6 +1139,80 @@ PY
     if judge_exact "$SHELL_CMD_STATUS" "$OUT/task/gate-sneak.expected" "$SHELL_CMD_STATUS" "$OUT/task/gate-usage.expected"; then ok=1; fi
     if judge_exact "$SHELL_CMD_STATUS" "$OUT/task/shell-sched-args.expected" "$SHELL_CMD_STATUS" "$OUT/task/shell-sched-error.expected"; then ok=1; fi
     if judge_exact "$SHELL_HALT_STATUS" "$OUT/task/gate-halt.expected" "$SHELL_HALT_STATUS" "$OUT/task/shell-halt.expected"; then ok=1; fi
+    judge_exact "$SHELL_CMD_STATUS" "$OUT/task/log-usage.expected" "$SHELL_CMD_STATUS" "$OUT/task/log-usage.expected" || ok=1
+    judge_exact "$SHELL_OK_STATUS" "$OUT/task/shell-selftest.expected" "$SHELL_OK_STATUS" "$OUT/task/shell-selftest.expected" || ok=1
+    if judge_exact "$SHELL_OK_STATUS" "$OUT/task/log-usage.expected" "$SHELL_CMD_STATUS" "$OUT/task/log-usage.expected"; then ok=1; fi
+    if judge_exact "$SHELL_CMD_STATUS" "$OUT/task/shell-selftest.expected" "$SHELL_OK_STATUS" "$OUT/task/shell-selftest.expected"; then ok=1; fi
+    if judge_exact "$SHELL_OK_STATUS" "$OUT/task/shell-selftest.expected" "$SHELL_OK_STATUS" "$OUT/task/shell-basic.expected"; then ok=1; fi
+    if judge_exact "$SHELL_CMD_STATUS" "$OUT/task/log-usage.expected" "$SHELL_CMD_STATUS" "$OUT/task/shell-usage.expected"; then ok=1; fi
+    if judge_exact "$SHELL_CMD_STATUS" "$OUT/task/log-usage.expected" "$SHELL_CMD_STATUS" "$OUT/task/gate-usage.expected"; then ok=1; fi
+    if ! python3 - "$OUT/harness_py.py" "$OUT/task" <<'PY'
+import importlib.util, re, sys
+path, task = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("harness_py", path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+def load(name):
+    return open(task + "/" + name, "rb").read()
+
+record = load("log-record.expected")
+full = load("log-full.expected")
+filled_record = mod.fill_log(record)
+filled_full = mod.fill_log(full)
+if not mod.judge_log(filled_record, record):
+    sys.exit(1)
+if not mod.judge_log(filled_full, full):
+    sys.exit(1)
+open(task + "/log-record.filled", "wb").write(filled_record)
+open(task + "/log-full.filled", "wb").write(filled_full)
+
+def must_fail(sample, expected):
+    if mod.judge_log(sample, expected):
+        sys.exit(1)
+
+text = filled_record.decode("ascii")
+link = re.search(r"link=([0-9a-f]{16})", text)
+flipped = text.replace("link=" + link.group(1), "link=" + ("0" if link.group(1)[0] != "0" else "1") + link.group(1)[1:], 1)
+must_fail(flipped.encode("ascii"), record)
+body = text.replace("\n  log\n", "\n  Log\n", 1)
+must_fail(body.encode("ascii"), record)
+ticks = text.replace("#3 t=30 ", "#3 t=40 ", 1).replace("#4 t=40 ", "#4 t=30 ", 1)
+must_fail(ticks.encode("ascii"), record)
+replay_head = re.search(r"replay ok entries=20 lost=0 head=([0-9a-f]{16})", text).group(1)
+entry1 = re.search(r"#1 t=10 human last=ok link=([0-9a-f]{16})", text).group(1)
+other_head = text.replace("replay ok entries=20 lost=0 head=" + replay_head, "replay ok entries=20 lost=0 head=" + entry1, 1)
+must_fail(other_head.encode("ascii"), record)
+parts = text.split("#11 t=110 ")
+different = "#11 t=110 ".join(parts[:2]) + "#11 t=111 " + "#11 t=110 ".join(parts[2:])
+must_fail(different.encode("ascii"), record)
+lines = filled_record.splitlines(True)
+gap = []
+skipped = False
+for line in lines:
+    if not skipped and line.startswith(b"#5 t="):
+        skipped = True
+        continue
+    if skipped:
+        skipped = False
+        continue
+    gap.append(line)
+must_fail(b"".join(gap), record)
+if mod.judge_log(filled_record, full):
+    sys.exit(1)
+if mod.judge_log(filled_full, record):
+    sys.exit(1)
+if mod.judge_log(load("gate-approve.expected"), record):
+    sys.exit(1)
+PY
+    then
+      ok=1
+    fi
+    judge_shell_log "$SHELL_OK_STATUS" "$OUT/task/log-record.filled" "$OUT/task/log-record.expected" "$SHELL_OK_STATUS" || ok=1
+    judge_shell_log "$SHELL_OK_STATUS" "$OUT/task/log-full.filled" "$OUT/task/log-full.expected" "$SHELL_OK_STATUS" || ok=1
+    if judge_shell_log "$SHELL_CMD_STATUS" "$OUT/task/log-record.filled" "$OUT/task/log-record.expected" "$SHELL_OK_STATUS"; then
+      ok=1
+    fi
   fi
 
   if [[ "$ok" -eq 0 ]]; then
@@ -1371,6 +1673,9 @@ help_text = (
     "revoke A P  take permission P (or all) from agent A\n"
     "approve N   let gate request N run\n"
     "deny N      refuse gate request N\n"
+    "log         newest flight-recorder entries and totals\n"
+    "replay [N]  check the record and print it, or entry N\n"
+    "selftest    run the feature checks and print a report card\n"
     "run SCRIPT  run a task script, lines separated by ;\n"
     "exit        leave the shell with the last status\n"
     "halt        stop the machine\n"
@@ -1931,6 +2236,195 @@ write_bytes(
     + "exit\n"
     + exit_cmd,
 )
+
+def entry(n, tag, body):
+    return "#%d t=T %s link=L\n  %s\n" % (n, tag, body)
+
+log_records = [
+    (1, "human last=ok", "log"),
+    (2, "gate", "grant ai1 spawn"),
+    (3, "human last=ok", "grant ai1 spawn"),
+    (4, "gate", "grant ai1 say"),
+    (5, "human last=ok", "grant ai1 say"),
+    (6, "agent ai1", "say seq=1 done text=hello"),
+    (7, "agent ai1", "- seq=2 bad reason=verb"),
+    (8, "agent zed", "read seq=3 denied reason=no-badge"),
+    (9, "agent ai1", "spawn-nap seq=4 rq=1 pending"),
+    (10, "human last=cmd", "approve 9"),
+    (11, "gate", "ai1 spawn-nap seq=4 rq=1 done id=2"),
+    (12, "human last=ok", "approve 1"),
+    (13, "human last=ok", "wait 2"),
+    (14, "agent ai1", "spawn-spin seq=5 rq=2 pending"),
+    (15, "gate", "ai1 spawn-spin seq=5 rq=2 denied reason=human"),
+    (16, "human last=ok", "deny 2"),
+    (17, "agent ai1", "spawn-nap seq=6 rq=3 pending"),
+    (18, "gate", "revoke ai1 spawn"),
+    (19, "gate", "ai1 spawn-nap seq=6 rq=3 denied reason=revoked"),
+    (20, "human last=ok", "revoke ai1 spawn"),
+    (21, "human last=ok", "replay"),
+    (22, "human last=ok", "replay 11"),
+]
+
+def entries(nums):
+    return "".join(entry(n, log_records[n - 1][1], log_records[n - 1][2]) for n in nums)
+
+write_text(
+    "log-record.steps",
+    "line log\n"
+    "line grant ai1 spawn\n"
+    "line grant ai1 say\n"
+    "ai R3GATE ASK ai1 1 say hello\n"
+    "ai R3GATE ASK ai1 2 log\n"
+    "ai R3GATE ASK zed 3 read\n"
+    "ai R3GATE ASK ai1 4 spawn nap\n"
+    "line approve 9\n"
+    "line approve 1\n"
+    "line wait 2\n"
+    "ai R3GATE ASK ai1 5 spawn spin\n"
+    "line deny 2\n"
+    "ai R3GATE ASK ai1 6 spawn nap\n"
+    "line revoke ai1 spawn\n"
+    "line replay\n"
+    "line replay 11\n"
+    "line log\n"
+    "line exit\n",
+)
+write_bytes(
+    "log-record.expected",
+    prefix
+    + typed("log", "log entries=0 of 128 lost=0 head=H")
+    + typed("grant ai1 spawn", "granted ai1 spawn")
+    + typed("grant ai1 say", "granted ai1 say")
+    + "\n"
+    + "ai1 says: hello\n"
+    + "R3GATE reply agent=ai1 seq=1 verb=say result=done\n"
+    + p
+    + bad_line("verb", "ai1", "2", "-")
+    + refused("zed", "no badge", 3, "read", "no-badge")
+    + pending_block(1, "ai1", nap_explain, 4, "spawn")
+    + typed("approve 9", "error: no pending request 9")
+    + "approve 1\n"
+    + "gate: request 1 approved: started task 2 (nap)\n"
+    + "R3GATE reply agent=ai1 seq=4 verb=spawn result=done rq=1 id=2\n"
+    + p
+    + typed("wait 2", "exited id=2")
+    + pending_block(2, "ai1", spin_explain, 5, "spawn")
+    + "deny 2\n"
+    + "gate: request 2 denied\n"
+    + "R3GATE reply agent=ai1 seq=5 verb=spawn result=denied rq=2 reason=human\n"
+    + p
+    + pending_block(3, "ai1", nap_explain, 6, "spawn")
+    + "revoke ai1 spawn\n"
+    + "revoked ai1 spawn\n"
+    + "gate: request 3 cancelled: ai1 may no longer spawn\n"
+    + "R3GATE reply agent=ai1 seq=6 verb=spawn result=denied rq=3 reason=revoked\n"
+    + p
+    + "replay\n"
+    + entries(range(1, 21))
+    + "replay ok entries=20 lost=0 head=H\n"
+    + p
+    + "replay 11\n"
+    + entry(11, log_records[10][1], log_records[10][2])
+    + "replay step 11 of 21 ok\n"
+    + p
+    + "log\n"
+    + "log entries=22 of 128 lost=0 head=H\n"
+    + entries(range(18, 23))
+    + p
+    + "exit\n"
+    + exit_ok,
+)
+
+full_steps = ["line grant ai1 spawn\n", "ai R3GATE ASK ai1 1 spawn nap\n"]
+for k in range(2, 119):
+    full_steps.append("ai R3GATE ASK zed %d read\n" % k)
+full_steps.append("ai R3GATE ASK zed 119 read\n")
+for _ in range(7):
+    full_steps.append("line echo a\n")
+full_steps.extend([
+    "line echo b\n",
+    "line approve 1\n",
+    "line ps\n",
+    "line deny 1\n",
+    "line replay\n",
+    "line log\n",
+    "line exit\n",
+])
+write_text("log-full.steps", "".join(full_steps))
+full_parts = [
+    prefix,
+    typed("grant ai1 spawn", "granted ai1 spawn"),
+    pending_block(1, "ai1", nap_explain, 1, "spawn"),
+]
+for k in range(2, 119):
+    full_parts.append(refused("zed", "no badge", k, "read", "no-badge"))
+full_parts.append(
+    "\n"
+    "gate: ignored an agent line: flight recorder full\n"
+    "R3GATE reply agent=zed seq=119 verb=read result=denied reason=log-full\n"
+    + p
+)
+for _ in range(7):
+    full_parts.append(typed("echo a", "a"))
+full_parts.append("echo b\nb\nlog: flight recorder full; later entries are counted as lost\n" + p)
+full_parts.append(typed("approve 1", "error: flight recorder full: approve refused"))
+full_parts.append(typed("ps", ps_two[:-1]))
+full_parts.append(
+    "deny 1\n"
+    "gate: request 1 denied\n"
+    "R3GATE reply agent=ai1 seq=1 verb=spawn result=denied rq=1 reason=human\n"
+    + p
+)
+full_parts.append("replay\n")
+full_parts.append(entry(1, "gate", "grant ai1 spawn"))
+full_parts.append(entry(2, "human last=ok", "grant ai1 spawn"))
+full_parts.append(entry(3, "agent ai1", "spawn-nap seq=1 rq=1 pending"))
+for n in range(4, 121):
+    full_parts.append(entry(n, "agent zed", "read seq=%d denied reason=no-badge" % (n - 2)))
+for n in range(121, 128):
+    full_parts.append(entry(n, "human last=ok", "echo a"))
+full_parts.append(entry(128, "human last=ok", "echo b"))
+full_parts.append("replay ok entries=128 lost=5 head=H\n" + p)
+full_parts.append("log\nlog entries=128 of 128 lost=6 head=H\n")
+for n in range(124, 128):
+    full_parts.append(entry(n, "human last=ok", "echo a"))
+full_parts.append(entry(128, "human last=ok", "echo b"))
+full_parts.append(p + "exit\n" + exit_ok)
+write_bytes("log-full.expected", "".join(full_parts))
+
+usage_log = [
+    ("log x", "error: usage: log"),
+    ("replay 1 2", "error: usage: replay [N]"),
+    ("replay x", "error: no log entry x"),
+    ("replay 0", "error: no log entry 0"),
+    ("replay 9", "error: no log entry 9"),
+    ("selftest x", "error: usage: selftest"),
+]
+write_text("log-usage.steps", "".join("line " + text + "\n" for text, _ in usage_log) + "line exit\n")
+write_bytes(
+    "log-usage.expected",
+    prefix + "".join(typed(text, output) for text, output in usage_log) + "exit\n" + exit_cmd,
+)
+
+card_names = ["timer", "sched", "frames", "script", "gate", "recorder", "heap"]
+card = "selftest: 7 checks\n" + "".join("selftest %s ok\n" % name.ljust(8) for name in card_names) + "selftest: 7 of 7 ok"
+write_text(
+    "shell-selftest.steps",
+    "line grant ai1 read\nline selftest\nline badges\nline ps\nline exit\n",
+)
+write_bytes(
+    "shell-selftest.expected",
+    prefix
+    + typed("grant ai1 read", "granted ai1 read")
+    + "selftest\n"
+    + card
+    + "\n"
+    + p
+    + typed("badges", "badge ai1 may=read\nno pending request")
+    + typed("ps", ps_two[:-1])
+    + "exit\n"
+    + exit_ok,
+)
 PY
 }
 
@@ -2223,6 +2717,7 @@ expect_gate() {
   local steps="$3"
   local expected="$4"
   local want="$5"
+  local kind="${6:-exact}"
   local log_file="$OUT/$name.serial.log"
   local err_file="$OUT/$name.qemu.err"
   local sock="$OUT/$name.mon.sock"
@@ -2480,7 +2975,25 @@ sys.exit(code if code is not None else 124)
 PY
   local status=$?
   set -e
-  if judge_exact "$status" "$log_file" "$want" "$expected"; then
+  local passed=0
+  case "$kind" in
+    exact)
+      if judge_exact "$status" "$log_file" "$want" "$expected"; then
+        passed=1
+      fi
+      ;;
+    log)
+      if judge_shell_log "$status" "$log_file" "$expected" "$want"; then
+        passed=1
+      fi
+      ;;
+    *)
+      log "[FAIL] $name unknown judge $kind"
+      FAILURES=$((FAILURES + 1))
+      return
+      ;;
+  esac
+  if [[ "$passed" -eq 1 ]]; then
     log "[PASS] $name exit=$status"
   else
     log "[FAIL] $name exit=$status"
@@ -2618,6 +3131,9 @@ else
   if build_kernel gate-expire gate-expire; then
     expect_case gate-expire judge_gate_expire 12
   fi
+  if build_kernel recorder-core recorder-core; then
+    expect_case recorder-core judge_recorder_core 12
+  fi
   if build_kernel shell shell; then
     if write_shell_cases; then
       expect_shell shell-basic 12 "$OUT/task/shell-basic.steps" "$OUT/task/shell-basic.expected" "$SHELL_OK_STATUS" exact
@@ -2640,6 +3156,10 @@ else
       expect_gate gate-sneak 12 "$OUT/task/gate-sneak.steps" "$OUT/task/gate-sneak.expected" "$SHELL_CMD_STATUS"
       expect_gate gate-halt 12 "$OUT/task/gate-halt.steps" "$OUT/task/gate-halt.expected" "$SHELL_HALT_STATUS"
       expect_gate gate-usage 20 "$OUT/task/gate-usage.steps" "$OUT/task/gate-usage.expected" "$SHELL_CMD_STATUS"
+      expect_gate log-record 20 "$OUT/task/log-record.steps" "$OUT/task/log-record.expected" "$SHELL_OK_STATUS" log
+      expect_gate log-full 60 "$OUT/task/log-full.steps" "$OUT/task/log-full.expected" "$SHELL_OK_STATUS" log
+      expect_shell log-usage 12 "$OUT/task/log-usage.steps" "$OUT/task/log-usage.expected" "$SHELL_CMD_STATUS" exact
+      expect_shell shell-selftest 12 "$OUT/task/shell-selftest.steps" "$OUT/task/shell-selftest.expected" "$SHELL_OK_STATUS" exact
       expect_shell shell-sched-args 12 "$OUT/task/shell-sched-args.steps" "$OUT/task/shell-sched-args.expected" "$SHELL_CMD_STATUS" exact
     else
       log "[FAIL] write shell cases"
