@@ -23,8 +23,8 @@
 9. Flight recorder + selftest. Merged in PR #9 at 08a4bc6 from tested head 9ce5596 (61/61 smoke cases).
 
 ## Next, in order
-10. **Storage.** A RAM disk first, then NVMe, so the audit log and saved data survive a reboot.
-   In progress: docs/STORAGE.md (part A: RAM disk).
+10. **Storage.** A RAM disk first, then QEMU-emulated NVMe, so the audit log and saved data survive a reboot inside that image. This is not real hardware. Without a disk the RAM disk is erased by a reboot.
+   In progress: docs/STORAGE.md (part A merged in PR #10; part B: emulated NVMe).
 11. **WebAssembly runtime.** A sandbox for apps and for AI tools, running under the gate's permissions. Game logic is written once and runs on R3@TH3 and on the web.
     - The first native app is Glue Duty.
     - Then Watch Mechanic, The Movement (a system monitor), the shop terminal, and a Patterns trainer.

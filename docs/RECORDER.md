@@ -6,7 +6,7 @@ This document is the spec for the flight recorder and `selftest`. If the code an
 
 There are no crates.io dependencies. The toolchain is rustc/cargo 1.83.0, target `x86_64-unknown-none`.
 
-The record is the first one the kernel keeps. Milestone 8 printed gate outcomes. This image appends them, and writes each entry through to the store. In this image the store is the RAM disk, and a reboot erases both (`docs/STORAGE.md`).
+The record is the first one the kernel keeps. Milestone 8 printed gate outcomes. This image appends them, and writes each entry through to the store. Without an NVMe disk the store is the RAM disk, and a reboot erases both. With QEMU's emulated NVMe disk, earlier boots stay in the host image and are read with `boots K`. The live record still starts empty every boot (`docs/STORAGE.md`).
 
 ## 1. Scope
 
@@ -20,11 +20,11 @@ In this image:
 6. One kernel proof, `recorder-core` (status 245, fake clock).
 7. Four shell cases (`log-record`, `log-full`, `log-usage`, `shell-selftest`) and the `log` judge.
 
-Not in this image, and not added here: a copy that survives a reboot, NVMe, or a file system; WASM, a framebuffer, or sound; any model, inference, or agent runtime in the kernel; crypto (SHA-256 was considered in milestone 10 and not adopted, see `docs/STORAGE.md`; also HMAC, keys, or signatures); an agent verb or any COM1 path that reads, clears, or changes the record; clearing, rotating, or overwriting the record; re-executing recorded actions; undoing approved actions; queueing more than one pending request; recording keystrokes, raw agent bytes, `R3GATE data` lines, or scheduler internals; wall-clock dates or reading the RTC in the shell; fault injection, panics, or spawned tasks inside `selftest`; changes to the gate's decisions, verbs, or the reply protocol, except the reason word `log-full`; heap allocation in the shell, recorder, or selftest; new `unsafe`. The default boot path is unchanged: boot marker, status 33.
+Not in this image, and not added here: a file system; WASM, a framebuffer, or sound; any model, inference, or agent runtime in the kernel; crypto (SHA-256 was considered in milestone 10 and not adopted, see `docs/STORAGE.md`; also HMAC, keys, or signatures); an agent verb or any COM1 path that reads, clears, or changes the record; clearing, rotating, or overwriting the record; re-executing recorded actions; undoing approved actions; queueing more than one pending request; recording keystrokes, raw agent bytes, `R3GATE data` lines, or scheduler internals; wall-clock dates or reading the RTC in the shell; fault injection, panics, or spawned tasks inside `selftest`; changes to the gate's decisions, verbs, or the reply protocol, except the reason word `log-full`; heap allocation in the shell, recorder, or selftest; new `unsafe`. The default boot path is unchanged: boot marker, status 33.
 
 Honest limits, on purpose:
 
-- The live record is written through to the store. In this image that store is the RAM disk, and a reboot erases both.
+- The live record is written through to the store. Without an NVMe disk that store is the RAM disk, and a reboot erases both. With QEMU's emulated NVMe disk, earlier boots are read with `boots K`. The live record starts empty every boot.
 - In this emulator build, COM1 TX carries the human transcript, including `log` and `replay`. Whoever reads the host side of COM1 sees what the human sees. No request can fetch the record, and nothing on COM1 can change it. The same lines also print on VGA, which does not pass through the host's serial capture.
 - Agent names are self-asserted. The record stores the claimed name.
 - The chain is not crypto. It is not keyed and not collision-resistant.
@@ -200,7 +200,7 @@ What it does not prove:
 
 - It is not keyed and not collision-resistant. Kernel code that can write this memory can rewrite entries and recompute every later link.
 - Truncating the newest entries and lowering `len` is invisible unless the human noted the head.
-- It proves nothing after a reboot. The live record is written through to the RAM disk, and a reboot erases both.
+- It proves nothing about a host that can edit the image. FNV-1a is not crypto. Without an NVMe disk the live record is written through to the RAM disk, and a reboot erases both. With the emulated disk, earlier boots are read with `boots K`.
 - The kernel has no entropy source or key storage, and anyone who controls ring 0 also controls the verifier. That is why there is no crypto.
 
 The agent has no write path into kernel memory. It can only send bounded, printable COM1 lines. The reserve covers floods, and the indented body line covers display forgery. The host can drop or edit serial output. The record stays in kernel RAM, and `log` and `replay` also print on VGA.
@@ -361,7 +361,7 @@ The links in steps 2, 3, and 5 come from section 7. Links 3–5 of that record a
 | --- | --- | --- | --- |
 | `0x7A` | 245 | `recorder-core` ok | `recorder_core_ok` (compiled only for `recorder-core`) |
 
-Shell cases use the shell outcome statuses 209 and 211. The store proof uses 247. The unused odd statuses are 203, 205, 207, 219, 221, 223, 237, 239, 249, 251, 253, and 255: 12 values.
+Shell cases use the shell outcome statuses 209 and 211. The store proof uses 247. The NVMe proof uses 249. The unused odd statuses are 203, 205, 207, 219, 221, 223, 237, 239, 251, 253, and 255: 11 values.
 
 ## 14. Determinism
 
@@ -374,7 +374,7 @@ Shell cases use the shell outcome statuses 209 and 211. The store proof uses 247
 
 ## 15. Smoke
 
-`./scripts/smoke.sh` runs 64 QEMU cases, plus `harness-selftest`, and 27 build lines. The recorder build is `recorder-core`. The store build is `store-core` (`docs/STORAGE.md`). `shell-basic`'s expected help text lists 24 lines. `expect_gate` takes an optional sixth argument: `exact` (the default), `log`, `store`, or `store:s1`.
+`./scripts/smoke.sh` runs 68 QEMU cases, plus `harness-selftest`, and 28 build lines. The recorder build is `recorder-core`. The store build is `store-core`. The NVMe build is `nvme-core` (`docs/STORAGE.md`). `shell-basic`'s expected help text lists 24 lines. `expect_gate` takes an optional sixth argument: `exact` (the default), `log`, `store`, or `store:s1`.
 
 The `log` judge (`judge_log` in the harness, bash wrapper `judge_shell_log status file expected want`):
 

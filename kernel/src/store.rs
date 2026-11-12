@@ -1,9 +1,9 @@
 //! On-store format `R3ATH3ST` version 1. See `docs/STORAGE.md`.
 //!
 //! Safe code only. No statics and no allocation. Every read and write goes
-//! through a `&mut dyn BlockDev`. The same layout is used on the RAM disk.
-//! Nothing stored here survives a reboot of the RAM disk: the bytes live in
-//! guest RAM and come back as zeros.
+//! through a `&mut dyn BlockDev`. The same layout is used on the RAM disk
+//! and on the NVMe namespace. A reboot erases the RAM disk. The NVMe bytes
+//! stay in the host image.
 
 #![allow(dead_code)]
 

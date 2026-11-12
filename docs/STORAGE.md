@@ -1,4 +1,4 @@
-# Storage (part A: RAM disk)
+# Storage
 
 Suggested wording, not a certification and not a claim that the system exists yet: "An authentic Human–AI co-op OS".
 
@@ -6,12 +6,12 @@ This document is the spec for the `store` feature in this image. If the code and
 
 There are no crates.io dependencies. The toolchain is rustc/cargo 1.83.0, target `x86_64-unknown-none`.
 
-Part A is a RAM disk. A reboot erases it. Nothing in this image survives a reboot. NVMe, a disk image, and a copy that is still there after QEMU starts again are not in this image.
+Part A is a RAM disk. A reboot erases it. Part B adds a polled driver for QEMU's emulated NVMe controller. With that disk attached, earlier boots stay in the host image and are read with `boots K`. The live record still starts empty every boot. Without a controller the shell uses the RAM disk and prints nothing about it. This is not a real disk and not real hardware.
 
 ## 1. Words
 
 - **Block:** 512 bytes, addressed by an LBA from 0.
-- **Device:** something that implements `BlockDev`. This image has one: the RAM disk.
+- **Device:** something that implements `BlockDev`. This image has the RAM disk, and, when QEMU presents an NVMe controller, that namespace.
 - **Store:** the `R3ATH3ST` version 1 format on that device.
 - **Boot record:** one boot's copy of the flight recorder on the store. Records are numbered from 1.
 - **Saved text:** a short named text the human keeps with `save`.
@@ -206,9 +206,9 @@ For `k = 1`, `prev` is `-`. For `k ≥ 2` with a good header, `prev` is `bad` wh
 
 ### 4.2 What a reboot does
 
-Every boot starts with a zeroed RAM disk, formats it, and opens boot record 1. The shell prints nothing on that success. `boots` and `boots 1` read this boot's record back from the RAM disk. That proves the write path. It does not prove that anything is still there after a reboot, because nothing is.
+With no NVMe controller, every boot starts with a zeroed RAM disk, formats it, and opens boot record 1. The shell prints nothing on that success. `boots` and `boots 1` read this boot's record back from the RAM disk. That proves the write path. It does not prove that anything is still there after a reboot, because the RAM disk is not.
 
-Only a blank disk is formatted. There is no erase command. Earlier records on a device that still holds them are read-only history. On the RAM disk the device does not still hold them: the next boot's disk is zeros.
+Only a blank disk is formatted. There is no erase command. Earlier records on a device that still holds them are read-only history. On the RAM disk the device does not still hold them: the next boot's disk is zeros. On the emulated NVMe disk the bytes stay in the host image, so the next boot reads them with `boots K`. The live record in kernel RAM still starts empty.
 
 ## 5. Shell commands
 
@@ -223,8 +223,8 @@ Each command sets `last=ok` on success and `last=cmd` on any `error:` line.
 | `store` | Two lines |
 | `boots` | One line per non-free slot, then a summary |
 | `boots K` | The record's entries, then a result line |
-| `save NAME TEXT` | `saved <NAME> to ram` |
-| `show` | `saved <NAME>` per used slot, `saved slot <i> bad` per bad slot, then `saved <u> of 16 on ram` |
+| `save NAME TEXT` | `saved <NAME> to ram` on the RAM disk, `saved <NAME> to nvme` on the emulated NVMe disk |
+| `show` | `saved <NAME>` per used slot, `saved slot <i> bad` per bad slot, then `saved <u> of 16 on ram` or `saved <u> of 16 on nvme` |
 | `show NAME` | `<NAME> = <TEXT>` |
 | `forget NAME` | `forgot <NAME>` |
 
@@ -370,7 +370,7 @@ R3ATH3_STORE_CORE ok steps=10
 
 ## 9. Smoke
 
-`./scripts/smoke.sh` runs 64 QEMU cases, plus `harness-selftest`, and 27 build lines. The new build is `store-core`. No pre-existing case gains a disk image or a new QEMU flag.
+`./scripts/smoke.sh` runs 68 QEMU cases, plus `harness-selftest`, and 28 build lines. The part A build is `store-core`. The part B build is `nvme-core`. No pre-existing case gains a disk image or a new QEMU flag. A case that names an image adds exactly `-drive file=<img>,if=none,id=r3disk,format=raw -device nvme,serial=r3ath3,drive=r3disk`. Images are created under `build/smoke` and are not tracked.
 
 | Case | Runner | Status | Judge | Limit |
 | --- | --- | --- | --- | --- |
@@ -395,14 +395,64 @@ R3ATH3_STORE_CORE ok steps=10
 | 11 | human last=ok | boots |
 | 12 | human last=ok | boots 1 |
 
-`store-usage` types 32 lines and `exit`, and exits 211. It covers the usage, name, length, missing-name, and full-table errors in section 5, fills all 16 names (`k1`…`k16`), overwrites `k1`, and refuses `k17`. The line `save a` plus 69 `x` is 76 bytes, so the shell accepts it and the 58-byte text rule refuses it. It does not cover `error: store read failed` or `error: store write failed`. The RAM disk does not fail a read or a write, so those two lines are not reached in this image. They are reserved for a later device that can fail a read or a write.
+`store-usage` types 32 lines and `exit`, and exits 211. It covers the usage, name, length, missing-name, and full-table errors in section 5, fills all 16 names (`k1`…`k16`), overwrites `k1`, and refuses `k17`. The line `save a` plus 69 `x` is 76 bytes, so the shell accepts it and the 58-byte text rule refuses it. It does not cover `error: store read failed` or `error: store write failed`. The RAM disk does not fail a read or a write, and `store-usage` attaches no disk, so those two lines are not printed by that case. The emulated NVMe driver can fail a command. A timeout or a CID mismatch drops the controller, and a later read or write then fails. The shell prints one of those two error lines and keeps running. No smoke case drives that path.
 
-The `store` judge masks `t=<digits>`, `link=<16 hex>`, and `head=<16 hex>` only on header lines and on summary lines (`log`, `replay`, a `boot K` list line, and a `boot K ok` line), the same way the `log` judge masks header and summary lines. Every other line is compared as written. It then checks the values. Entries after `r3> boots K` are group `sK`. Entries after `r3> log` or `r3> replay` are group `live`. Each group is one chain from `BASIS` when it starts at #1; a group that starts later anchors its first link and checks the rest, and ticks do not decrease. A list line `boot K entries=e … head=X` must use `BASIS` when `e = 0`, and must use entry `e`'s link when group `sK` printed that entry. `boot K ok … head` and `replay ok … head` equal the last link of that group. `store:s1` also requires group `s1` to match group `live` on every common entry number. The `ref` argument is accepted and unused by the cases in this image.
+The `store` judge masks `t=<digits>`, `link=<16 hex>`, and `head=<16 hex>` only on header lines and on summary lines (`log`, `replay`, a `boot K` list line, and a `boot K ok` line), the same way the `log` judge masks header and summary lines. Every other line is compared as written. It then checks the values. Entries after `r3> boots K` are group `sK`. Entries after `r3> log` or `r3> replay` are group `live`. Each group is one chain from `BASIS` when it starts at #1; a group that starts later anchors its first link and checks the rest, and ticks do not decrease. A list line `boot K entries=e … head=X` must use `BASIS` when `e = 0`, and must use entry `e`'s link when group `sK` printed that entry. `boot K ok … head` and `replay ok … head` equal the last link of that group. `store:s1` also requires group `s1` to match group `live` on every common entry number. `ref` is another log: group `s1` must match that log's `live` group on every common entry number. `store-reboot` boot 2 and `store-tamper` boot 2 pass boot 1's log as `ref`.
 
-Intentional changes to older expected transcripts: `shell-basic` help is 24 lines, `shell-selftest` prints the eight-check card, and `recorder-core` step 10 says `selftest: 7 of 8 ok, 1 failed`. 209 covers 14 cases, 211 covers 8, and 247 covers `store-core`.
+Intentional changes to older expected transcripts, from part A: `shell-basic` help is 24 lines, `shell-selftest` prints the eight-check card, and `recorder-core` step 10 says `selftest: 7 of 8 ok, 1 failed`. Part B changes no pre-existing expected file. 209 covers 16 cases, 211 covers 9, 247 covers `store-core`, and 249 covers `nvme-core`. `store-tamper`'s first boot exits 209 and its second exits 211.
 
 The harness self-test rejects a `store-core` log at status 245, with step 4 removed, with steps 4 and 5 swapped, and with one hex digit of step 2's head changed. It rejects a filled `store-ram` log with one link digit changed in the `boots 1` block, one body byte changed in the `replay` block, `s1` refilled with different ticks (each chain still valid, so only the alias fails), the `boots` list head replaced by #9's link, #5 removed from the `boots 1` block, and status 211. `store-usage` does not compare equal to `log-usage` or `shell-usage` in either direction. The filled `store-ram` log does not satisfy `log-record`'s expected text.
 
-## 10. Not in this image
+It also rejects an `nvme-core` log at status 247 and with step 6 removed. The image check rejects a copy with one byte of LBA 7 changed and a copy with a non-zero byte at LBA 100. A filled `store-reboot` boot 2 whose `s1` ticks differ from boot 1 fails the `ref` check. A `store-tamper` boot 2 whose `boot 2 entries=0` line carries a head other than `cbf29ce484222325` fails. That boot 2 does not satisfy `store-reboot` boot 2's expected text. A changed image does not keep `store-baddisk`'s sha256.
 
-NVMe, PCI, port `inl`, an MMIO window, `nvme-core`, a disk image on any QEMU command line, a copy that survives a reboot, a file system, a VFS, an erase command, an agent storage verb, and SHA-256. `0x7C` (status 249) is unused and is the value set aside for a later NVMe proof. The other unused odd statuses are 203, 205, 207, 219, 221, 223, 237, 239, 251, 253, and 255.
+## 10. Emulated NVMe
+
+`pci.rs` scans bus 0 for class `01:08:02` and does not match a vendor id. BAR0 must be a 64-bit memory BAR no larger than 2 MiB. The driver places it at `0x3000_0000`. `boot.rs` maps that 2 MiB page uncached (PWT and PCD) in every build. With `-m 64M` the page is not RAM. `probe` checks for a type-1 RAM region overlapping `[0x3000_0000, 0x3020_0000)` before it moves BAR0 and before it enables memory decode. A refusal after the command bits are on clears memory decode and bus master.
+
+`nvme.rs` is polled. One admin queue pair and one I/O queue pair, 16 entries each. Identify Namespace requires `LBADS = 9`. The namespace on this QEMU is 4096 blocks. Five frames from `frames::alloc` hold the queues and the one-block data buffer. They are taken only when a controller is found, so a shell case with no disk does not change `frames_total`. A command waits at most 200 ticks. A timeout or a CID mismatch drops the controller, so a later command fails instead of reusing a queue that is no longer in step, or the shared data frame a late DMA might still write. Controller ready waits `max(200, CAP.TO × 50)` ticks. `read` and `write` return `Range` before touching the device when `lba >= blocks()`. `nvme-core` also calls `read_unchecked`, which skips that check, so LBA 4096 reaches the controller and completes with SCT 0, SC `0x80`.
+
+The shell calls `probe` after the banner and before the first prompt. Those lines are not recorded.
+
+- No controller: nothing is printed, and the RAM disk is mounted.
+- Probe or mount error: `store: nvme disk not used (<word>); using the ram disk, erased by a reboot`, then the RAM disk. Probe words are `bar`, `window`, `css`, `page-size`, `queue`, `timeout`, `fatal`, `identify`, and `lba-size`. Mount words are `io`, `small`, `superblock`, `version`, `layout`, `size`, and `not-blank`.
+- Blank disk: `store: formatted a blank nvme disk`, then `store: nvme disk; this boot is saved as boot <k> of <slots>`.
+- No free slot: `store: nvme disk full (<slots> boots); this boot is not saved`.
+
+`store` repeats the saved-as-boot line when the disk is in use. When a controller was found and refused, it adds `store: nvme disk not used (<word>)`. A write or flush error prints once: `store: write failed after entry #<saved_upto>; the rest of this boot is not saved`.
+
+`nvmetest::run_core` uses `NvmeDisk` directly. The write pattern for LBA `l` is byte `i = (i·7 + l) & 0xFF`. Success exits 249 (`0x7C`) and prints:
+
+```
+R3ATH3_STAGE rust_main
+R3ATH3_NVME_CORE step=1 found class=010802 bar0=30000000
+R3ATH3_NVME_CORE step=2 ready lba_bytes=512 blocks=4096
+R3ATH3_NVME_CORE step=3 read lba=0 zero=yes
+R3ATH3_NVME_CORE step=4 write lba=7 readback=same
+R3ATH3_NVME_CORE step=5 write lba=4095 readback=same
+R3ATH3_NVME_CORE step=6 lba=4096 driver=range device=sct0-sc80
+R3ATH3_NVME_CORE step=7 flush=ok
+R3ATH3_NVME_CORE ok steps=7
+```
+
+After the exit the harness checks the image: LBA 7 and LBA 4095 hold the pattern, and every other byte is zero.
+
+| Case | Runner | Status | Disk | Limit |
+| --- | --- | --- | --- | --- |
+| `nvme-core` | `expect_case` plus the image check | 249 | blank, 2,097,152 zeros | 12 s |
+| `store-reboot` | `expect_reboot`, mutation `none` | 209, 209 | blank | 20 s per boot |
+| `store-tamper` | `expect_reboot`, `flip:4914` | 209, 211 | blank | 20 s per boot |
+| `store-baddisk` | `expect_baddisk` | 209 | `NOTR3ATH` at offset 0 | 12 s |
+
+`store-reboot` and `store-tamper` boot 1 types `save note kept`, `grant ai1 say`, then `R3GATE ASK ai1 1 say hi`, then `log`, `exit`. The blank image is formatted and this boot is saved as boot 1 of 64. `saved note to nvme` is the save line. Boot 1's record after `exit` is #1 `save note kept`, #2 gate `grant ai1 say`, #3 human `grant ai1 say`, #4 agent `say seq=1 done text=hi`, #5 human `log`. The `log` printed during boot 1 shows four entries, because the `log` line itself is recorded after that print.
+
+`store-reboot` boot 2 types `show note`, `boots`, `boots 1`, `exit`. `note = kept`. Boot 1's list line is `entries=5` and `prev=-`. Boot 2's list line is `entries=1` and `prev=ok`. `boots 1` reprints #1–#5, and those entries must match boot 1's live group where both printed them.
+
+`store-tamper` XORs `0x01` at offset 4914 after boot 1. That is LBA 9 byte 306, entry 3's first body byte. Boot 2 types `boots`, `boots 1`, `exit`. Boot 1 lists `entries=2`, `chain=#3`, `prev=-`. Boot 2 lists `entries=0` and `head=cbf29ce484222325`, with `prev=ok`, because the edit happened before boot 2 opened its record. `boots 1` prints #1 and #2 and then `boot 1: chain broken at #3`, and the shell exits `last=cmd`.
+
+`store-baddisk` types `store` and `exit`. The bad magic is refused with `superblock`, the RAM disk is used, and `store` prints both the RAM lines and `store: nvme disk not used (superblock)`. The image sha256 is the same after the exit.
+
+FNV-1a is not crypto. A host that can edit the image can recompute the links.
+
+## 11. Not in this image
+
+A file system, a VFS, an erase command, an agent storage verb, SHA-256, virtio, real hardware, and a disk that is not QEMU's emulated NVMe controller. The unused odd statuses are 203, 205, 207, 219, 221, 223, 237, 239, 251, 253, and 255.

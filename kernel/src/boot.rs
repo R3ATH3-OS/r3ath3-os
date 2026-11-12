@@ -8,6 +8,9 @@
 //!
 //! `_start` builds a 1 GiB identity map with 2 MiB pages, enables long mode,
 //! and calls `kernel_main` on a 16 KiB stack. This stub leaves IF clear.
+//! One entry is not write-back: the 2 MiB at `0x3000_0000` is uncached
+//! (PWT and PCD). That page is the NVMe MMIO window. With `-m 64M` it is
+//! not RAM. No other build touches it.
 //!
 //! QEMU's PVH entry passes the physical address of the `hvm_start_info`
 //! struct in `%ebx`. `_start` stores it, as its first action after `cli`, in
@@ -58,6 +61,8 @@ global_asm!(
         addl $8, %edi
         decl %ecx
         jnz fill_pd
+
+        movl $0x3000009B, pd + 3072
 
         movl $pd, %eax
         orl $3, %eax

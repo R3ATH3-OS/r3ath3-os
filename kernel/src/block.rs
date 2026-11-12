@@ -1,7 +1,8 @@
 //! Block devices. See `docs/STORAGE.md`.
 //!
 //! Safe code only. A block is 512 bytes, addressed by an LBA from 0.
-//! This module does no I/O of its own. The RAM disk implements `BlockDev`.
+//! This module does no I/O of its own. The RAM disk and the NVMe namespace
+//! implement `BlockDev`.
 
 #![allow(dead_code)]
 

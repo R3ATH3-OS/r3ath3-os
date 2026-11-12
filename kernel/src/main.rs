@@ -7,7 +7,10 @@
 //! The model stays outside ring 0. The human gate, when the shell is built,
 //! checks agent requests inside the kernel. The shell also keeps a flight
 //! recorder: an append-only record in kernel memory. Each entry is written
-//! through to a RAM disk. A reboot erases the record and the RAM disk.
+//! through to a store. With no NVMe disk that store is a RAM disk, and a
+//! reboot erases both. With QEMU's emulated NVMe disk, earlier boots stay
+//! on the image and are read with `boots K`. The live record still starts
+//! empty every boot.
 
 #![no_std]
 #![no_main]
@@ -41,7 +44,7 @@ mod qemu_exit;
 mod recorder;
 #[cfg(feature = "recorder-core")]
 mod recordertest;
-#[cfg(feature = "store")]
+#[cfg(any(feature = "store", feature = "nvme"))]
 mod block;
 #[cfg(feature = "store")]
 mod ramdisk;
@@ -49,6 +52,12 @@ mod ramdisk;
 mod store;
 #[cfg(feature = "store-core")]
 mod storetest;
+#[cfg(feature = "nvme")]
+mod pci;
+#[cfg(feature = "nvme")]
+mod nvme;
+#[cfg(feature = "nvme-core")]
+mod nvmetest;
 #[cfg(feature = "sched")]
 mod sched;
 #[cfg(any(
@@ -98,6 +107,7 @@ const _: () = {
         + cfg!(feature = "gate-expire") as u8
         + cfg!(feature = "recorder-core") as u8
         + cfg!(feature = "store-core") as u8
+        + cfg!(feature = "nvme-core") as u8
         + cfg!(feature = "shell") as u8;
     assert!(modes <= 1, "enable at most one test feature");
 };
@@ -211,6 +221,9 @@ pub extern "C" fn kernel_main() -> ! {
     #[cfg(feature = "store-core")]
     storetest::run_core();
 
+    #[cfg(feature = "nvme-core")]
+    nvmetest::run_core();
+
     #[cfg(feature = "shell")]
     shell::run();
 
@@ -240,6 +253,7 @@ pub extern "C" fn kernel_main() -> ! {
         feature = "gate-expire",
         feature = "recorder-core",
         feature = "store-core",
+        feature = "nvme-core",
         feature = "shell"
     )))]
     boot_ok();
@@ -271,6 +285,7 @@ pub extern "C" fn kernel_main() -> ! {
     feature = "gate-expire",
     feature = "recorder-core",
     feature = "store-core",
+    feature = "nvme-core",
     feature = "shell"
 )))]
 fn boot_ok() -> ! {

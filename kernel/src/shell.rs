@@ -7,7 +7,10 @@
 //! decides what an agent may do. Only `Decision::Run` and `Approved::Go` start
 //! an agent action. Every gate outcome and every finished human command is
 //! appended to the flight recorder, a module-private record in kernel memory.
-//! Each entry is written through to a RAM disk. A reboot erases both.
+//! Each entry is written through to the store. With no NVMe controller that
+//! store is a RAM disk, and a reboot erases both. With QEMU's emulated NVMe
+//! disk, earlier boots stay on the image and are read with `boots K`. The
+//! live record still starts empty every boot. Badges are not stored.
 //!
 //! When the key ring is empty the shell calls `sched::yield_now`. With no
 //! other ready task that returns at once and the shell polls again, so a key
@@ -26,6 +29,7 @@ use crate::gate::{
 };
 use crate::heap;
 use crate::irq::{self, Key};
+use crate::nvme::NvmeDisk;
 use crate::qemu_exit;
 use crate::ramdisk::RamDisk;
 use crate::recorder::{self, Recorder};
@@ -46,6 +50,8 @@ const FULL_NOTICE: &[u8] = b"log: flight recorder full; later entries are counte
 
 static LOG: IrqCell<Recorder<LOG_CAP>> = IrqCell::new(Recorder::new());
 static STORE: IrqCell<store::Mounted> = IrqCell::new(store::Mounted::UNMOUNTED);
+/// Set when an NVMe disk was found and then refused. `store` prints it again.
+static NVME_NOTE: IrqCell<Option<&'static str>> = IrqCell::new(None);
 
 const HELP: [&str; 24] = [
     "help        list commands",
@@ -226,12 +232,7 @@ pub fn run() -> ! {
     vga::console_clear();
     let mut out = Out;
     out.both(b"R3@TH3 shell. Type help for commands.\n");
-    match store::mount(&mut RamDisk, Device::Ram) {
-        Ok(mounted) => STORE.with(|slot| *slot = mounted),
-        Err(error) => {
-            let _ = write!(out, "store: ram disk not usable ({})\n", error.word());
-        }
-    }
+    mount_store(&mut out);
     out.both(PROMPT);
 
     let mut buf = [0u8; MAX_LINE];
@@ -1529,7 +1530,9 @@ fn selftest_cmd(out: &mut Out, rest: &[u8], last: &mut Last) {
         )
     });
     let mounted = STORE.with(|slot| *slot);
-    let store_ok = store::check_live(&mut RamDisk, &mounted, live_len, live_head);
+    let store_ok = on_disk(mounted.device, |dev| {
+        store::check_live(dev, &mounted, live_len, live_head)
+    });
     let card = selftest::run(heap_before, live_ok, store_ok);
     selftest::write_card(out, &card);
     let ok = card.ok_count();
@@ -1546,13 +1549,76 @@ fn selftest_body(ok: usize, fail: usize) -> [u8; 11] {
     body
 }
 
+fn on_disk<R>(device: Device, f: impl FnOnce(&mut dyn crate::block::BlockDev) -> R) -> R {
+    match device {
+        Device::Ram => f(&mut RamDisk),
+        Device::Nvme => f(&mut NvmeDisk),
+    }
+}
+
+fn mount_store(out: &mut Out) {
+    match crate::nvme::probe() {
+        Err(crate::nvme::ProbeError::NoDevice) => mount_ram(out),
+        Err(error) => {
+            note_nvme(out, error.word());
+            mount_ram(out);
+        }
+        Ok(_) => match store::mount(&mut NvmeDisk, Device::Nvme) {
+            Ok(mounted) => {
+                if mounted.formatted {
+                    out.both(b"store: formatted a blank nvme disk\n");
+                }
+                if let Some(k) = mounted.this {
+                    let _ = write!(
+                        out,
+                        "store: nvme disk; this boot is saved as boot {k} of {}\n",
+                        mounted.slots
+                    );
+                } else {
+                    let _ = write!(
+                        out,
+                        "store: nvme disk full ({} boots); this boot is not saved\n",
+                        mounted.slots
+                    );
+                }
+                STORE.with(|slot| *slot = mounted);
+            }
+            Err(error) => {
+                note_nvme(out, error.word());
+                mount_ram(out);
+            }
+        },
+    }
+}
+
+fn note_nvme(out: &mut Out, word: &'static str) {
+    NVME_NOTE.with(|slot| *slot = Some(word));
+    let _ = write!(
+        out,
+        "store: nvme disk not used ({word}); using the ram disk, erased by a reboot\n"
+    );
+}
+
+fn mount_ram(out: &mut Out) {
+    match store::mount(&mut RamDisk, Device::Ram) {
+        Ok(mounted) => STORE.with(|slot| *slot = mounted),
+        Err(error) => {
+            let _ = write!(out, "store: ram disk not usable ({})\n", error.word());
+        }
+    }
+}
+
 fn persist_entry(out: &mut Out, n: u32) {
     let mut mounted = STORE.with(|slot| *slot);
     if !mounted.is_mounted() || mounted.this.is_none() || mounted.failed {
         return;
     }
     let upto = mounted.saved_upto;
-    let failed = store::persist_entry(&mut RamDisk, &mut mounted, n, |i| LOG.with(|log| log.get(i))).is_err();
+    let device = mounted.device;
+    let failed = on_disk(device, |dev| {
+        store::persist_entry(dev, &mut mounted, n, |i| LOG.with(|log| log.get(i)))
+    })
+    .is_err();
     STORE.with(|slot| *slot = mounted);
     if failed {
         let _ = write!(
@@ -1568,7 +1634,8 @@ fn persist_lost(out: &mut Out, lost: u32) {
         return;
     }
     let upto = mounted.saved_upto;
-    let failed = store::persist_lost(&mut RamDisk, &mut mounted, lost).is_err();
+    let device = mounted.device;
+    let failed = on_disk(device, |dev| store::persist_lost(dev, &mut mounted, lost)).is_err();
     STORE.with(|slot| *slot = mounted);
     if failed {
         let _ = write!(
@@ -1607,7 +1674,7 @@ fn store_cmd(out: &mut Out, rest: &[u8], last: &mut Last) {
         read_failed(out, last);
         return;
     };
-    let census = match store::read_saved(&mut RamDisk) {
+    let census = match on_disk(mounted.device, store::read_saved) {
         Ok(census) => census,
         Err(_) => {
             read_failed(out, last);
@@ -1637,10 +1704,13 @@ fn store_cmd(out: &mut Out, rest: &[u8], last: &mut Last) {
                     "store: ram disk, erased by a reboot; this boot is boot {k}\n"
                 );
             }
-            // This image never selects Nvme. The arm stays so the type is
-            // named, and it prints nothing: no sentence here claims a boot
-            // was saved.
-            Device::Nvme => {}
+            Device::Nvme => {
+                let _ = write!(
+                    out,
+                    "store: nvme disk; this boot is saved as boot {k} of {}\n",
+                    mounted.slots
+                );
+            }
         }
     } else {
         let _ = write!(
@@ -1649,6 +1719,9 @@ fn store_cmd(out: &mut Out, rest: &[u8], last: &mut Last) {
             mounted.device.word(),
             mounted.slots
         );
+    }
+    if let Some(word) = NVME_NOTE.with(|slot| *slot) {
+        let _ = write!(out, "store: nvme disk not used ({word})\n");
     }
     *last = Last::Ok;
 }
@@ -1677,7 +1750,7 @@ fn boots_list(out: &mut Out, last: &mut Last) {
         return;
     };
     for k in 1..=mounted.slots {
-        let scan = match store::scan_boot(&mut RamDisk, &mounted, k) {
+        let scan = match on_disk(mounted.device, |dev| store::scan_boot(dev, &mounted, k)) {
             Ok(scan) => scan,
             Err(_) => {
                 read_failed(out, last);
@@ -1691,7 +1764,7 @@ fn boots_list(out: &mut Out, last: &mut Last) {
             let _ = write!(out, "boot {k} bad header\n");
             continue;
         }
-        let prev = match store::prev_word(&mut RamDisk, &mounted, k, &scan) {
+        let prev = match on_disk(mounted.device, |dev| store::prev_word(dev, &mounted, k, &scan)) {
             Ok(word) => word,
             Err(_) => {
                 read_failed(out, last);
@@ -1740,8 +1813,10 @@ fn boots_one(out: &mut Out, word: &[u8], last: &mut Last) {
         *last = Last::Cmd;
         return;
     }
-    let scan = store::walk_boot(&mut RamDisk, &mounted, k, &mut |entry| {
-        print_entry(out, entry);
+    let scan = on_disk(mounted.device, |dev| {
+        store::walk_boot(dev, &mounted, k, &mut |entry| {
+            print_entry(out, entry);
+        })
     });
     let scan = match scan {
         Ok(scan) => scan,
@@ -1815,7 +1890,7 @@ fn save_cmd(out: &mut Out, rest: &[u8], last: &mut Last) {
         read_failed(out, last);
         return;
     };
-    match store::save_text(&mut RamDisk, name, body) {
+    match on_disk(mounted.device, |dev| store::save_text(dev, name, body)) {
         Ok(()) => {
             out.both(b"saved ");
             out.both(name);
@@ -1862,7 +1937,7 @@ fn show_list(out: &mut Out, last: &mut Last) {
         read_failed(out, last);
         return;
     };
-    let census = match store::read_saved(&mut RamDisk) {
+    let census = match on_disk(mounted.device, store::read_saved) {
         Ok(census) => census,
         Err(_) => {
             read_failed(out, last);
@@ -1893,11 +1968,11 @@ fn show_list(out: &mut Out, last: &mut Last) {
 }
 
 fn show_one(out: &mut Out, name: &[u8], last: &mut Last) {
-    if load_store().is_none() {
+    let Some(mounted) = load_store() else {
         read_failed(out, last);
         return;
-    }
-    let census = match store::read_saved(&mut RamDisk) {
+    };
+    let census = match on_disk(mounted.device, store::read_saved) {
         Ok(census) => census,
         Err(_) => {
             read_failed(out, last);
@@ -1934,11 +2009,11 @@ fn forget_cmd(out: &mut Out, rest: &[u8], last: &mut Last) {
         *last = Last::Cmd;
         return;
     };
-    if load_store().is_none() {
+    let Some(mounted) = load_store() else {
         read_failed(out, last);
         return;
-    }
-    match store::forget_text(&mut RamDisk, name) {
+    };
+    match on_disk(mounted.device, |dev| store::forget_text(dev, name)) {
         Ok(()) => {
             out.both(b"forgot ");
             out.both(name);
