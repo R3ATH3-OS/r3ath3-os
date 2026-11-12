@@ -223,8 +223,8 @@ Each command sets `last=ok` on success and `last=cmd` on any `error:` line.
 | `store` | Two lines |
 | `boots` | One line per non-free slot, then a summary |
 | `boots K` | The record's entries, then a result line |
-| `save NAME TEXT` | `saved <NAME> to ram` |
-| `show` | `saved <NAME>` per used slot, `saved slot <i> bad` per bad slot, then `saved <u> of 16 on ram` |
+| `save NAME TEXT` | `saved <NAME> to ram` on the RAM disk, `saved <NAME> to nvme` on the emulated NVMe disk |
+| `show` | `saved <NAME>` per used slot, `saved slot <i> bad` per bad slot, then `saved <u> of 16 on ram` or `saved <u> of 16 on nvme` |
 | `show NAME` | `<NAME> = <TEXT>` |
 | `forget NAME` | `forgot <NAME>` |
 
@@ -395,7 +395,7 @@ R3ATH3_STORE_CORE ok steps=10
 | 11 | human last=ok | boots |
 | 12 | human last=ok | boots 1 |
 
-`store-usage` types 32 lines and `exit`, and exits 211. It covers the usage, name, length, missing-name, and full-table errors in section 5, fills all 16 names (`k1`…`k16`), overwrites `k1`, and refuses `k17`. The line `save a` plus 69 `x` is 76 bytes, so the shell accepts it and the 58-byte text rule refuses it. It does not cover `error: store read failed` or `error: store write failed`. The RAM disk does not fail a read or a write, so those two lines are not reached in this image. They are reserved for a later device that can fail a read or a write.
+`store-usage` types 32 lines and `exit`, and exits 211. It covers the usage, name, length, missing-name, and full-table errors in section 5, fills all 16 names (`k1`…`k16`), overwrites `k1`, and refuses `k17`. The line `save a` plus 69 `x` is 76 bytes, so the shell accepts it and the 58-byte text rule refuses it. It does not cover `error: store read failed` or `error: store write failed`. The RAM disk does not fail a read or a write, and `store-usage` attaches no disk, so those two lines are not printed by that case. The emulated NVMe driver can fail a command. A timeout or a CID mismatch drops the controller, and a later read or write then fails. The shell prints one of those two error lines and keeps running. No smoke case drives that path.
 
 The `store` judge masks `t=<digits>`, `link=<16 hex>`, and `head=<16 hex>` only on header lines and on summary lines (`log`, `replay`, a `boot K` list line, and a `boot K ok` line), the same way the `log` judge masks header and summary lines. Every other line is compared as written. It then checks the values. Entries after `r3> boots K` are group `sK`. Entries after `r3> log` or `r3> replay` are group `live`. Each group is one chain from `BASIS` when it starts at #1; a group that starts later anchors its first link and checks the rest, and ticks do not decrease. A list line `boot K entries=e … head=X` must use `BASIS` when `e = 0`, and must use entry `e`'s link when group `sK` printed that entry. `boot K ok … head` and `replay ok … head` equal the last link of that group. `store:s1` also requires group `s1` to match group `live` on every common entry number. `ref` is another log: group `s1` must match that log's `live` group on every common entry number. `store-reboot` boot 2 and `store-tamper` boot 2 pass boot 1's log as `ref`.
 
@@ -407,9 +407,9 @@ It also rejects an `nvme-core` log at status 247 and with step 6 removed. The im
 
 ## 10. Emulated NVMe
 
-`pci.rs` scans bus 0 for class `01:08:02` and does not match a vendor id. BAR0 must be a 64-bit memory BAR no larger than 2 MiB. The driver places it at `0x3000_0000`. `boot.rs` maps that 2 MiB page uncached (PWT and PCD) in every build. With `-m 64M` the page is not RAM. `probe` refuses the controller when any type-1 RAM region overlaps `[0x3000_0000, 0x3020_0000)`.
+`pci.rs` scans bus 0 for class `01:08:02` and does not match a vendor id. BAR0 must be a 64-bit memory BAR no larger than 2 MiB. The driver places it at `0x3000_0000`. `boot.rs` maps that 2 MiB page uncached (PWT and PCD) in every build. With `-m 64M` the page is not RAM. `probe` checks for a type-1 RAM region overlapping `[0x3000_0000, 0x3020_0000)` before it moves BAR0 and before it enables memory decode. A refusal after the command bits are on clears memory decode and bus master.
 
-`nvme.rs` is polled. One admin queue pair and one I/O queue pair, 16 entries each. Identify Namespace requires `LBADS = 9`. The namespace on this QEMU is 4096 blocks. Five frames from `frames::alloc` hold the queues and the one-block data buffer. They are taken only when a controller is found, so a shell case with no disk does not change `frames_total`. A command waits at most 200 ticks. `read` and `write` return `Range` before touching the device when `lba >= blocks()`. `nvme-core` also calls `read_unchecked`, which skips that check, so LBA 4096 reaches the controller and completes with SCT 0, SC `0x80`.
+`nvme.rs` is polled. One admin queue pair and one I/O queue pair, 16 entries each. Identify Namespace requires `LBADS = 9`. The namespace on this QEMU is 4096 blocks. Five frames from `frames::alloc` hold the queues and the one-block data buffer. They are taken only when a controller is found, so a shell case with no disk does not change `frames_total`. A command waits at most 200 ticks. A timeout or a CID mismatch drops the controller, so a later command fails instead of reusing a queue that is no longer in step, or the shared data frame a late DMA might still write. Controller ready waits `max(200, CAP.TO × 50)` ticks. `read` and `write` return `Range` before touching the device when `lba >= blocks()`. `nvme-core` also calls `read_unchecked`, which skips that check, so LBA 4096 reaches the controller and completes with SCT 0, SC `0x80`.
 
 The shell calls `probe` after the banner and before the first prompt. Those lines are not recorded.
 

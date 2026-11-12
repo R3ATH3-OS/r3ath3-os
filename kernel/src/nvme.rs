@@ -91,15 +91,33 @@ pub fn probe() -> Result<Info, ProbeError> {
         Ok(size) => size,
         Err(PciError::Bar) => return Err(ProbeError::Bar),
     };
-    let bar0 = match pci::place_bar0(&loc) {
-        Ok(addr) => addr,
-        Err(PciError::Bar) => return Err(ProbeError::Bar),
-    };
-    pci::enable(&loc);
+    // Refuse before the BAR is moved and before memory decode is turned on.
+    // `size_bar0` restores the firmware command register, so this check does
+    // not leave our window decoding over RAM.
     if ram_overlaps_window() {
         return Err(ProbeError::Window);
     }
+    let bar0 = match pci::place_bar0(&loc) {
+        Ok(addr) => addr,
+        Err(PciError::Bar) => {
+            pci::disable(&loc);
+            return Err(ProbeError::Bar);
+        }
+    };
+    pci::enable(&loc);
+    match probe_enabled(&loc, bar_size, bar0) {
+        Ok(info) => Ok(info),
+        Err(error) => {
+            pci::disable(&loc);
+            drop_controller();
+            Err(error)
+        }
+    }
+}
+
+fn probe_enabled(loc: &pci::Located, bar_size: u64, bar0: u32) -> Result<Info, ProbeError> {
     let cap = mmio_read64(0x00, bar_size);
+    let ready_ticks = ready_limit(cap);
     if (cap >> 37) & 1 == 0 {
         return Err(ProbeError::Css);
     }
@@ -119,14 +137,14 @@ pub fn probe() -> Result<Info, ProbeError> {
     let cc = mmio_read32(0x14, bar_size);
     if cc & 1 != 0 {
         mmio_write32(0x14, bar_size, cc & !1);
-        wait_rdy(bar_size, false)?;
+        wait_rdy(bar_size, false, ready_ticks)?;
     }
     let frames = alloc_queue_frames()?;
     mmio_write32(0x24, bar_size, (15 << 16) | 15);
     mmio_write64(0x28, bar_size, frames[0]);
     mmio_write64(0x30, bar_size, frames[1]);
     mmio_write32(0x14, bar_size, 0x0046_0001);
-    wait_rdy(bar_size, true)?;
+    wait_rdy(bar_size, true, ready_ticks)?;
     if mmio_read32(0x1C, bar_size) & 2 != 0 {
         return Err(ProbeError::Fatal);
     }
@@ -240,7 +258,15 @@ fn ram_overlaps_window() -> bool {
     false
 }
 
-fn wait_rdy(bar_size: u64, want: bool) -> Result<(), ProbeError> {
+/// CAP.TO is in 500 ms units. One tick is 10 ms, so one unit is 50 ticks.
+/// The command timeout stays 200 ticks. Ready waits at least that long, and
+/// at least as long as the controller asked for.
+fn ready_limit(cap: u64) -> u64 {
+    let units = (cap >> 24) & 0xFF;
+    core::cmp::max(NVME_TIMEOUT_TICKS, units.saturating_mul(50))
+}
+
+fn wait_rdy(bar_size: u64, want: bool, limit: u64) -> Result<(), ProbeError> {
     let start = irq::ticks();
     loop {
         let csts = mmio_read32(0x1C, bar_size);
@@ -250,7 +276,7 @@ fn wait_rdy(bar_size: u64, want: bool) -> Result<(), ProbeError> {
         if (csts & 1 != 0) == want {
             return Ok(());
         }
-        if irq::ticks().wrapping_sub(start) >= NVME_TIMEOUT_TICKS {
+        if irq::ticks().wrapping_sub(start) >= limit {
             return Err(ProbeError::Timeout);
         }
         sched::yield_now();
@@ -422,6 +448,10 @@ fn poll(io: bool, cid: u16) -> Result<(), IoError> {
             }
             mmio_write32(db, bar, u32::from(new_head));
             if got_cid != cid {
+                // A mismatched completion means the queue is no longer the
+                // one this driver submitted. Drop it here, inside the cell,
+                // so a later command cannot reuse the desynced head.
+                *slot = None;
                 return Some(Err(IoError::Device(0x7, 0xFF)));
             }
             if status == 0 {
@@ -437,6 +467,10 @@ fn poll(io: bool, cid: u16) -> Result<(), IoError> {
             return result;
         }
         if irq::ticks().wrapping_sub(start) >= NVME_TIMEOUT_TICKS {
+            // The command may still complete and DMA into the shared data
+            // frame. Dropping the controller means the next I/O fails
+            // instead of submitting over that frame.
+            drop_controller();
             return Err(IoError::Timeout);
         }
         sched::yield_now();

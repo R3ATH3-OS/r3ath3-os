@@ -112,6 +112,12 @@ pub fn enable(loc: &Located) {
     config_write32(loc.bus, loc.dev, loc.func, 0x04, enabled);
 }
 
+/// Clear memory decode and bus master. INTx disable is left as it is.
+pub fn disable(loc: &Located) {
+    let command = config_read32(loc.bus, loc.dev, loc.func, 0x04);
+    config_write32(loc.bus, loc.dev, loc.func, 0x04, command & !((1 << 1) | (1 << 2)));
+}
+
 fn config_address(bus: u8, dev: u8, func: u8, offset: u8) -> u32 {
     ENABLE
         | (u32::from(bus) << 16)
