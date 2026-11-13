@@ -88,17 +88,42 @@ pub fn silence() {
     let _ = tone(0);
 }
 
+/// Channel-2 count and speaker-gate bits, without programming a divisor
+/// and without changing the gate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sample {
+    pub latched: u16,
+    pub gate: u8,
+}
+
+/// Latch channel 2 and read port `0x61` bits 0 and 1. Does not write a
+/// divisor and does not change the gate. Channel 0 and the PS/2 ports
+/// stay untouched.
+pub fn sample() -> Sample {
+    Sample {
+        latched: channel2(None),
+        gate: gate(None),
+    }
+}
+
 fn program_and_latch(divisor: u16) -> u16 {
+    channel2(Some(divisor))
+}
+
+fn channel2(program: Option<u16>) -> u16 {
     crate::irq::without_interrupts(|| {
         // SAFETY: `0x43` is written only with the channel-2 command bytes
         // `0xB6` and `0x80`. `0x42` is channel 2's data port. Port `0x40` is
         // not used, so channel 0's divisor is not rewritten. The surrounding
         // `without_interrupts` keeps the timer handler from splitting the
-        // latch. Every access in this block is port I/O. One CPU.
+        // latch. A read passes `program == None` and sends only the latch
+        // command. Every access in this block is port I/O. One CPU.
         unsafe {
-            port::outb(PIT_CMD, CMD_CH2_SQUARE);
-            port::outb(PIT_CH2, divisor as u8);
-            port::outb(PIT_CH2, (divisor >> 8) as u8);
+            if let Some(divisor) = program {
+                port::outb(PIT_CMD, CMD_CH2_SQUARE);
+                port::outb(PIT_CH2, divisor as u8);
+                port::outb(PIT_CH2, (divisor >> 8) as u8);
+            }
             port::outb(PIT_CMD, CMD_CH2_LATCH);
             let low = port::inb(PIT_CH2);
             let high = port::inb(PIT_CH2);
@@ -108,13 +133,20 @@ fn program_and_latch(divisor: u16) -> u16 {
 }
 
 fn set_gate(on: bool) -> u8 {
+    gate(Some(on))
+}
+
+fn gate(on: Option<bool>) -> u8 {
     // SAFETY: port `0x61` bits 0 and 1 are the channel-2 gate and the speaker
-    // data. The value written keeps every other bit from the read. Ports
-    // `0x60` and `0x64` are not used. One CPU, main context only.
+    // data. The value written keeps every other bit from the read. A read
+    // passes `on == None` and does not write the port. Ports `0x60` and
+    // `0x64` are not used. One CPU, main context only.
     unsafe {
         let before = port::inb(SPEAKER);
-        let bits = if on { 0x03 } else { 0x00 };
-        port::outb(SPEAKER, (before & 0xFC) | bits);
+        if let Some(on) = on {
+            let bits = if on { 0x03 } else { 0x00 };
+            port::outb(SPEAKER, (before & 0xFC) | bits);
+        }
         port::inb(SPEAKER) & 0x03
     }
 }

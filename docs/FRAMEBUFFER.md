@@ -2,7 +2,7 @@
 
 Suggested wording, not a certification and not a claim that this image is that system: "An authentic Human–AI co-op OS".
 
-Part A of milestone 12. The shell stays an 80×25 text shell. Graphics mode is only while a pixel path runs. Higher resolution is later, not this milestone. There is no mouse and no graphical shell. Glue Duty stays in text mode; pixels for that game are part B.
+Part A of milestone 12 is on main: VGA mode 13h, 320×200×8, and the path back to text mode 3. Part B draws Glue Duty in that buffer. The shell stays an 80×25 text shell. Graphics mode is only while a pixel path runs. Higher resolution is later, not this milestone. There is no mouse and no graphical shell.
 
 ## What this image does
 
@@ -56,7 +56,29 @@ Chain-4 writes at `0xA0000` overwrite plane 2, which is the font the text render
 
 A module may export `r3_pixels`, `() -> i32`, the offset of a 64,000-byte buffer in its own linear memory. `apps::blit_exported` calls it, copies those bytes into the software buffer, enters mode 13h only when graphics mode is not already on, and blits. An out-of-range offset is `memory`. A module that does not export it returns `Ok(false)` and the text path is unchanged. `check_abi` does not require the export. Integers only. Modules are still baked into the image. There are no imports.
 
-`hello` and `spin` do not export it. Their screens stay the text screens they already had. The shell calls `blit_exported` after each text paint. On the way out of an app, `finish` restores text mode, the plane-2 font, and DAC entries 0–63 when graphics mode was entered, then clears the console.
+`hello` and `spin` do not export it. Their screens stay the text screens they already had. Glue Duty does export it. The buffer lives in the guest's `Game` and is a picture of the same 80×25 grid `text.rs` already paints: each cell is a 4×8 block, a 3×5 glyph, and one byte of the cell itself so two different grid bytes cannot paint the same block. The shell calls `blit_exported` after each text paint. On the way out of an app, `finish` restores text mode, the plane-2 font, and DAC entries 0–63 when graphics mode was entered, then clears the console.
+
+## Glue Duty pixels
+
+`glue-pixels` is the proof. Status 203, port byte `0x65`, `qemu_exit::glue_pixels_ok`. QEMU is `-m 64M -smp 1 -vga std`. The serial log is:
+
+```
+R3ATH3_STAGE rust_main
+R3ATH3_GLUE_PIXELS start
+R3ATH3_GLUE_PIXELS step=1 mode=13h width=320 height=200 stride=320 format=indexed8 gc6=05 crtc9=41
+R3ATH3_GLUE_PIXELS step=2 title sum=660216 frame=fbc1f073536db373 px0=0 px1=28 px63999=0 hw=match
+R3ATH3_GLUE_PIXELS step=3 play sum=574839 frame=f14e49b47018956c changed=ok hw=match
+R3ATH3_GLUE_PIXELS step=4 absent=ok sum=same
+R3ATH3_GLUE_PIXELS step=5 text gc6=0e crtc9=4f cell=0a41 font=c8dbddd1 dac07=42,42,42 dac3a=21,63,21 dac3f=63,63,63
+app glue-duty: quit
+R3ATH3_GLUE_PIXELS step=6 finish gc6=0e crtc9=4f font=c8dbddd1 dac07=42,42,42 dac3a=21,63,21 dac3f=63,63,63
+R3ATH3_GLUE_PIXELS step=7 heap=same frames=same
+R3ATH3_GLUE_PIXELS ok
+```
+
+Step 2 is the title after `r3_init(1)`. `frame` is FNV-1a 64 of the 64,000 guest bytes. `hw=match` is that same sum and the same FNV over all 64,000 bytes at `0xA0000` (`hardware_fnv`, built on `hw_byte`). Step 3 is Space and one step (state 1), and `hw=match` is that play frame, every byte. Step 4 loads `hello`, which has no `r3_pixels`, and the hardware sum and FNV stay the play frame. Step 5 is `enter_text`: the font and DAC match the samples taken before graphics mode. Step 6 enters graphics again, blits, requires that same hardware FNV, and `finish` prints `app glue-duty: quit` and leaves text mode, the font, and the DAC. Step 7 is `heap::used` and the free-frame count unchanged.
+
+`app-glue` dumps those 64,000 bytes from `0xA0000` at the title and compares them to `replay --pixels`, a second host of the same source. The file `apps/glue-duty/golden/app-glue.pix` stays the host unit test that pins the length, the sum, and the FNV. The text golden `app-glue.vga` stays a host unit test of the grid. `wasm-glue` hashes the same pixel buffer on both hosts. Spec for the game: `docs/WASM.md`.
 
 The proof's guest fixture is not a shell app. Its WAT is on `PIXELS` in `kernel/src/fbtest.rs`. Byte `i` is `i % 251`. The host blit of that buffer is part of `fb-core`. Loading `hello` in the same proof must report no export and must leave the software buffer alone.
 
@@ -82,7 +104,7 @@ Step 2 fills the software buffer with `(i * 3 + 1) as u8` and blits. The sum and
 
 ## Frames
 
-The software buffer is 64,000 bytes. The link rounds the kernel image up to whole frames, so the shell image loses 16 frames for that buffer. The saved font and DAC are another 8 KiB plus 192 bytes in `.bss`, which the link rounds to 3 frames. Milestone 11's shell reported `frames_total=15765`. Before the font save this shell reported `frames_total=15749`. It now reports `frames_total=15746`. `shell-mem` requires that figure to sit in 15741..=15757. `heap_used` is still at most 4096. On this shell image `heap_used` is 0. Builds that do not include `fb` do not carry the buffer or the save.
+The software buffer is 64,000 bytes. The link rounds the kernel image up to whole frames, so the shell image loses 16 frames for that buffer. The saved font and DAC are another 8 KiB plus 192 bytes in `.bss`, which the link rounds to 3 frames. Milestone 11's shell reported `frames_total=15765`. Before the font save this shell reported `frames_total=15749`. Part A reported `frames_total=15746`. Part B's shell reports `frames_total=15747`. `shell-mem` still requires 15741..=15757. `heap_used` is still at most 4096. On this shell image `heap_used` is 0. Builds that do not include `fb` do not carry the buffer or the save.
 
 ## Unsafe
 
@@ -90,4 +112,4 @@ The software buffer is 64,000 bytes. The link rounds the kernel image up to whol
 
 ## Not in this part
 
-Glue Duty in pixels, a mouse, a graphical shell, a Bochs/VBE framebuffer, and any resolution above 320×200. Those are later.
+A mouse, a graphical shell, a Bochs/VBE framebuffer, and any resolution above 320×200. Those are later.

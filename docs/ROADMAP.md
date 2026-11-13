@@ -25,7 +25,7 @@
 11. **WebAssembly runtime.** A sandbox for apps and for AI tools, running under the gate's permissions. Game logic is written once and runs on R3@TH3 and on the web. Merged in PR #13 at `3036b6b` from tested head `c9c778f`. Official smoke on that tested head was 75/75. Glue Duty runs in text mode. Later native apps, not started: Watch Mechanic, The Movement (a system monitor), the shop terminal, and a Patterns trainer.
 
 ## Next, in order
-12. **Framebuffer graphics + PC speaker sound.** In progress. Part A is 320×200 VGA mode 13h and the PC speaker (`docs/FRAMEBUFFER.md`, `docs/SPEAKER.md`). Higher resolution and other upgrades come later, not in this part and not in part B. Part B, after part A is on main, is Glue Duty in pixels and sound.
+12. **Framebuffer graphics + PC speaker sound.** Part A is on main at `43b99218`, the merge of PR #14, tested head `918fd40`. Official smoke on that tested head was 77/77, 34 builds. It is VGA mode 13h, 320×200×8, and the PC speaker on PIT channel 2 (`docs/FRAMEBUFFER.md`, `docs/SPEAKER.md`). Part B ports Glue Duty onto that framebuffer and that speaker. The two-host match is the 320×200×8 buffer. Higher resolution and other upgrades come later.
 13. **Real hardware.** USB keyboard and booting on a mini PC or a Raspberry Pi, leading to the instant-boot, offline shop appliance.
 
 ## Editions (later)

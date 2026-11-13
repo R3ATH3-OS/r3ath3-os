@@ -49,7 +49,7 @@ pub fn run() -> ! {
             if fuel > STEP_FUEL {
                 fail(n, "fuel-budget");
             }
-            let frame = match grid_fnv(&mut inst) {
+            let frame = match pixel_fnv(&mut inst) {
                 Ok(frame) => frame,
                 Err(trap) => fail(n, trap.word()),
             };
@@ -79,17 +79,17 @@ pub fn run() -> ! {
     qemu_exit::wasm_glue_ok();
 }
 
-fn grid_fnv(inst: &mut wasm::Instance<'_, '_>) -> Result<u64, Trap> {
-    let offset = match inst.call("r3_text", &[]) {
+fn pixel_fnv(inst: &mut wasm::Instance<'_, '_>) -> Result<u64, Trap> {
+    let offset = match inst.call("r3_pixels", &[]) {
         Ok(Some(value)) => value,
         Ok(None) => return Err(Trap::Memory),
         Err(trap) => return Err(trap),
     };
     let memory = inst.memory();
-    let Some(start) = crate::apps::offset_of(offset, memory.len(), 2000) else {
+    let Some(start) = crate::apps::offset_of(offset, memory.len(), 64_000) else {
         return Err(Trap::Memory);
     };
-    Ok(fnv64(&memory[start..start + 2000]))
+    Ok(fnv64(&memory[start..start + 64_000]))
 }
 
 fn fnv64(data: &[u8]) -> u64 {

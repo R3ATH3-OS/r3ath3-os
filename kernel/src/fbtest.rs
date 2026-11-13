@@ -130,7 +130,7 @@ pub fn run() -> ! {
     if fb::hardware_sum() != GUEST_SUM {
         fail_sum(6, fb::hardware_sum(), GUEST_SUM);
     }
-    apps::finish_for_proof();
+    apps::finish_for_proof("pixels");
     if !finish_restored(font_before, dac07, dac3a, dac3f) {
         fail_restore(6, font_before, dac07, dac3a, dac3f);
     }

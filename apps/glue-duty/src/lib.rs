@@ -7,7 +7,9 @@
 #![cfg_attr(target_arch = "wasm32", no_std)]
 
 pub mod logic;
+pub mod pixels;
 pub mod text;
+pub mod tone;
 
 #[cfg(target_arch = "wasm32")]
 mod abi;

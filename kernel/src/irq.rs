@@ -155,7 +155,7 @@ pub fn enable() {
     }
 }
 
-#[cfg(any(feature = "ticks", feature = "sched", feature = "speaker-core"))]
+#[cfg(any(feature = "ticks", feature = "sched", feature = "speaker-core", feature = "glue-tone"))]
 pub fn ticks() -> u64 {
     TICKS.load(Ordering::Acquire)
 }
@@ -200,7 +200,7 @@ fn read_flags() -> u64 {
     flags
 }
 
-#[cfg(any(feature = "ticks", feature = "speaker-core"))]
+#[cfg(any(feature = "ticks", feature = "speaker-core", feature = "glue-tone"))]
 pub fn wait_ticks(n: u64) -> u64 {
     let start = ticks();
     loop {
