@@ -138,7 +138,7 @@ Every line is `R3ATH3_SCHED_*`. An internal check that fails panics (status 35),
 | `0x74` | 233 | `sched-exit` ok | `sched_exit_ok` |
 | `0x75` | 235 | `sched-reap` ok | `sched_reap_ok` |
 
-No collision with 33, 35, 95, 97, 99, 101, 103, 105, 124–127, 137, 161, 163, 177, 179, 181, 193, 195, 197, 199, 201, 209–217, or the gate statuses 241 and 243. `0x65`–`0x67` (203–207), `0x6D`–`0x6F` (219–223), and `0x76`–`0x77` (237–239) stay unused. Each helper is compiled only for its feature. The shell keeps 209–217. New shell cases use those outcome statuses.
+No collision with 33, 35, 95, 97, 99, 101, 103, 105, 124–127, 137, 161, 163, 177, 179, 181, 193, 195, 197, 199, 201, 209–217, or the gate statuses 241 and 243. `0x67` (207), `0x6F` (223), and `0x76`–`0x77` (237–239) stay unused, as does `0x7F` (255). `0x65` (203) is `glue-pixels` and `0x66` (205) is `glue-tone`. `0x6D` (219) is `fb-core` and `0x6E` (221) is `speaker-core`. Each helper is compiled only for its feature. The shell keeps 209–217. New shell cases use those outcome statuses.
 
 A status names an outcome. A feature that can end its own run gets its own status. Shell commands are judged by exact transcript under the shell's outcome statuses, and a swap self-test proves those cases cannot pass for each other.
 

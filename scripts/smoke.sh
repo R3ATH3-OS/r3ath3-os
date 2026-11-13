@@ -17,10 +17,11 @@
 # Flight recorder: core 0x7A → 245. Store: core 0x7B → 247. NVMe: core 0x7C → 249.
 # WebAssembly: core 0x7D → 251. Glue Duty: 0x7E → 253.
 # Framebuffer: core 0x6D → 219. PC speaker: core 0x6E → 221.
+# Glue Duty pixels: 0x65 → 203. Glue Duty tones: 0x66 → 205.
 # With no NVMe controller the shell uses the RAM disk, and a reboot erases it.
 # With QEMU's emulated NVMe disk, earlier boots stay in the image.
 # Saved flight-recorder entries survive a reboot only inside that image.
-# Unused odd statuses: 203–207, 223, 237–239, 255.
+# Unused odd statuses: 207, 223, 237–239, 255.
 # A triple-fault or silent reset does not print the fault line and does not
 # use those statuses (this QEMU build has exited 0 on triple fault).
 set -u
@@ -65,6 +66,8 @@ WASM_CORE_STATUS=251
 WASM_GLUE_STATUS=253
 FB_CORE_STATUS=219
 SPEAKER_CORE_STATUS=221
+GLUE_PIXELS_STATUS=203
+GLUE_TONE_STATUS=205
 RAM_BYTES=67108864
 HEAP_BYTES=1048576
 HEAP_LINE='R3ATH3_HEAP ok size=1048576 used=([0-9]+) align_max=4096'
@@ -282,11 +285,11 @@ PY
 
 # The 64 KiB mode-13h buffer is 16 frames. The plane-2 font save and the
 # text DAC add 3 more. Milestone 11's shell reported frames_total=15765.
-# This shell reports 15746, which sits inside the existing window
-# 15741..=15757. That window is eight frames either side of the earlier
-# 15749 figure. It rejects another 64 KiB of .bss. This is not part of
-# judge_shell_mem: that judge's self-test uses a synthetic frames_total
-# of 16000 and must keep passing.
+# Part A of milestone 12 reported 15746. This shell reports 15747, which
+# sits inside the existing window 15741..=15757. That window is eight
+# frames either side of the earlier 15749 figure. It rejects another
+# 64 KiB of .bss. This is not part of judge_shell_mem: that judge's
+# self-test uses a synthetic frames_total of 16000 and must keep passing.
 shell_frames_in_bound() {
   python3 - "$1" <<'PY'
 import re, sys
@@ -1053,6 +1056,16 @@ judge_speaker_core() {
   judge_exact "$status" "$file" "$SPEAKER_CORE_STATUS" "$OUT/task/speaker-core.expected"
 }
 
+judge_glue_pixels() {
+  local status="$1" file="$2"
+  judge_exact "$status" "$file" "$GLUE_PIXELS_STATUS" "$OUT/task/glue-pixels.expected"
+}
+
+judge_glue_tone() {
+  local status="$1" file="$2"
+  judge_exact "$status" "$file" "$GLUE_TONE_STATUS" "$OUT/task/glue-tone.expected"
+}
+
 # Kernel log, native replay, and the committed golden, byte for byte.
 judge_wasm_glue() {
   local status="$1" kernel="$2" replay="$3" golden="$4"
@@ -1214,7 +1227,7 @@ R3ATH3_SHELL_EXIT last=ok
 EOF
   judge_shell_mem "$SHELL_OK_STATUS" "$dir/shell-mem.log" "$dir/shell-mem.expected" || ok=1
   if judge_shell_mem "$SHELL_CMD_STATUS" "$dir/shell-mem.log" "$dir/shell-mem.expected"; then ok=1; fi
-  printf '%s\n' "mem heap_used=100 heap_size=1048576 frames_total=15746 frames_free=15746" >"$dir/frames-bound-ok.log"
+  printf '%s\n' "mem heap_used=100 heap_size=1048576 frames_total=15747 frames_free=15747" >"$dir/frames-bound-ok.log"
   printf '%s\n' "mem heap_used=100 heap_size=1048576 frames_total=15740 frames_free=15740" >"$dir/frames-bound-low.log"
   printf '%s\n' "mem heap_used=100 heap_size=1048576 frames_total=15758 frames_free=15758" >"$dir/frames-bound-high.log"
   shell_frames_in_bound "$dir/frames-bound-ok.log" || ok=1
@@ -1847,6 +1860,18 @@ PY
     if judge_speaker_core "$FB_CORE_STATUS" "$OUT/task/speaker-core.expected"; then ok=1; fi
     if judge_fb_core "$FB_CORE_STATUS" "$OUT/task/speaker-core.expected"; then ok=1; fi
     if judge_speaker_core "$SPEAKER_CORE_STATUS" "$OUT/task/fb-core.expected"; then ok=1; fi
+    judge_glue_pixels "$GLUE_PIXELS_STATUS" "$OUT/task/glue-pixels.expected" || ok=1
+    sed 's/sum=660216/sum=0/' "$OUT/task/glue-pixels.expected" >"$dir/glue-pixels-sum.log"
+    if judge_glue_pixels "$GLUE_PIXELS_STATUS" "$dir/glue-pixels-sum.log"; then ok=1; fi
+    if judge_glue_pixels "$GLUE_TONE_STATUS" "$OUT/task/glue-pixels.expected"; then ok=1; fi
+    grep -v 'R3ATH3_GLUE_PIXELS ok' "$OUT/task/glue-pixels.expected" >"$dir/glue-pixels-nook.log"
+    if judge_glue_pixels "$GLUE_PIXELS_STATUS" "$dir/glue-pixels-nook.log"; then ok=1; fi
+    judge_glue_tone "$GLUE_TONE_STATUS" "$OUT/task/glue-tone.expected" || ok=1
+    sed 's/divisor=2386/divisor=2385/' "$OUT/task/glue-tone.expected" >"$dir/glue-tone-div.log"
+    if judge_glue_tone "$GLUE_TONE_STATUS" "$dir/glue-tone-div.log"; then ok=1; fi
+    if judge_glue_tone "$GLUE_PIXELS_STATUS" "$OUT/task/glue-tone.expected"; then ok=1; fi
+    if judge_glue_pixels "$GLUE_PIXELS_STATUS" "$OUT/task/glue-tone.expected"; then ok=1; fi
+    if judge_glue_tone "$GLUE_TONE_STATUS" "$OUT/task/glue-pixels.expected"; then ok=1; fi
     python3 - "$OUT/task/app-hello.vga" "$dir/app-hello-cell.vga" <<'PY'
 import sys
 src, dst = sys.argv[1:]
@@ -1870,7 +1895,7 @@ open(dst, "w", encoding="ascii").write(text.replace(needle, insert, 1))
 PY
     if judge_exact "$SHELL_OK_STATUS" "$dir/app-gate-ready.log" "$SHELL_OK_STATUS" "$OUT/task/app-gate.expected"; then ok=1; fi
     local glue_golden="$ROOT/apps/glue-duty/golden/wasm-glue.txt"
-    local glue_vga="$ROOT/apps/glue-duty/golden/app-glue.vga"
+    local glue_pix="$ROOT/apps/glue-duty/golden/app-glue.pix"
     cp "$glue_golden" "$dir/wasm-glue-kernel.log"
     cp "$glue_golden" "$dir/wasm-glue-replay.log"
     judge_wasm_glue "$WASM_GLUE_STATUS" "$dir/wasm-glue-kernel.log" "$dir/wasm-glue-replay.log" "$glue_golden" || ok=1
@@ -1880,15 +1905,17 @@ PY
     if judge_wasm_glue "$WASM_GLUE_STATUS" "$dir/wasm-glue-kernel.log" "$dir/wasm-glue-replay.log" "$dir/wasm-glue-golden.log"; then ok=1; fi
     head -n -1 "$dir/wasm-glue-kernel.log" >"$dir/wasm-glue-short.log"
     if judge_wasm_glue "$WASM_GLUE_STATUS" "$dir/wasm-glue-short.log" "$dir/wasm-glue-replay.log" "$glue_golden"; then ok=1; fi
-    python3 - "$glue_vga" "$dir/app-glue-cell.vga" <<'PY'
+    python3 - "$glue_pix" "$dir/app-glue-cell.pix" <<'PY'
 import sys
 src, dst = sys.argv[1:]
-text = open(src, encoding="ascii").read()
-text = text.replace("0A20", "0A21", 1)
-open(dst, "w", encoding="ascii").write(text)
+data = bytearray(open(src, "rb").read())
+if len(data) != 64000:
+    raise SystemExit("pix size")
+data[1] ^= 1
+open(dst, "wb").write(data)
 PY
-    judge_app_screen "$SHELL_OK_STATUS" "$OUT/task/app-glue.expected" "$OUT/task/app-glue.expected" "$glue_vga" "$glue_vga" || ok=1
-    if judge_app_screen "$SHELL_OK_STATUS" "$OUT/task/app-glue.expected" "$OUT/task/app-glue.expected" "$dir/app-glue-cell.vga" "$glue_vga"; then ok=1; fi
+    judge_app_screen "$SHELL_OK_STATUS" "$OUT/task/app-glue.expected" "$OUT/task/app-glue.expected" "$glue_pix" "$glue_pix" || ok=1
+    if judge_app_screen "$SHELL_OK_STATUS" "$OUT/task/app-glue.expected" "$OUT/task/app-glue.expected" "$dir/app-glue-cell.pix" "$glue_pix"; then ok=1; fi
   fi
 
   if [[ "$ok" -eq 0 ]]; then
@@ -3442,6 +3469,35 @@ speaker_core = (
     "R3ATH3_SPEAKER_CORE ok\n"
 )
 write_bytes("speaker-core.expected", speaker_core)
+glue_pixels = (
+    "R3ATH3_STAGE rust_main\n"
+    "R3ATH3_GLUE_PIXELS start\n"
+    "R3ATH3_GLUE_PIXELS step=1 mode=13h width=320 height=200 stride=320 format=indexed8 gc6=05 crtc9=41\n"
+    "R3ATH3_GLUE_PIXELS step=2 title sum=660216 frame=fbc1f073536db373 px0=0 px1=28 px63999=0 hw=match\n"
+    "R3ATH3_GLUE_PIXELS step=3 play sum=574839 frame=f14e49b47018956c changed=ok hw=match\n"
+    "R3ATH3_GLUE_PIXELS step=4 absent=ok sum=same\n"
+    "R3ATH3_GLUE_PIXELS step=5 text gc6=0e crtc9=4f cell=0a41 font=c8dbddd1 dac07=42,42,42 dac3a=21,63,21 dac3f=63,63,63\n"
+    "app glue-duty: quit\n"
+    "R3ATH3_GLUE_PIXELS step=6 finish gc6=0e crtc9=4f font=c8dbddd1 dac07=42,42,42 dac3a=21,63,21 dac3f=63,63,63\n"
+    "R3ATH3_GLUE_PIXELS step=7 heap=same frames=same\n"
+    "R3ATH3_GLUE_PIXELS ok\n"
+)
+write_bytes("glue-pixels.expected", glue_pixels)
+glue_tone = (
+    "R3ATH3_STAGE rust_main\n"
+    "R3ATH3_GLUE_TONE start\n"
+    "R3ATH3_GLUE_TONE step=1 hz=250 divisor=4772 latched=ok gate=3\n"
+    "R3ATH3_GLUE_TONE step=2 hz=400 divisor=2982 latched=ok gate=3\n"
+    "R3ATH3_GLUE_TONE step=3 ticks=5\n"
+    "R3ATH3_GLUE_TONE step=4 hz=0 gate=0\n"
+    "R3ATH3_GLUE_TONE step=5 hz=400 divisor=2982 latched=ok gate=3\n"
+    "R3ATH3_GLUE_TONE step=6 scrub=34 hz=500 divisor=2386 latched=ok gate=3\n"
+    "R3ATH3_GLUE_TONE step=7 off hz=0 gate=0\n"
+    "R3ATH3_GLUE_TONE step=8 absent=ok\n"
+    "R3ATH3_GLUE_TONE step=9 heap=same frames=same\n"
+    "R3ATH3_GLUE_TONE ok\n"
+)
+write_bytes("glue-tone.expected", glue_tone)
 
 write_text("app-hello.steps", "launch hello\nxp\nappquit\nline exit\n")
 write_bytes(
@@ -3470,7 +3526,7 @@ for row in range(25):
 write_text("app-hello.vga", "\n".join(hello_rows) + "\n")
 
 app_list = (
-    "app glue-duty  Glue Duty, the belt-scrub game, in text mode\n"
+    "app glue-duty  Glue Duty, the belt-scrub game, in pixels and sound\n"
     "app hello      a static screen; the smallest app\n"
     "app spin       loops forever; the fuel limit stops it"
 )
@@ -3496,7 +3552,7 @@ write_bytes(
 )
 write_text(
     "app-glue.steps",
-    "launch glue-duty\nxp\nappkey spc 1\nappkey p 1\nappkey p 1\nappquit\nline exit\n",
+    "launch glue-duty\nxpx\nappkey spc 1\nappkey p 1\nappkey p 1\nappquit\nline exit\n",
 )
 write_bytes(
     "app-glue.expected",
@@ -3669,6 +3725,8 @@ for raw in open(steps_path, "r", encoding="utf-8"):
         steps.append(("keys", raw[5:].split(), None))
     elif raw == "xp":
         steps.append(("xp", [], None))
+    elif raw == "xpx":
+        steps.append(("xpx", [], None))
     elif raw.startswith("launch "):
         steps.append(("launch", qcodes_for_text("app " + raw[7:]), raw[7:].encode("utf-8")))
     elif raw == "appquit":
@@ -3730,6 +3788,18 @@ def parse_cells(buf):
         for hx in re.findall(rb"0x([0-9a-fA-F]{4})", match.group(1)):
             cells.append(int(hx, 16))
     return cells
+
+def parse_pix(buf):
+    clean = ANSI.sub(b"", buf)
+    out = []
+    for line in clean.splitlines():
+        line = line.strip()
+        match = re.match(rb"^[0-9a-fA-F]+:((?: 0x[0-9a-fA-F]{2})+)$", line)
+        if not match:
+            continue
+        for hx in re.findall(rb"0x([0-9a-fA-F]{2})", match.group(1)):
+            out.append(int(hx, 16))
+    return out
 
 def send_keys(keys):
     for key in keys:
@@ -3835,6 +3905,27 @@ for index, (kind, keys, echo) in enumerate(steps):
             chunk = cells[row * 80:(row + 1) * 80]
             lines.append(" ".join("%04X" % cell for cell in chunk))
         open(vga_path, "w", encoding="ascii").write("\n".join(lines) + "\n")
+    elif kind == "xpx":
+        try:
+            mon.sendall(b"xp /64000bx 0xa0000\n")
+        except OSError:
+            fail(1, "monitor closed before xpx")
+        buf = b""
+        blob = []
+        xp_deadline = time.time() + 8
+        while time.time() < xp_deadline and len(blob) < 64000:
+            try:
+                chunk = mon.recv(65536)
+            except socket.timeout:
+                chunk = b""
+            if chunk:
+                buf += chunk
+                blob = parse_pix(buf)
+            else:
+                time.sleep(0.01)
+        if len(blob) < 64000:
+            fail(1, "xpx returned %d bytes" % len(blob))
+        open(vga_path, "wb").write(bytes(blob[:64000]))
     else:
         fail(2, "unknown step " + kind)
 
@@ -3874,7 +3965,7 @@ PY
       fi
       ;;
     appglue)
-      if judge_app_screen "$status" "$log_file" "$expected" "$vga_file" "$ROOT/apps/glue-duty/golden/app-glue.vga"; then
+      if judge_app_screen "$status" "$log_file" "$expected" "$vga_file" "$ROOT/apps/glue-duty/golden/app-glue.pix"; then
         passed=1
       fi
       ;;
@@ -3892,14 +3983,14 @@ PY
     cat "$log_file" 2>/dev/null || true
     log "----- expected -----"
     cat "$expected" 2>/dev/null || true
-    if [[ "$kind" == "screen" || "$kind" == "apphello" || "$kind" == "appglue" ]]; then
+    if [[ "$kind" == "appglue" ]]; then
+      log "pixel dump differs from apps/glue-duty/golden/app-glue.pix"
+    elif [[ "$kind" == "screen" || "$kind" == "apphello" ]]; then
       log "----- vga -----"
       cat "$vga_file" 2>/dev/null || true
       log "----- vga expected -----"
       if [[ "$kind" == "apphello" ]]; then
         cat "$OUT/task/app-hello.vga" 2>/dev/null || true
-      elif [[ "$kind" == "appglue" ]]; then
-        cat "$ROOT/apps/glue-duty/golden/app-glue.vga" 2>/dev/null || true
       else
         cat "$OUT/task/shell-screen.vga" 2>/dev/null || true
       fi
@@ -4444,6 +4535,64 @@ expect_speaker_core() {
   fi
 }
 
+expect_glue_pixels() {
+  local name="glue-pixels"
+  local status
+  status="$(run_qemu "$name" 20 "" std)"
+  if judge_glue_pixels "$status" "$OUT/$name.serial.log"; then
+    log "[PASS] $name exit=$status"
+  else
+    log "[FAIL] $name exit=$status"
+    log "----- serial -----"
+    cat "$OUT/$name.serial.log" 2>/dev/null || true
+    log "----- expected -----"
+    cat "$OUT/task/glue-pixels.expected" 2>/dev/null || true
+    log "----- qemu stderr -----"
+    cat "$OUT/$name.qemu.err" 2>/dev/null || true
+    FAILURES=$((FAILURES + 1))
+  fi
+}
+
+expect_glue_tone() {
+  local name="glue-tone"
+  local status
+  status="$(run_qemu "$name" 12)"
+  if judge_glue_tone "$status" "$OUT/$name.serial.log"; then
+    log "[PASS] $name exit=$status"
+  else
+    log "[FAIL] $name exit=$status"
+    log "----- serial -----"
+    cat "$OUT/$name.serial.log" 2>/dev/null || true
+    log "----- expected -----"
+    cat "$OUT/task/glue-tone.expected" 2>/dev/null || true
+    log "----- qemu stderr -----"
+    cat "$OUT/$name.qemu.err" 2>/dev/null || true
+    FAILURES=$((FAILURES + 1))
+  fi
+  if [[ -f "$OUT/glue-pixels.serial.log" ]]; then
+    if judge_glue_pixels "$GLUE_TONE_STATUS" "$OUT/glue-pixels.serial.log"; then
+      log "[FAIL] swap glue-pixels judged as glue-tone"
+      FAILURES=$((FAILURES + 1))
+    fi
+    if judge_glue_pixels "$GLUE_PIXELS_STATUS" "$OUT/$name.serial.log"; then
+      log "[FAIL] swap glue-tone content judged as glue-pixels"
+      FAILURES=$((FAILURES + 1))
+    fi
+    if judge_glue_tone "$GLUE_PIXELS_STATUS" "$OUT/glue-pixels.serial.log"; then
+      log "[FAIL] swap glue-pixels status judged as glue-tone"
+      FAILURES=$((FAILURES + 1))
+    fi
+    if judge_glue_tone "$GLUE_TONE_STATUS" "$OUT/glue-pixels.serial.log"; then
+      log "[FAIL] swap glue-pixels content judged as glue-tone"
+      FAILURES=$((FAILURES + 1))
+    fi
+    if cmp -s "$OUT/glue-pixels.serial.log" "$OUT/$name.serial.log"; then
+      log "[FAIL] swap glue-pixels and glue-tone logs are identical"
+      FAILURES=$((FAILURES + 1))
+    fi
+  fi
+}
+
 expect_wasm_core() {
   local name="wasm-core"
   local status
@@ -4490,7 +4639,7 @@ expect_wasm_core() {
 expect_wasm_glue() {
   local name="wasm-glue"
   local status golden="$ROOT/apps/glue-duty/golden/wasm-glue.txt"
-  status="$(run_qemu "$name" 40)"
+  status="$(run_qemu "$name" 60)"
   if ! "$ROOT/build/apps/glue-duty-replay" >"$OUT/wasm-glue.replay.txt"; then
     log "[FAIL] $name replay"
     FAILURES=$((FAILURES + 1))
@@ -4661,6 +4810,12 @@ else
   if build_app; then
     if build_kernel wasm-glue wasm-glue; then
       expect_wasm_glue
+    fi
+    if build_kernel glue-pixels glue-pixels; then
+      expect_glue_pixels
+    fi
+    if build_kernel glue-tone glue-tone; then
+      expect_glue_tone
     fi
     if build_kernel shell shell glue-baked; then
       if write_shell_cases; then

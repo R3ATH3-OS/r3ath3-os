@@ -2,7 +2,7 @@
 
 Suggested wording, not a certification and not a claim that this image is that system: "An authentic Human–AI co-op OS".
 
-Part A of milestone 12. Square-wave tones on the PC speaker, PIT channel 2 only. There is no AC97, no HD Audio, and no PCM. The proof does not capture audio. Glue Duty tones are part B.
+Part A of milestone 12 is on main: square-wave tones on the PC speaker, PIT channel 2 only. Part B plays Glue Duty on that speaker. There is no AC97, no HD Audio, and no PCM. The proof does not capture audio.
 
 ## Driver
 
@@ -59,6 +59,46 @@ The latch and the reload write run inside `irq::without_interrupts`, so the time
 
 `speaker` is internal. `shell` and `speaker-core` turn it on. The shell calls `silence` before it prints `R3ATH3_SHELL_READY`, which closes the gate and does not change the transcript. `speaker-core` is a test mode, in the at-most-one assert and in both `boot_ok` exclusion lists.
 
+## Glue Duty tones
+
+A module may export `r3_tone`, `() -> i32`, the frequency word. Zero is silence. `check_abi` does not require it. There is still no import. On the shell, `play_exported` calls `speaker::tone` only when that word changes, including the change to 0. `finish` calls `silence` before it restores text mode. The shell does not print the latch, so `app-glue`'s transcript does not gain a tone line. `hello` and `spin` do not export `r3_tone`.
+
+The word is a presentation of the same rules. An event line wins over the state drone:
+
+| Condition | Hz | Divisor |
+| --- | --- | --- |
+| log `Scrubbed a blob.` | 500 | 2386 |
+| log `Solvent blast.` | 640 | 1864 |
+| log `A blob reached the discharge.` | 180 | 6628 |
+| log `Shift complete.` | 2000 | 596 |
+| log `The belt gummed up.` | 80 | 14914 |
+| title | 250 | 4772 |
+| playing | 400 | 2982 |
+| paused | 0 |  |
+| shift done | 2000 | 596 |
+| game over | 80 | 14914 |
+
+Every non-zero divisor is even. On the proof script the first scrub is step 34.
+
+`glue-tone` is the proof. Status 205, port byte `0x66`, `qemu_exit::glue_tone_ok`. QEMU is `-m 64M -smp 1` and `-vga none`. The latch window here is even and in `divisor - 20 ..= divisor`, including the reload value itself. Reprogramming a running channel 2 on this QEMU can latch the new divisor before the first PIT clock. `speaker-core` keeps the half-open window. A different divisor still cannot pass: the log records the divisor, and the window is checked against that divisor. The raw count is printed only on the fail line.
+
+```
+R3ATH3_STAGE rust_main
+R3ATH3_GLUE_TONE start
+R3ATH3_GLUE_TONE step=1 hz=250 divisor=4772 latched=ok gate=3
+R3ATH3_GLUE_TONE step=2 hz=400 divisor=2982 latched=ok gate=3
+R3ATH3_GLUE_TONE step=3 ticks=5
+R3ATH3_GLUE_TONE step=4 hz=0 gate=0
+R3ATH3_GLUE_TONE step=5 hz=400 divisor=2982 latched=ok gate=3
+R3ATH3_GLUE_TONE step=6 scrub=34 hz=500 divisor=2386 latched=ok gate=3
+R3ATH3_GLUE_TONE step=7 off hz=0 gate=0
+R3ATH3_GLUE_TONE step=8 absent=ok
+R3ATH3_GLUE_TONE step=9 heap=same frames=same
+R3ATH3_GLUE_TONE ok
+```
+
+Step 3 is `irq::wait_ticks(5)` while the 400 Hz tone is gated on. That is channel 0 still advancing. Step 4 is `tone(0)`, which closes the gate and does not reprogram channel 2. Step 6 is a fresh instance stepped to the first scrub. Step 8 is `hello`, which has no `r3_tone`. Step 9 is `heap::used` and the free-frame count unchanged. Channel 0 stays divisor 11932 on port `0x40`. Ports `0x60` and `0x64` are not used.
+
 ## Not in this part
 
-Glue Duty tones, sampled audio, and any device other than the PC speaker. The shell has no new verb for sound. Help stays 24 lines.
+Sampled audio, and any device other than the PC speaker. The shell has no new verb for sound. Help stays 24 lines.

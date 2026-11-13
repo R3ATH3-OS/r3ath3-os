@@ -6,16 +6,22 @@
 #![allow(dead_code)]
 
 use crate::wasm::{Instance, ValType};
-#[cfg(any(feature = "shell", feature = "fb-core"))]
+#[cfg(any(feature = "shell", feature = "fb-core", feature = "glue-pixels"))]
 use crate::wasm::LoadError;
-#[cfg(any(feature = "shell", feature = "wasm-glue", feature = "fb-core"))]
+#[cfg(any(
+    feature = "shell",
+    feature = "wasm-glue",
+    feature = "fb-core",
+    feature = "glue-pixels",
+    feature = "glue-tone"
+))]
 use crate::wasm::Trap;
 
 #[cfg(feature = "shell")]
 use crate::irq::{self, Key};
 #[cfg(feature = "shell")]
 use crate::sched;
-#[cfg(any(feature = "shell", feature = "fb-core"))]
+#[cfg(any(feature = "shell", feature = "fb-core", feature = "glue-pixels"))]
 use crate::vga;
 
 pub struct App {
@@ -93,14 +99,19 @@ pub static SPIN: &[u8] = &[
     0x00, 0x41, 0x00, 0x0B, 0x05, 0x00, 0x41, 0xD0, 0x0F, 0x0B,
 ];
 
-#[cfg(any(feature = "glue-baked", feature = "wasm-glue"))]
+#[cfg(any(
+    feature = "glue-baked",
+    feature = "wasm-glue",
+    feature = "glue-pixels",
+    feature = "glue-tone"
+))]
 pub static GLUE_DUTY: &[u8] = include_bytes!("../../build/apps/glue_duty.wasm");
 
 #[cfg(any(feature = "glue-baked", feature = "wasm-glue"))]
 pub static APPS: &[App] = &[
     App {
         name: "glue-duty",
-        desc: "Glue Duty, the belt-scrub game, in text mode",
+        desc: "Glue Duty, the belt-scrub game, in pixels and sound",
         bytes: GLUE_DUTY,
     },
     App {
@@ -165,7 +176,7 @@ pub fn run_app(app: &'static App) -> bool {
     ran
 }
 
-#[cfg(any(feature = "shell", feature = "fb-core"))]
+#[cfg(any(feature = "shell", feature = "fb-core", feature = "glue-pixels"))]
 enum End {
     NotLoaded(LoadError),
     Abi,
@@ -258,11 +269,17 @@ fn present(inst: &mut Instance<'_, '_>) -> Result<(), Trap> {
     };
     vga::present(&memory[start..start + 2000]);
     blit_exported(inst)?;
+    play_exported(inst)?;
     Ok(())
 }
 
-#[cfg(any(feature = "shell", feature = "fb-core"))]
+#[cfg(any(feature = "shell", feature = "fb-core", feature = "glue-pixels"))]
 fn finish(name: &str, end: End) {
+    #[cfg(feature = "speaker")]
+    {
+        crate::speaker::silence();
+        LAST_TONE.store(u32::MAX, core::sync::atomic::Ordering::Relaxed);
+    }
     if crate::fb::in_graphics() {
         crate::fb::enter_text();
     }
@@ -303,9 +320,9 @@ fn finish(name: &str, end: End) {
 }
 
 /// `fb-core` leaves graphics through the same `finish` the shell uses.
-#[cfg(feature = "fb-core")]
-pub(crate) fn finish_for_proof() {
-    finish("pixels", End::Quit([0; 60], 0));
+#[cfg(any(feature = "fb-core", feature = "glue-pixels"))]
+pub(crate) fn finish_for_proof(name: &str) {
+    finish(name, End::Quit([0; 60], 0));
 }
 
 #[cfg(feature = "shell")]
@@ -342,7 +359,7 @@ pub(crate) fn read_summary(inst: &mut Instance<'_, '_>) -> Result<([u8; 60], usi
     Ok((text, len))
 }
 
-#[cfg(any(feature = "shell", feature = "fb-core"))]
+#[cfg(any(feature = "shell", feature = "fb-core", feature = "glue-pixels"))]
 fn both(bytes: &[u8]) {
     crate::serial::write_bytes(bytes);
     for &byte in bytes {
@@ -352,7 +369,12 @@ fn both(bytes: &[u8]) {
 
 /// Guest summary bytes on the way to serial or VGA. `0x00` is a space.
 /// Bytes outside `0x20..=0x7E` are `?`. Printable bytes pass through.
-#[cfg(any(feature = "shell", feature = "wasm-glue", feature = "fb-core"))]
+#[cfg(any(
+    feature = "shell",
+    feature = "wasm-glue",
+    feature = "fb-core",
+    feature = "glue-pixels"
+))]
 pub(crate) fn printable(byte: u8) -> u8 {
     if byte == 0x00 {
         b' '
@@ -366,7 +388,37 @@ pub(crate) fn printable(byte: u8) -> u8 {
 /// Copy an exported `r3_pixels` buffer into the framebuffer and blit it.
 /// `Ok(false)` means the module does not export `r3_pixels`. Apps without
 /// that export stay on the text path.
-#[cfg(any(feature = "shell", feature = "fb-core"))]
+#[cfg(feature = "shell")]
+static LAST_TONE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(u32::MAX);
+
+/// `Some(hz)` when the module exports `r3_tone`. `None` when it does not.
+/// A negative result is `memory`.
+#[cfg(any(feature = "shell", feature = "glue-tone"))]
+pub fn exported_tone(inst: &mut Instance<'_, '_>) -> Result<Option<u32>, Trap> {
+    if !inst.func_matches("r3_tone", &[], Some(ValType::I32)) {
+        return Ok(None);
+    }
+    match inst.call("r3_tone", &[]) {
+        Ok(Some(value)) if (0..=i64::from(u32::MAX)).contains(&value) => Ok(Some(value as u32)),
+        Ok(Some(_)) => Err(Trap::Memory),
+        Ok(None) => Err(Trap::Memory),
+        Err(trap) => Err(trap),
+    }
+}
+
+/// Play the exported tone when it changed. Silence is hz 0. No export is a no-op.
+#[cfg(feature = "shell")]
+fn play_exported(inst: &mut Instance<'_, '_>) -> Result<(), Trap> {
+    let Some(hz) = exported_tone(inst)? else {
+        return Ok(());
+    };
+    if LAST_TONE.swap(hz, core::sync::atomic::Ordering::Relaxed) != hz {
+        let _played = crate::speaker::tone(hz);
+    }
+    Ok(())
+}
+
+#[cfg(any(feature = "shell", feature = "fb-core", feature = "glue-pixels"))]
 pub fn blit_exported(inst: &mut Instance<'_, '_>) -> Result<bool, Trap> {
     if !inst.func_matches("r3_pixels", &[], Some(ValType::I32)) {
         return Ok(false);
@@ -392,7 +444,13 @@ pub fn blit_exported(inst: &mut Instance<'_, '_>) -> Result<bool, Trap> {
     Ok(true)
 }
 
-#[cfg(any(feature = "shell", feature = "wasm-glue", feature = "fb-core"))]
+#[cfg(any(
+    feature = "shell",
+    feature = "wasm-glue",
+    feature = "fb-core",
+    feature = "glue-pixels",
+    feature = "glue-tone"
+))]
 pub(crate) fn offset_of(offset: i64, len: usize, span: usize) -> Option<usize> {
     if offset < 0 {
         return None;

@@ -42,23 +42,29 @@ pub struct Game {
     pub(crate) log_len: u8,
     pub(crate) grid: [u8; 2000],
     pub(crate) summary: [u8; 61],
+    /// 320×200×8 picture. Presentation only. The rules do not read it.
+    pub(crate) pixels: [u8; 64_000],
+    /// Previous grid, so a later paint rewrites only the cells that changed.
+    pub(crate) shown: [u8; 2000],
 }
 
 impl Game {
-    pub const fn fresh() -> Game {
+    /// All zeros. The wasm static uses this so the 64,000-byte picture stays
+    /// out of the module's data segment. `init` fills the rule fields.
+    pub const fn blank() -> Game {
         Game {
-            rng: 1,
-            state: TITLE,
-            shift: 1,
+            rng: 0,
+            state: 0,
+            shift: 0,
             elapsed: 0,
             score: 0,
             cleaned: 0,
-            solvent: 2,
+            solvent: 0,
             combo: 0,
             combo_timer: 0,
             jam: 0,
             since_jam: 0,
-            lane: 1,
+            lane: 0,
             last_dir: 0,
             stroke_age: 0,
             spawn_wait: 0,
@@ -73,7 +79,18 @@ impl Game {
             log_len: 0,
             grid: [0; 2000],
             summary: [0; 61],
+            pixels: [0; 64_000],
+            shown: [0; 2000],
         }
+    }
+
+    pub const fn fresh() -> Game {
+        let mut game = Self::blank();
+        game.rng = 1;
+        game.shift = 1;
+        game.solvent = 2;
+        game.lane = 1;
+        game
     }
 
     /// Seed 0 becomes `0x9E3779B9`. Leaves the game on the title screen.
@@ -142,6 +159,11 @@ impl Game {
 
     pub fn grid(&self) -> &[u8; 2000] {
         &self.grid
+    }
+
+    /// The 320×200×8 picture `text::paint` last wrote.
+    pub fn pixels(&self) -> &[u8; 64_000] {
+        &self.pixels
     }
 
     /// Length byte followed by that many summary bytes.

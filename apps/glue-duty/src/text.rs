@@ -21,6 +21,7 @@ pub fn paint(game: &mut Game) {
     paint_log(game);
     paint_help(game);
     paint_summary(game);
+    super::pixels::sync(game);
 }
 
 fn paint_hud(game: &mut Game) {

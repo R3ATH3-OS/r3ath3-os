@@ -70,10 +70,14 @@ mod gluetest;
 mod fb;
 #[cfg(feature = "fb-core")]
 mod fbtest;
+#[cfg(feature = "glue-pixels")]
+mod gluepix;
 #[cfg(feature = "speaker")]
 mod speaker;
 #[cfg(feature = "speaker-core")]
 mod speakertest;
+#[cfg(feature = "glue-tone")]
+mod gluetone;
 #[cfg(feature = "sched")]
 mod sched;
 #[cfg(any(
@@ -128,6 +132,8 @@ const _: () = {
         + cfg!(feature = "wasm-glue") as u8
         + cfg!(feature = "fb-core") as u8
         + cfg!(feature = "speaker-core") as u8
+        + cfg!(feature = "glue-pixels") as u8
+        + cfg!(feature = "glue-tone") as u8
         + cfg!(feature = "shell") as u8;
     assert!(modes <= 1, "enable at most one test feature");
 };
@@ -253,8 +259,14 @@ pub extern "C" fn kernel_main() -> ! {
     #[cfg(feature = "fb-core")]
     fbtest::run();
 
+    #[cfg(feature = "glue-pixels")]
+    gluepix::run();
+
     #[cfg(feature = "speaker-core")]
     speakertest::run();
+
+    #[cfg(feature = "glue-tone")]
+    gluetone::run();
 
     #[cfg(feature = "shell")]
     shell::run();
@@ -290,6 +302,8 @@ pub extern "C" fn kernel_main() -> ! {
         feature = "wasm-glue",
         feature = "fb-core",
         feature = "speaker-core",
+        feature = "glue-pixels",
+        feature = "glue-tone",
         feature = "shell"
     )))]
     boot_ok();
@@ -326,6 +340,8 @@ pub extern "C" fn kernel_main() -> ! {
     feature = "wasm-glue",
     feature = "fb-core",
     feature = "speaker-core",
+    feature = "glue-pixels",
+    feature = "glue-tone",
     feature = "shell"
 )))]
 fn boot_ok() -> ! {

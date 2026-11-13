@@ -7,7 +7,8 @@ use glue_duty::logic::{fnv64, Game};
 fn main() {
     let mut args = std::env::args();
     let _bin = args.next();
-    if args.next().as_deref() == Some("--title") {
+    let flag = args.next();
+    if flag.as_deref() == Some("--title") {
         let mut game = Game::fresh();
         game.init(1);
         let grid = game.grid();
@@ -23,6 +24,12 @@ fn main() {
         }
         return;
     }
+    if flag.as_deref() == Some("--pixels") {
+        let mut game = Game::fresh();
+        game.init(1);
+        std::io::Write::write_all(&mut std::io::stdout(), game.pixels()).unwrap();
+        return;
+    }
     let mut game = Game::fresh();
     game.init(1);
     print!("R3ATH3_STAGE rust_main\n");
@@ -36,7 +43,7 @@ fn main() {
         }
         let state = game.step();
         if state != prev || n % 100 == 0 {
-            let frame = fnv64(game.grid());
+            let frame = fnv64(game.pixels());
             let summary = summary_text(game.summary());
             print!("R3ATH3_WASM_GLUE step={n} state={state} frame={frame:016x} {summary}\n");
             prev = state;

@@ -22,13 +22,14 @@
 //! proof writes `0x7C` (core → 249). The WebAssembly runtime proof writes
 //! `0x7D` (core → 251). The Glue Duty proof writes `0x7E` (glue → 253).
 //! The framebuffer proof writes `0x6D` (core → 219). The PC speaker proof
-//! writes `0x6E` (core → 221).
+//! writes `0x6E` (core → 221). Glue Duty's pixel proof writes `0x65`
+//! (pixels → 203). Glue Duty's tone proof writes `0x66` (tone → 205).
 //! With an NVMe disk the shell writes the live record through to that disk,
 //! and an earlier boot is read with `boots K`. Without a disk the shell uses
 //! the RAM disk, and a reboot erases both. Saved flight-recorder entries
 //! survive a reboot only inside the QEMU-emulated disk image. Unused odd
-//! statuses: `0x65`–`0x67` (203–207), `0x6F` (223), `0x76`–`0x77`
-//! (237–239), and `0x7F` (255).
+//! statuses: `0x67` (207), `0x6F` (223), `0x76`–`0x77` (237–239), and
+//! `0x7F` (255).
 //! This device exists only in the emulator. Do not boot this image on hardware.
 
 use crate::port;
@@ -194,6 +195,16 @@ pub fn fb_core_ok() -> ! {
 #[cfg(feature = "speaker-core")]
 pub fn speaker_core_ok() -> ! {
     exit(0x6E)
+}
+
+#[cfg(feature = "glue-pixels")]
+pub fn glue_pixels_ok() -> ! {
+    exit(0x65)
+}
+
+#[cfg(feature = "glue-tone")]
+pub fn glue_tone_ok() -> ! {
+    exit(0x66)
 }
 
 pub fn cpu_fault(vector: u64) -> ! {
