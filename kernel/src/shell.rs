@@ -231,6 +231,7 @@ enum GateEvent<'a> {
 }
 
 pub fn run() -> ! {
+    crate::speaker::silence();
     serial::write_str("R3ATH3_SHELL_READY\n");
     vga::console_clear();
     let mut out = Out;

@@ -4,7 +4,7 @@ Suggested wording, not a certification and not a claim that this image is that s
 
 This document is the spec for the runtime in this tree (milestone 11, part A and part B). If the code and this document disagree, the change is not done.
 
-There are no crates.io dependencies. The toolchain is rustc/cargo 1.83.0. The kernel target is `x86_64-unknown-none`. Glue Duty is also built for `wasm32-unknown-unknown`. Both targets are in `rust-toolchain.toml`, and the Cloud Agents environment install line in `.cursor/environment.json` installs both. The work runs in QEMU only. Nothing here touches real hardware. There is no framebuffer and no sound (milestone 12). A browser host is not shipped.
+There are no crates.io dependencies. The toolchain is rustc/cargo 1.83.0. The kernel target is `x86_64-unknown-none`. Glue Duty is also built for `wasm32-unknown-unknown`. Both targets are in `rust-toolchain.toml`, and the Cloud Agents environment install line in `.cursor/environment.json` installs both. The work runs in QEMU only. Nothing here touches real hardware. Part A of milestone 12 adds an optional `r3_pixels` export and a PC speaker driver (`docs/FRAMEBUFFER.md`, `docs/SPEAKER.md`). Glue Duty does not use either yet: its pixels and tones are part B. A browser host is not shipped.
 
 ## 1. What this tree runs
 
@@ -97,9 +97,9 @@ unsafe impl Sync for ArenaCell {}
 let result = f(unsafe { &mut *ARENA.0.get() });
 ```
 
-`rg -n 'unsafe|asm!' kernel/src` is 122 lines. Those two are the only lines this milestone adds. Comments in that file do not contain the substring `unsafe`.
+`rg -n 'unsafe|asm!' kernel/src` was 122 lines at the end of milestone 11. Those two are the only lines milestone 11 adds in the kernel. Comments in `arena.rs` do not contain the substring `unsafe`. Milestone 12 part A brings the count to 145; the framebuffer and speaker lines are only in `fb.rs` and `speaker.rs` (`docs/FRAMEBUFFER.md`).
 
-On the shell build, `mem` reported `frames_total=15943` on main (`3ac0fe5`) and `frames_total=15773` on the part A head. The drop is 170 frames, inside the 128–176 bound. Part B may drop at most 24 more, so the shell build's `frames_total` must sit in 15749..=15773. The measured part B figure is `frames_total=15765`, a drop of 8 from 15773, inside that bound. Builds without `wasm` do not include the arena. The `shell-mem` case checks that bound. `judge_shell_mem` itself does not: its self-test still uses a synthetic `frames_total` of 16000.
+On the shell build, `mem` reported `frames_total=15943` on main (`3ac0fe5`) and `frames_total=15773` on the milestone 11 part A head. The drop is 170 frames, inside the 128–176 bound. Milestone 11 part B measured `frames_total=15765`, inside 15749..=15773. Milestone 12 part A adds a 64,000-byte framebuffer in `.bss` and an 8 KiB font save plus the text DAC. The same shell command now reports `frames_total=15746`, and `shell-mem` requires 15741..=15757 (`docs/FRAMEBUFFER.md`). Builds without `wasm` do not include the arena. Builds without `fb` do not include the pixel buffer or the font save. `judge_shell_mem` itself does not check that window: its self-test still uses a synthetic `frames_total` of 16000.
 
 The shell's slot 0 stack is 16 KiB and has no canary. This tree adds no assembly to measure the high-water mark, so that mark is not verified. The interpreter does not recurse in Rust.
 
@@ -143,10 +143,11 @@ Exports only:
 | `r3_step` | `() -> i32` | One fixed step. The state is the returned `i32` |
 | `r3_text` | `() -> i32` | Offset of a 2,000-byte grid, 80 by 25, row-major |
 | `r3_summary` | `() -> i32` | Offset of a length byte (0–60) and that many following bytes |
+| `r3_pixels` | `() -> i32` | Optional. Offset of a 64,000-byte 320×200×8 buffer. Absent on `hello`, `spin`, and Glue Duty |
 
 Grid bytes: `0x00` is a space, `0x20`–`0x7E` are themselves, anything else is `?`. The host writes attribute `0x0A` (green on black). The same glyph rule is used for a non-empty summary.
 
-`apps::check_abi` requires all seven exports with those kinds and signatures, then requires `r3_abi()` to return 1.
+`apps::check_abi` requires the first seven exports with those kinds and signatures, then requires `r3_abi()` to return 1. `r3_pixels` is not required. If it is present, `apps::blit_exported` copies 64,000 bytes from that offset, enters VGA mode 13h, and blits. A bad offset is `memory`. Without the export the host stays in text mode. The shell restores text mode 3 only when graphics mode was entered. Spec: `docs/FRAMEBUFFER.md`.
 
 ### 7.1 Host loop
 
@@ -156,12 +157,12 @@ Grid bytes: `0x00` is a space, `0x20`–`0x7E` are themselves, anything else is 
 2. Load. On `LoadError`, print `app <name>: not loaded: <word>` and return. A taken arena is `not loaded: busy`. `last` becomes cmd.
 3. ABI check. On failure, print `app <name>: stopped: abi` and return. `last` becomes cmd.
 4. `r3_init`. A trap stops the app.
-5. Paint the grid from `r3_text` (the data segment is already applied). An out-of-range offset is `memory`.
+5. Paint the grid from `r3_text` (the data segment is already applied). An out-of-range offset is `memory`. If the module exports `r3_pixels`, copy those 64,000 bytes, enter mode 13h only when graphics mode is not already on, and blit. Without that export, stay in text mode.
 6. Call `r3_step` once. A trap stops the app here, before the ready line and before any state line. `spin` takes this path: the first step is the infinite loop, fuel runs out, and the end line is `app spin: stopped: trap fuel`.
 7. Remember that state. It is the baseline and is not printed.
 8. Print `R3ATH3_APP_READY name=<name>` on serial only. The screen is already painted, so the harness can `xp` as soon as it sees this line.
 9. Loop, one step per 10 ticks. While waiting, drain `pop_key` and `yield_now`. `q` ends the app. Any other `Char`, Backspace, or Enter is passed to `r3_key` in order. Then `r3_step`. If the state differs from the baseline or from the previous printed state, print `R3ATH3_APP_STATE name=<name> state=<s>` on serial only, then paint the grid.
-10. Clear the VGA text buffer and print one line on both channels. `hello`'s summary length is 0, so quit prints `app hello: quit`. A length from 1 to 60 prints `app <name>: quit; <text>`. A trap prints `app <name>: stopped: trap <word>`.
+10. Clear the VGA text buffer and print one line on both channels. If graphics mode was entered, restore VGA text mode 3 first, including the plane-2 font and DAC entries 0–63. `hello`'s summary length is 0, so quit prints `app hello: quit`. A length from 1 to 60 prints `app <name>: quit; <text>`. A trap prints `app <name>: stopped: trap <word>`.
 
 A quit and a trap both set `last` to ok. The shell then prints `r3> ` the way it does after any other command. It does not reprint the banner.
 
@@ -218,7 +219,7 @@ R3ATH3_WASM_CORE ok steps=11
 
 ## 10. Smoke
 
-`./scripts/smoke.sh` runs 75 cases and 32 builds. Part A added the build `wasm-core` and the cases `wasm-core` (251), `app-hello` (209), `app-spin` (209), `app-usage` (211), and `app-gate` (209). Part B adds the builds `glue-duty-wasm`, `glue-duty-replay`, and `wasm-glue`, and the cases `wasm-glue` (253) and `app-glue` (209). `build_app` runs `scripts/build-apps.sh` before `wasm-glue` and before the shell image built with `--features "shell glue-baked"`, because those images bake `build/apps/glue_duty.wasm`. `include_bytes!` of that file is behind the `glue-baked` feature and `wasm-glue`, so `cargo build --features shell` alone does not need the file and does not list `glue-duty`. If `build_app` fails, smoke still builds `--features shell` and runs every shell case that does not execute Glue Duty. It logs `[SKIP]` for `wasm-glue`, `app-glue`, and `app-spin` (`app-spin`'s app list names `glue-duty`). A successful glue build still runs all 75 cases. `wasm-core` does not bake the module. `help_text` is unchanged. The `app` list in `app-spin` grows by the `glue-duty` line.
+`./scripts/smoke.sh` runs 77 cases and 34 builds. Part A added the build `wasm-core` and the cases `wasm-core` (251), `app-hello` (209), `app-spin` (209), `app-usage` (211), and `app-gate` (209). Part B adds the builds `glue-duty-wasm`, `glue-duty-replay`, and `wasm-glue`, and the cases `wasm-glue` (253) and `app-glue` (209). Milestone 12 part A adds the builds `fb-core` and `speaker-core` and the cases `fb-core` (219) and `speaker-core` (221). `build_app` runs `scripts/build-apps.sh` before `wasm-glue` and before the shell image built with `--features "shell glue-baked"`, because those images bake `build/apps/glue_duty.wasm`. `include_bytes!` of that file is behind the `glue-baked` feature and `wasm-glue`, so `cargo build --features shell` alone does not need the file and does not list `glue-duty`. If `build_app` fails, smoke still builds `--features shell` and runs every shell case that does not execute Glue Duty. It logs `[SKIP]` for `wasm-glue`, `app-glue`, and `app-spin` (`app-spin`'s app list names `glue-duty`). A successful glue build still runs all 77 cases. `wasm-core` does not bake the module. `help_text` is unchanged. The `app` list in `app-spin` grows by the `glue-duty` line. `hello` and `spin` do not export `r3_pixels`, so their text screens are unchanged.
 
 The harness self-test rejects a `wasm-core` log with `add=41`, a log missing the `ok` line, and the good log judged at status 249. It rejects an `app-hello` VGA dump with one cell changed, an `app-spin` log that says `trap stack`, and an `app-gate` log that inserts `R3ATH3_APP_READY` after the agent's `say`. It rejects a `wasm-glue` replay whose `frame=` differs, a golden whose `frame=` differs, a truncated kernel log, and an `app-glue` title dump with one cell changed. After `nvme-core` and `wasm-core` have both run, each log fails the other proof's judge at the wrong status and again at the right status, so a matching body cannot hide behind the status check. `wasm-glue`'s log judged as `wasm-core` fails. Those checks do not print their own `[PASS]` lines.
 
@@ -230,7 +231,7 @@ The game is one Rust source under `apps/glue-duty/`. `logic.rs` and `text.rs` ar
 
 `scripts/build-apps.sh` changes to `apps/glue-duty`, runs `cargo test --offline`, and then `cargo build`. A failing test fails that script, and smoke treats that as a failed glue build. Cargo reads `.cargo/config.toml` from that directory and passes `-zstack-size=32768`, `--initial-memory=131072`, and `--max-memory=262144`. The module's memory is 2 pages initial and 4 pages maximum. There is no import section. Block types in this module are `0x40` only. Spike W3's report is in the pull request. The module is 15,797 bytes.
 
-The rules are the integer port in `logic.rs`: three lanes, a 72-column belt, a scraper fixed at belt column 8, shifts of 750 steps, at most 24 blobs, xorshift32, and no floats. `text.rs` paints the 80×25 grid. Grid bytes, summary bytes, and log bytes go through `store_byte`, which is `#[inline(never)]`, so those stores do not become `memory.fill` or `memory.copy`. Other writes are ordinary assignments. `q` is never delivered. Pixels and sound are milestone 12.
+The rules are the integer port in `logic.rs`: three lanes, a 72-column belt, a scraper fixed at belt column 8, shifts of 750 steps, at most 24 blobs, xorshift32, and no floats. `text.rs` paints the 80×25 grid. Grid bytes, summary bytes, and log bytes go through `store_byte`, which is `#[inline(never)]`, so those stores do not become `memory.fill` or `memory.copy`. Other writes are ordinary assignments. `q` is never delivered. Pixels and sound for Glue Duty are part B of milestone 12. This part does not change `logic.rs`.
 
 The title grid, after `r3_init(1)`, is the `app-glue` VGA golden (`apps/glue-duty/golden/app-glue.vga`). Attribute `0x0A`. The text is:
 
@@ -284,4 +285,4 @@ On seed 1 that reaches `SHIFT_DONE` at step 750 (shift 1) and `next_shift` at st
 
 Each `r3_step` is given the full 1,000,000 fuel budget and must use at most 250,000. The proof does not print the fuel count.
 
-`app-glue` launches `glue-duty`, dumps the title screen, sends Space (state 1), `p` (state 2), `p` (state 1), and `q`. The end line is `app glue-duty: quit; shift 1 score 0 cleaned 0 gum-up 0%`. Quit is success, so the case exits 209. On this shell build `mem` reports `frames_total=15765`.
+`app-glue` launches `glue-duty`, dumps the title screen, sends Space (state 1), `p` (state 2), `p` (state 1), and `q`. The end line is `app glue-duty: quit; shift 1 score 0 cleaned 0 gum-up 0%`. Quit is success, so the case exits 209. On this shell build `mem` reports `frames_total=15746`.

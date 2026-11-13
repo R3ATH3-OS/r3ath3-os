@@ -66,6 +66,14 @@ mod apps;
 mod wasmtest;
 #[cfg(feature = "wasm-glue")]
 mod gluetest;
+#[cfg(feature = "fb")]
+mod fb;
+#[cfg(feature = "fb-core")]
+mod fbtest;
+#[cfg(feature = "speaker")]
+mod speaker;
+#[cfg(feature = "speaker-core")]
+mod speakertest;
 #[cfg(feature = "sched")]
 mod sched;
 #[cfg(any(
@@ -118,6 +126,8 @@ const _: () = {
         + cfg!(feature = "nvme-core") as u8
         + cfg!(feature = "wasm-core") as u8
         + cfg!(feature = "wasm-glue") as u8
+        + cfg!(feature = "fb-core") as u8
+        + cfg!(feature = "speaker-core") as u8
         + cfg!(feature = "shell") as u8;
     assert!(modes <= 1, "enable at most one test feature");
 };
@@ -240,6 +250,12 @@ pub extern "C" fn kernel_main() -> ! {
     #[cfg(feature = "wasm-glue")]
     gluetest::run();
 
+    #[cfg(feature = "fb-core")]
+    fbtest::run();
+
+    #[cfg(feature = "speaker-core")]
+    speakertest::run();
+
     #[cfg(feature = "shell")]
     shell::run();
 
@@ -272,6 +288,8 @@ pub extern "C" fn kernel_main() -> ! {
         feature = "nvme-core",
         feature = "wasm-core",
         feature = "wasm-glue",
+        feature = "fb-core",
+        feature = "speaker-core",
         feature = "shell"
     )))]
     boot_ok();
@@ -306,6 +324,8 @@ pub extern "C" fn kernel_main() -> ! {
     feature = "nvme-core",
     feature = "wasm-core",
     feature = "wasm-glue",
+    feature = "fb-core",
+    feature = "speaker-core",
     feature = "shell"
 )))]
 fn boot_ok() -> ! {

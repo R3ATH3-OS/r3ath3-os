@@ -16,10 +16,11 @@
 # Gate: core 0x78 → 241, expire 0x79 → 243.
 # Flight recorder: core 0x7A → 245. Store: core 0x7B → 247. NVMe: core 0x7C → 249.
 # WebAssembly: core 0x7D → 251. Glue Duty: 0x7E → 253.
+# Framebuffer: core 0x6D → 219. PC speaker: core 0x6E → 221.
 # With no NVMe controller the shell uses the RAM disk, and a reboot erases it.
 # With QEMU's emulated NVMe disk, earlier boots stay in the image.
 # Saved flight-recorder entries survive a reboot only inside that image.
-# Unused odd statuses: 203–207, 219–223, 237–239, 255.
+# Unused odd statuses: 203–207, 223, 237–239, 255.
 # A triple-fault or silent reset does not print the fault line and does not
 # use those statuses (this QEMU build has exited 0 on triple fault).
 set -u
@@ -62,6 +63,8 @@ STORE_CORE_STATUS=247
 NVME_CORE_STATUS=249
 WASM_CORE_STATUS=251
 WASM_GLUE_STATUS=253
+FB_CORE_STATUS=219
+SPEAKER_CORE_STATUS=221
 RAM_BYTES=67108864
 HEAP_BYTES=1048576
 HEAP_LINE='R3ATH3_HEAP ok size=1048576 used=([0-9]+) align_max=4096'
@@ -277,9 +280,13 @@ sys.exit(0)
 PY
 }
 
-# Part B shell builds may drop at most 24 frames from the Part A figure
-# 15773. This is not part of judge_shell_mem: that judge's self-test uses
-# a synthetic frames_total of 16000 and must keep passing.
+# The 64 KiB mode-13h buffer is 16 frames. The plane-2 font save and the
+# text DAC add 3 more. Milestone 11's shell reported frames_total=15765.
+# This shell reports 15746, which sits inside the existing window
+# 15741..=15757. That window is eight frames either side of the earlier
+# 15749 figure. It rejects another 64 KiB of .bss. This is not part of
+# judge_shell_mem: that judge's self-test uses a synthetic frames_total
+# of 16000 and must keep passing.
 shell_frames_in_bound() {
   python3 - "$1" <<'PY'
 import re, sys
@@ -287,7 +294,7 @@ text = open(sys.argv[1], encoding="ascii", errors="replace").read()
 nums = [int(n) for n in re.findall(r"frames_total=([0-9]+)", text)]
 if len(nums) < 1 or len(set(nums)) != 1:
     sys.exit(1)
-sys.exit(0 if 15749 <= nums[0] <= 15773 else 1)
+sys.exit(0 if 15741 <= nums[0] <= 15757 else 1)
 PY
 }
 
@@ -1036,6 +1043,16 @@ judge_wasm_core() {
   judge_exact "$status" "$file" "$WASM_CORE_STATUS" "$OUT/task/wasm-core.expected"
 }
 
+judge_fb_core() {
+  local status="$1" file="$2"
+  judge_exact "$status" "$file" "$FB_CORE_STATUS" "$OUT/task/fb-core.expected"
+}
+
+judge_speaker_core() {
+  local status="$1" file="$2"
+  judge_exact "$status" "$file" "$SPEAKER_CORE_STATUS" "$OUT/task/speaker-core.expected"
+}
+
 # Kernel log, native replay, and the committed golden, byte for byte.
 judge_wasm_glue() {
   local status="$1" kernel="$2" replay="$3" golden="$4"
@@ -1197,9 +1214,9 @@ R3ATH3_SHELL_EXIT last=ok
 EOF
   judge_shell_mem "$SHELL_OK_STATUS" "$dir/shell-mem.log" "$dir/shell-mem.expected" || ok=1
   if judge_shell_mem "$SHELL_CMD_STATUS" "$dir/shell-mem.log" "$dir/shell-mem.expected"; then ok=1; fi
-  printf '%s\n' "mem heap_used=100 heap_size=1048576 frames_total=15773 frames_free=15773" >"$dir/frames-bound-ok.log"
-  printf '%s\n' "mem heap_used=100 heap_size=1048576 frames_total=15748 frames_free=15748" >"$dir/frames-bound-low.log"
-  printf '%s\n' "mem heap_used=100 heap_size=1048576 frames_total=15774 frames_free=15774" >"$dir/frames-bound-high.log"
+  printf '%s\n' "mem heap_used=100 heap_size=1048576 frames_total=15746 frames_free=15746" >"$dir/frames-bound-ok.log"
+  printf '%s\n' "mem heap_used=100 heap_size=1048576 frames_total=15740 frames_free=15740" >"$dir/frames-bound-low.log"
+  printf '%s\n' "mem heap_used=100 heap_size=1048576 frames_total=15758 frames_free=15758" >"$dir/frames-bound-high.log"
   shell_frames_in_bound "$dir/frames-bound-ok.log" || ok=1
   if shell_frames_in_bound "$dir/frames-bound-low.log"; then ok=1; fi
   if shell_frames_in_bound "$dir/frames-bound-high.log"; then ok=1; fi
@@ -1816,6 +1833,20 @@ PY
     grep -v 'ok steps=11' "$OUT/task/wasm-core.expected" >"$dir/wasm-core-nook.log"
     if judge_wasm_core "$WASM_CORE_STATUS" "$dir/wasm-core-nook.log"; then ok=1; fi
     if judge_wasm_core "$NVME_CORE_STATUS" "$OUT/task/wasm-core.expected"; then ok=1; fi
+    judge_fb_core "$FB_CORE_STATUS" "$OUT/task/fb-core.expected" || ok=1
+    sed 's/sum=8160000/sum=0/' "$OUT/task/fb-core.expected" >"$dir/fb-core-sum.log"
+    if judge_fb_core "$FB_CORE_STATUS" "$dir/fb-core-sum.log"; then ok=1; fi
+    sed 's/font=c8dbddd1/font=00000000/g' "$OUT/task/fb-core.expected" >"$dir/fb-core-font.log"
+    if judge_fb_core "$FB_CORE_STATUS" "$dir/fb-core-font.log"; then ok=1; fi
+    if judge_fb_core "$SPEAKER_CORE_STATUS" "$OUT/task/fb-core.expected"; then ok=1; fi
+    grep -v 'R3ATH3_FB_CORE ok' "$OUT/task/fb-core.expected" >"$dir/fb-core-nook.log"
+    if judge_fb_core "$FB_CORE_STATUS" "$dir/fb-core-nook.log"; then ok=1; fi
+    judge_speaker_core "$SPEAKER_CORE_STATUS" "$OUT/task/speaker-core.expected" || ok=1
+    sed 's/divisor=2386/divisor=2385/' "$OUT/task/speaker-core.expected" >"$dir/speaker-core-div.log"
+    if judge_speaker_core "$SPEAKER_CORE_STATUS" "$dir/speaker-core-div.log"; then ok=1; fi
+    if judge_speaker_core "$FB_CORE_STATUS" "$OUT/task/speaker-core.expected"; then ok=1; fi
+    if judge_fb_core "$FB_CORE_STATUS" "$OUT/task/speaker-core.expected"; then ok=1; fi
+    if judge_speaker_core "$SPEAKER_CORE_STATUS" "$OUT/task/fb-core.expected"; then ok=1; fi
     python3 - "$OUT/task/app-hello.vga" "$dir/app-hello-cell.vga" <<'PY'
 import sys
 src, dst = sys.argv[1:]
@@ -1959,6 +1990,7 @@ run_qemu() {
   local name="$1"
   local seconds="$2"
   local disk="${3:-}"
+  local vga="${4:-none}"
   local elf="$OUT/$name.elf"
   local log_file="$OUT/$name.serial.log"
   local err_file="$OUT/$name.qemu.err"
@@ -1981,7 +2013,7 @@ run_qemu() {
       -kernel "$elf" \
       -nic none \
       -display none \
-      -vga none \
+      -vga "$vga" \
       -serial stdio \
       -no-reboot \
       -drive "file=${disk},if=none,id=r3disk,format=raw" \
@@ -1997,7 +2029,7 @@ run_qemu() {
       -kernel "$elf" \
       -nic none \
       -display none \
-      -vga none \
+      -vga "$vga" \
       -serial stdio \
       -no-reboot \
       -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
@@ -3384,6 +3416,33 @@ wasm_core = (
 )
 write_bytes("wasm-core.expected", wasm_core)
 
+fb_core = (
+    "R3ATH3_STAGE rust_main\n"
+    "R3ATH3_FB_CORE start\n"
+    "R3ATH3_FB_CORE step=1 mode=13h width=320 height=200 stride=320 format=indexed8 gc6=05 crtc9=41\n"
+    "R3ATH3_FB_CORE step=2 direct sum=8160000 px0=1 px319=190 px63999=254\n"
+    "R3ATH3_FB_CORE step=3 dac0=0,0,0 dac1=0,0,21 dac255=63,63,63\n"
+    "R3ATH3_FB_CORE step=4 guest sum=7999385 px0=0 px251=0 px63999=245 absent=ok\n"
+    "R3ATH3_FB_CORE step=5 text gc6=0e crtc9=4f cell=0a41 font=c8dbddd1 dac07=42,42,42 dac3a=21,63,21 dac3f=63,63,63\n"
+    "app pixels: quit\n"
+    "R3ATH3_FB_CORE step=6 finish gc6=0e crtc9=4f font=c8dbddd1 dac07=42,42,42 dac3a=21,63,21 dac3f=63,63,63\n"
+    "R3ATH3_FB_CORE step=7 heap=same frames=same\n"
+    "R3ATH3_FB_CORE ok\n"
+)
+write_bytes("fb-core.expected", fb_core)
+speaker_core = (
+    "R3ATH3_STAGE rust_main\n"
+    "R3ATH3_SPEAKER_CORE start\n"
+    "R3ATH3_SPEAKER_CORE step=1 off hz=0 gate=0\n"
+    "R3ATH3_SPEAKER_CORE step=2 hz=500 divisor=2386 latched=ok gate=3\n"
+    "R3ATH3_SPEAKER_CORE step=3 ticks=5\n"
+    "R3ATH3_SPEAKER_CORE step=4 hz=2000 divisor=596 latched=ok gate=3\n"
+    "R3ATH3_SPEAKER_CORE step=5 off hz=0 gate=0\n"
+    "R3ATH3_SPEAKER_CORE step=6 heap=same frames=same\n"
+    "R3ATH3_SPEAKER_CORE ok\n"
+)
+write_bytes("speaker-core.expected", speaker_core)
+
 write_text("app-hello.steps", "launch hello\nxp\nappquit\nline exit\n")
 write_bytes(
     "app-hello.expected",
@@ -4327,6 +4386,64 @@ PY
   fi
 }
 
+expect_fb_core() {
+  local name="fb-core"
+  local status
+  status="$(run_qemu "$name" 20 "" std)"
+  if judge_fb_core "$status" "$OUT/$name.serial.log"; then
+    log "[PASS] $name exit=$status"
+  else
+    log "[FAIL] $name exit=$status"
+    log "----- serial -----"
+    cat "$OUT/$name.serial.log" 2>/dev/null || true
+    log "----- expected -----"
+    cat "$OUT/task/fb-core.expected" 2>/dev/null || true
+    log "----- qemu stderr -----"
+    cat "$OUT/$name.qemu.err" 2>/dev/null || true
+    FAILURES=$((FAILURES + 1))
+  fi
+}
+
+expect_speaker_core() {
+  local name="speaker-core"
+  local status
+  status="$(run_qemu "$name" 12)"
+  if judge_speaker_core "$status" "$OUT/$name.serial.log"; then
+    log "[PASS] $name exit=$status"
+  else
+    log "[FAIL] $name exit=$status"
+    log "----- serial -----"
+    cat "$OUT/$name.serial.log" 2>/dev/null || true
+    log "----- expected -----"
+    cat "$OUT/task/speaker-core.expected" 2>/dev/null || true
+    log "----- qemu stderr -----"
+    cat "$OUT/$name.qemu.err" 2>/dev/null || true
+    FAILURES=$((FAILURES + 1))
+  fi
+  if [[ -f "$OUT/fb-core.serial.log" ]]; then
+    if judge_fb_core "$SPEAKER_CORE_STATUS" "$OUT/fb-core.serial.log"; then
+      log "[FAIL] swap fb-core judged as speaker-core"
+      FAILURES=$((FAILURES + 1))
+    fi
+    if judge_fb_core "$FB_CORE_STATUS" "$OUT/$name.serial.log"; then
+      log "[FAIL] swap speaker-core content judged as fb-core"
+      FAILURES=$((FAILURES + 1))
+    fi
+    if judge_speaker_core "$FB_CORE_STATUS" "$OUT/fb-core.serial.log"; then
+      log "[FAIL] swap fb-core status judged as speaker-core"
+      FAILURES=$((FAILURES + 1))
+    fi
+    if judge_speaker_core "$SPEAKER_CORE_STATUS" "$OUT/fb-core.serial.log"; then
+      log "[FAIL] swap fb-core content judged as speaker-core"
+      FAILURES=$((FAILURES + 1))
+    fi
+    if cmp -s "$OUT/fb-core.serial.log" "$OUT/$name.serial.log"; then
+      log "[FAIL] swap fb-core and speaker-core logs are identical"
+      FAILURES=$((FAILURES + 1))
+    fi
+  fi
+}
+
 expect_wasm_core() {
   local name="wasm-core"
   local status
@@ -4534,6 +4651,12 @@ else
   fi
   if build_kernel wasm-core wasm-core; then
     expect_wasm_core
+  fi
+  if build_kernel fb-core fb-core; then
+    expect_fb_core
+  fi
+  if build_kernel speaker-core speaker-core; then
+    expect_speaker_core
   fi
   if build_app; then
     if build_kernel wasm-glue wasm-glue; then
