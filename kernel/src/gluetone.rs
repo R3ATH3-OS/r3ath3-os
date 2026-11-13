@@ -9,7 +9,7 @@ use crate::heap;
 use crate::irq;
 use crate::qemu_exit;
 use crate::serial;
-use crate::speaker::{self, Played};
+use crate::speaker::{self, Played, Sample};
 use crate::wasm;
 
 const SCRUB_STEP: u32 = 34;
@@ -110,6 +110,33 @@ pub fn run() -> ! {
             serial::Writer,
             "R3ATH3_GLUE_TONE step=6 scrub=34 hz=500 divisor=2386 latched=ok gate=3\n"
         );
+
+        match apps::play_exported(&mut inst) {
+            Ok(None) => {}
+            Ok(Some(_)) => fail(7, "reprogrammed"),
+            Err(trap) => fail(7, trap.word()),
+        }
+        let held = speaker::sample();
+        if held.gate != 3 || !still_playing(2386, &held) {
+            fail_sample(7, &held);
+        }
+        let _ = write!(
+            serial::Writer,
+            "R3ATH3_GLUE_TONE step=7 same hz=500 changed=no gate=3\n"
+        );
+
+        apps::finish_for_proof("glue-duty");
+        let closed = speaker::sample();
+        if closed.gate != 0 {
+            fail_sample(8, &closed);
+        }
+        let _ = write!(serial::Writer, "R3ATH3_GLUE_TONE step=8 finish gate=0\n");
+
+        play_expect(&mut inst, 9, 500, 2386);
+        let _ = write!(
+            serial::Writer,
+            "R3ATH3_GLUE_TONE step=9 again hz=500 divisor=2386 latched=ok gate=3\n"
+        );
     });
     if ran.is_none() {
         fail(6, "busy");
@@ -117,32 +144,36 @@ pub fn run() -> ! {
 
     let off = speaker::tone(0);
     if off.hz != 0 || off.divisor != 0 || off.gate != 0 {
-        fail_play(7, &off);
+        fail(10, "off");
     }
-    let _ = write!(serial::Writer, "R3ATH3_GLUE_TONE step=7 off hz=0 gate=0\n");
+    let closed = speaker::sample();
+    if closed.gate != 0 {
+        fail_sample(10, &closed);
+    }
+    let _ = write!(serial::Writer, "R3ATH3_GLUE_TONE step=10 off hz=0 gate=0\n");
 
     let ran = wasm::with_instance(HELLO, |loaded| {
         let mut inst = match loaded {
             Ok(inst) => inst,
-            Err(error) => fail(8, error.word()),
+            Err(error) => fail(11, error.word()),
         };
         match apps::exported_tone(&mut inst) {
             Ok(None) => {}
-            Ok(Some(_)) => fail(8, "export"),
-            Err(trap) => fail(8, trap.word()),
+            Ok(Some(_)) => fail(11, "export"),
+            Err(trap) => fail(11, trap.word()),
         }
     });
     if ran.is_none() {
-        fail(8, "busy");
+        fail(11, "busy");
     }
-    let _ = write!(serial::Writer, "R3ATH3_GLUE_TONE step=8 absent=ok\n");
+    let _ = write!(serial::Writer, "R3ATH3_GLUE_TONE step=11 absent=ok\n");
 
     if heap::used() != heap_before || frames::stats().1 != free_before {
-        fail(9, "changed");
+        fail(12, "changed");
     }
     let _ = write!(
         serial::Writer,
-        "R3ATH3_GLUE_TONE step=9 heap=same frames=same\n"
+        "R3ATH3_GLUE_TONE step=12 heap=same frames=same\n"
     );
     let _ = write!(serial::Writer, "R3ATH3_GLUE_TONE ok\n");
     qemu_exit::glue_tone_ok();
@@ -167,13 +198,23 @@ fn play_expect(inst: &mut wasm::Instance<'_, '_>, step: u8, hz: u32, divisor: u1
         Ok(None) => fail(step, "no-tone"),
         Err(trap) => fail(step, trap.word()),
     };
-    let played = speaker::tone(got);
-    if got != hz || played.hz != hz || played.divisor != divisor || !gate_ok(hz, &played) {
-        fail_play(step, &played);
+    let played = match apps::play_exported(inst) {
+        Ok(Some(played)) => played,
+        Ok(None) => fail(step, "unchanged"),
+        Err(trap) => fail(step, trap.word()),
+    };
+    if got != hz || played.hz != hz || played.divisor != divisor || !programmed(hz, &played) {
+        fail_played(step, &played);
+    }
+    let sample = speaker::sample();
+    if !after_play(hz, divisor, &sample) {
+        fail_sample(step, &sample);
     }
 }
 
-fn gate_ok(hz: u32, played: &Played) -> bool {
+/// The latch `speaker::tone` took in the same port-I/O window as the reload.
+/// Nonzero words use the window below. Zero does not latch.
+fn programmed(hz: u32, played: &Played) -> bool {
     if hz == 0 {
         played.gate == 0 && played.latched == 0
     } else {
@@ -181,10 +222,27 @@ fn gate_ok(hz: u32, played: &Played) -> bool {
     }
 }
 
-/// Even, and in `divisor - 20 ..= divisor`. The reload value itself counts:
-/// reprogramming a running channel 2 can latch the new divisor before the
-/// first PIT clock. `speaker-core` uses a half-open window; this proof
-/// includes the endpoint this QEMU returns.
+/// Gate and latch read after `play_exported` has returned. The count has
+/// kept running, so it is not the 20-count window: it is still even and
+/// still at most the divisor just programmed. Silence is a closed gate.
+fn after_play(hz: u32, divisor: u16, sample: &Sample) -> bool {
+    if hz == 0 {
+        sample.gate == 0
+    } else {
+        sample.gate == 3 && still_playing(divisor, sample)
+    }
+}
+
+/// The counter is still the one `play_exported` loaded: even, and not above
+/// that divisor. A second play of the same word must not reload it.
+fn still_playing(divisor: u16, sample: &Sample) -> bool {
+    sample.latched != 0 && sample.latched <= divisor && sample.latched % 2 == 0
+}
+
+/// The window `speaker-core` already proves, plus the reload value itself.
+/// Even, and in `divisor - 20 ..= divisor`. Reprogramming a running channel
+/// 2 can latch the new divisor before the first PIT clock. `speaker-core`
+/// stays half-open (`latched < divisor`).
 fn latch_ok(divisor: u16, latched: u16) -> bool {
     latched != 0 && latched <= divisor && divisor - latched <= LATCH_SLACK && latched % 2 == 0
 }
@@ -224,11 +282,20 @@ fn fail(step: u8, detail: &str) -> ! {
     qemu_exit::fail();
 }
 
-fn fail_play(step: u8, played: &Played) -> ! {
+fn fail_played(step: u8, played: &Played) -> ! {
     let _ = write!(
         serial::Writer,
         "R3ATH3_GLUE_TONE fail step={step} detail=play hz={} divisor={} latched={} gate={}\n",
         played.hz, played.divisor, played.latched, played.gate
+    );
+    qemu_exit::fail();
+}
+
+fn fail_sample(step: u8, sample: &Sample) -> ! {
+    let _ = write!(
+        serial::Writer,
+        "R3ATH3_GLUE_TONE fail step={step} detail=sample latched={} gate={}\n",
+        sample.latched, sample.gate
     );
     qemu_exit::fail();
 }

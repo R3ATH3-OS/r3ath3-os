@@ -118,9 +118,9 @@ pub fn run() -> ! {
             serial::Writer,
             "R3ATH3_GLUE_PIXELS step=3 play sum=574839 frame=f14e49b47018956c changed=ok hw=match\n"
         );
-        play.sum
+        (play.sum, play.frame)
     });
-    let Some(play_sum) = ran else {
+    let Some((play_sum, play_frame)) = ran else {
         fail(0, "busy");
     };
 
@@ -130,7 +130,7 @@ pub fn run() -> ! {
         Err(detail) => fail(4, detail),
     }
     let same = fb::with_bytes(|buf| sum_bytes(buf) == play_sum);
-    if same != Some(true) || fb::hardware_sum() != play_sum {
+    if same != Some(true) || fb::hardware_sum() != play_sum || fb::hardware_fnv() != play_frame {
         fail(4, "changed");
     }
     let _ = write!(
@@ -152,7 +152,7 @@ pub fn run() -> ! {
     if !fb::blit() {
         fail(6, "blit");
     }
-    if fb::hardware_sum() != play_sum {
+    if fb::hardware_sum() != play_sum || fb::hardware_fnv() != play_frame {
         fail(6, "hw");
     }
     apps::finish_for_proof("glue-duty");
@@ -204,10 +204,7 @@ fn guest_view(inst: &mut wasm::Instance<'_, '_>) -> Result<View, &'static str> {
 }
 
 fn hw_matches(view: &View) -> bool {
-    fb::hardware_sum() == view.sum
-        && fb::hw_byte(0) == Some(view.px0)
-        && fb::hw_byte(1) == Some(view.px1)
-        && fb::hw_byte(fb::LEN - 1) == Some(view.last)
+    fb::hardware_sum() == view.sum && fb::hardware_fnv() == view.frame
 }
 
 fn load_hello() -> Result<bool, &'static str> {

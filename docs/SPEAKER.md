@@ -57,11 +57,11 @@ R3ATH3_SPEAKER_CORE ok
 
 The latch and the reload write run inside `irq::without_interrupts`, so the timer handler cannot split them. Channel 2's command bytes are the only writes to port `0x43` from this driver. `gate` is port `0x61` bits 0 and 1 after the update. Step 6 is `heap::used` and the free-frame count unchanged.
 
-`speaker` is internal. `shell` and `speaker-core` turn it on. The shell calls `silence` before it prints `R3ATH3_SHELL_READY`, which closes the gate and does not change the transcript. `speaker-core` is a test mode, in the at-most-one assert and in both `boot_ok` exclusion lists.
+`speaker` is internal. `shell`, `speaker-core`, and `glue-tone` turn it on. The shell calls `silence` before it prints `R3ATH3_SHELL_READY`, which closes the gate and does not change the transcript. `speaker-core` is a test mode, in the at-most-one assert and in both `boot_ok` exclusion lists.
 
 ## Glue Duty tones
 
-A module may export `r3_tone`, `() -> i32`, the frequency word. Zero is silence. `check_abi` does not require it. There is still no import. On the shell, `play_exported` calls `speaker::tone` only when that word changes, including the change to 0. `finish` calls `silence` before it restores text mode. The shell does not print the latch, so `app-glue`'s transcript does not gain a tone line. `hello` and `spin` do not export `r3_tone`.
+A module may export `r3_tone`, `() -> i32`, the frequency word. Zero is silence. `check_abi` does not require it. There is still no import. On the shell, `play_exported` calls `speaker::tone` only when that word changes, including the change to 0, and returns that `Played` value. A repeat of the same word returns `None` and does not touch the PIT. `finish` calls `silence` and clears that cache before it restores text mode, so the next app programs from a fresh word. The cache and that silence block are both behind the `speaker` feature. The shell does not print the latch, so `app-glue`'s transcript does not gain a tone line. `hello` and `spin` do not export `r3_tone`.
 
 The word is a presentation of the same rules. An event line wins over the state drone:
 
@@ -80,7 +80,11 @@ The word is a presentation of the same rules. An event line wins over the state 
 
 Every non-zero divisor is even. On the proof script the first scrub is step 34.
 
-`glue-tone` is the proof. Status 205, port byte `0x66`, `qemu_exit::glue_tone_ok`. QEMU is `-m 64M -smp 1` and `-vga none`. The latch window here is even and in `divisor - 20 ..= divisor`, including the reload value itself. Reprogramming a running channel 2 on this QEMU can latch the new divisor before the first PIT clock. `speaker-core` keeps the half-open window. A different divisor still cannot pass: the log records the divisor, and the window is checked against that divisor. The raw count is printed only on the fail line.
+`glue-tone` is the proof. Status 205, port byte `0x66`, `qemu_exit::glue_tone_ok`. QEMU is `-m 64M -smp 1` and `-vga none`. It calls `play_exported` and `finish`, then reads port `0x61` and latches channel 2 with `speaker::sample`. That read does not program a divisor and does not change the gate.
+
+The programming check is the latch `speaker::tone` already takes in the same port-I/O window `speaker-core` proves: even, and in `divisor - 20 .. divisor`. This proof also accepts the reload value itself (`latched == divisor`). Reprogramming a running channel 2 on this QEMU can return that value before the first PIT clock. `speaker-core`'s check stays half-open. The success line says `latched=ok`. The raw count is printed only on the fail line.
+
+The read after `play_exported` returns is a later count. It is not a second 20-count window. For a sounding word it must be even, nonzero, and at most that divisor, with gate bits `3`. For silence the gate bits are `0`.
 
 ```
 R3ATH3_STAGE rust_main
@@ -91,13 +95,17 @@ R3ATH3_GLUE_TONE step=3 ticks=5
 R3ATH3_GLUE_TONE step=4 hz=0 gate=0
 R3ATH3_GLUE_TONE step=5 hz=400 divisor=2982 latched=ok gate=3
 R3ATH3_GLUE_TONE step=6 scrub=34 hz=500 divisor=2386 latched=ok gate=3
-R3ATH3_GLUE_TONE step=7 off hz=0 gate=0
-R3ATH3_GLUE_TONE step=8 absent=ok
-R3ATH3_GLUE_TONE step=9 heap=same frames=same
+R3ATH3_GLUE_TONE step=7 same hz=500 changed=no gate=3
+app glue-duty: quit
+R3ATH3_GLUE_TONE step=8 finish gate=0
+R3ATH3_GLUE_TONE step=9 again hz=500 divisor=2386 latched=ok gate=3
+R3ATH3_GLUE_TONE step=10 off hz=0 gate=0
+R3ATH3_GLUE_TONE step=11 absent=ok
+R3ATH3_GLUE_TONE step=12 heap=same frames=same
 R3ATH3_GLUE_TONE ok
 ```
 
-Step 3 is `irq::wait_ticks(5)` while the 400 Hz tone is gated on. That is channel 0 still advancing. Step 4 is `tone(0)`, which closes the gate and does not reprogram channel 2. Step 6 is a fresh instance stepped to the first scrub. Step 8 is `hello`, which has no `r3_tone`. Step 9 is `heap::used` and the free-frame count unchanged. Channel 0 stays divisor 11932 on port `0x40`. Ports `0x60` and `0x64` are not used.
+Steps 1, 2, 4, 5, 6, and 9 go through `play_exported`, which programs only when the word changed. Step 3 is `irq::wait_ticks(5)` while the 400 Hz tone is gated on. That is channel 0 still advancing. Step 4 is the change to 0, which closes the gate and does not reprogram channel 2. Step 6 is a fresh instance stepped to the first scrub. Step 7 plays that same 500 Hz word again: `play_exported` returns `None`, and the gate is still `3`. `finish` then prints `app glue-duty: quit`, calls `silence`, and clears the cache. Step 8 reads the gate as `0`. Step 9 plays 500 Hz again, which programs because the cache was cleared. Step 10 is `tone(0)` and another gate read of `0`. Step 11 is `hello`, which has no `r3_tone`. Step 12 is `heap::used` and the free-frame count unchanged. Channel 0 stays divisor 11932 on port `0x40`. Ports `0x60` and `0x64` are not used.
 
 ## Not in this part
 

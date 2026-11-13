@@ -119,11 +119,6 @@ mod tests {
         let mut ch = 0x20u8;
         while ch <= 0x7E {
             let mut game = Game::blank();
-            game.shown[0] = 0;
-            game.grid[0] = ch;
-            // sync diffs shown against grid. Force a change from 0.
-            game.shown[0] = 0;
-            game.grid[0] = ch;
             sync_one(&mut game, ch);
             let mut block = [0u8; 32];
             let mut i = 0;

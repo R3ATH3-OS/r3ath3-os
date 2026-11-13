@@ -10,7 +10,7 @@ use super::tone;
 
 struct Slot(UnsafeCell<Game>);
 
-// SAFETY: One wasm32 thread. The six exports do not call each other, so
+// SAFETY: One wasm32 thread. The eight exports do not call each other, so
 // `with_game` is not re-entered. `GAME` is the only alias of this cell.
 unsafe impl Sync for Slot {}
 

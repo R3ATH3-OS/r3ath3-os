@@ -212,6 +212,18 @@ pub fn hw_byte(index: usize) -> Option<u8> {
     unsafe { Some((HW_BASE as *const u8).add(index).read_volatile()) }
 }
 
+/// FNV-1a 64 of the 64,000 bytes at `0xA0000`. Built on `hw_byte`.
+pub fn hardware_fnv() -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for index in 0..LEN {
+        let Some(byte) = hw_byte(index) else {
+            return 0;
+        };
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3);
+    }
+    hash
+}
+
 pub fn hardware_sum() -> u32 {
     let mut sum = 0u32;
     // SAFETY: the loop index stays below 64000, inside the VGA window at

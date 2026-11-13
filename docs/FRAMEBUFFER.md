@@ -76,9 +76,9 @@ R3ATH3_GLUE_PIXELS step=7 heap=same frames=same
 R3ATH3_GLUE_PIXELS ok
 ```
 
-Step 2 is the title after `r3_init(1)`. `frame` is FNV-1a 64 of the 64,000 bytes. `hw=match` is that same buffer at `0xA0000`. Step 3 is Space and one step (state 1). Step 4 loads `hello`, which has no `r3_pixels`, and the hardware sum stays the play sum. Step 5 is `enter_text`: the font and DAC match the samples taken before graphics mode. Step 6 enters graphics again, blits, and `finish` prints `app glue-duty: quit` and leaves text mode, the font, and the DAC. Step 7 is `heap::used` and the free-frame count unchanged.
+Step 2 is the title after `r3_init(1)`. `frame` is FNV-1a 64 of the 64,000 guest bytes. `hw=match` is that same sum and the same FNV over all 64,000 bytes at `0xA0000` (`hardware_fnv`, built on `hw_byte`). Step 3 is Space and one step (state 1), and `hw=match` is that play frame, every byte. Step 4 loads `hello`, which has no `r3_pixels`, and the hardware sum and FNV stay the play frame. Step 5 is `enter_text`: the font and DAC match the samples taken before graphics mode. Step 6 enters graphics again, blits, requires that same hardware FNV, and `finish` prints `app glue-duty: quit` and leaves text mode, the font, and the DAC. Step 7 is `heap::used` and the free-frame count unchanged.
 
-`app-glue` dumps those 64,000 bytes from `0xA0000` at the title and compares them to `apps/glue-duty/golden/app-glue.pix`. The text golden `app-glue.vga` stays a host unit test of the grid. `wasm-glue` hashes the same pixel buffer on both hosts. Spec for the game: `docs/WASM.md`.
+`app-glue` dumps those 64,000 bytes from `0xA0000` at the title and compares them to `replay --pixels`, a second host of the same source. The file `apps/glue-duty/golden/app-glue.pix` stays the host unit test that pins the length, the sum, and the FNV. The text golden `app-glue.vga` stays a host unit test of the grid. `wasm-glue` hashes the same pixel buffer on both hosts. Spec for the game: `docs/WASM.md`.
 
 The proof's guest fixture is not a shell app. Its WAT is on `PIXELS` in `kernel/src/fbtest.rs`. Byte `i` is `i % 251`. The host blit of that buffer is part of `fb-core`. Loading `hello` in the same proof must report no export and must leave the software buffer alone.
 

@@ -1,6 +1,8 @@
 //! Native host for the same Glue Duty source the kernel runs as wasm.
 //! `replay` prints the `wasm-glue` proof. `replay --title` prints the title
 //! screen as 25 rows of 80 VGA cells (`AA GG`, attribute 0x0A).
+//! `replay --pixels` writes the 64,000 title pixels. Smoke compares that
+//! stream with the QEMU `0xA0000` dump.
 
 use glue_duty::logic::{fnv64, Game};
 

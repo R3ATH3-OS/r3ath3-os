@@ -6,7 +6,12 @@
 #![allow(dead_code)]
 
 use crate::wasm::{Instance, ValType};
-#[cfg(any(feature = "shell", feature = "fb-core", feature = "glue-pixels"))]
+#[cfg(any(
+    feature = "shell",
+    feature = "fb-core",
+    feature = "glue-pixels",
+    feature = "glue-tone"
+))]
 use crate::wasm::LoadError;
 #[cfg(any(
     feature = "shell",
@@ -21,7 +26,12 @@ use crate::wasm::Trap;
 use crate::irq::{self, Key};
 #[cfg(feature = "shell")]
 use crate::sched;
-#[cfg(any(feature = "shell", feature = "fb-core", feature = "glue-pixels"))]
+#[cfg(any(
+    feature = "shell",
+    feature = "fb-core",
+    feature = "glue-pixels",
+    feature = "glue-tone"
+))]
 use crate::vga;
 
 pub struct App {
@@ -176,7 +186,12 @@ pub fn run_app(app: &'static App) -> bool {
     ran
 }
 
-#[cfg(any(feature = "shell", feature = "fb-core", feature = "glue-pixels"))]
+#[cfg(any(
+    feature = "shell",
+    feature = "fb-core",
+    feature = "glue-pixels",
+    feature = "glue-tone"
+))]
 enum End {
     NotLoaded(LoadError),
     Abi,
@@ -269,17 +284,23 @@ fn present(inst: &mut Instance<'_, '_>) -> Result<(), Trap> {
     };
     vga::present(&memory[start..start + 2000]);
     blit_exported(inst)?;
-    play_exported(inst)?;
+    let _played = play_exported(inst)?;
     Ok(())
 }
 
-#[cfg(any(feature = "shell", feature = "fb-core", feature = "glue-pixels"))]
+#[cfg(any(
+    feature = "shell",
+    feature = "fb-core",
+    feature = "glue-pixels",
+    feature = "glue-tone"
+))]
 fn finish(name: &str, end: End) {
     #[cfg(feature = "speaker")]
     {
         crate::speaker::silence();
         LAST_TONE.store(u32::MAX, core::sync::atomic::Ordering::Relaxed);
     }
+    #[cfg(feature = "fb")]
     if crate::fb::in_graphics() {
         crate::fb::enter_text();
     }
@@ -320,7 +341,7 @@ fn finish(name: &str, end: End) {
 }
 
 /// `fb-core` leaves graphics through the same `finish` the shell uses.
-#[cfg(any(feature = "fb-core", feature = "glue-pixels"))]
+#[cfg(any(feature = "fb-core", feature = "glue-pixels", feature = "glue-tone"))]
 pub(crate) fn finish_for_proof(name: &str) {
     finish(name, End::Quit([0; 60], 0));
 }
@@ -359,7 +380,12 @@ pub(crate) fn read_summary(inst: &mut Instance<'_, '_>) -> Result<([u8; 60], usi
     Ok((text, len))
 }
 
-#[cfg(any(feature = "shell", feature = "fb-core", feature = "glue-pixels"))]
+#[cfg(any(
+    feature = "shell",
+    feature = "fb-core",
+    feature = "glue-pixels",
+    feature = "glue-tone"
+))]
 fn both(bytes: &[u8]) {
     crate::serial::write_bytes(bytes);
     for &byte in bytes {
@@ -373,7 +399,8 @@ fn both(bytes: &[u8]) {
     feature = "shell",
     feature = "wasm-glue",
     feature = "fb-core",
-    feature = "glue-pixels"
+    feature = "glue-pixels",
+    feature = "glue-tone"
 ))]
 pub(crate) fn printable(byte: u8) -> u8 {
     if byte == 0x00 {
@@ -388,7 +415,10 @@ pub(crate) fn printable(byte: u8) -> u8 {
 /// Copy an exported `r3_pixels` buffer into the framebuffer and blit it.
 /// `Ok(false)` means the module does not export `r3_pixels`. Apps without
 /// that export stay on the text path.
-#[cfg(feature = "shell")]
+/// Last frequency `play_exported` sent to the speaker. `u32::MAX` means
+/// none, so the first real word always programs channel 2. The silence
+/// block in `finish` uses the same `speaker` gate.
+#[cfg(feature = "speaker")]
 static LAST_TONE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(u32::MAX);
 
 /// `Some(hz)` when the module exports `r3_tone`. `None` when it does not.
@@ -406,16 +436,21 @@ pub fn exported_tone(inst: &mut Instance<'_, '_>) -> Result<Option<u32>, Trap> {
     }
 }
 
-/// Play the exported tone when it changed. Silence is hz 0. No export is a no-op.
-#[cfg(feature = "shell")]
-fn play_exported(inst: &mut Instance<'_, '_>) -> Result<(), Trap> {
+/// Play the exported tone when it changed. Silence is hz 0. No export, and
+/// a repeated word, are `Ok(None)`. `Ok(Some(_))` is the `speaker::tone`
+/// result from the call that programmed channel 2.
+#[cfg(any(feature = "shell", feature = "glue-tone"))]
+pub(crate) fn play_exported(
+    inst: &mut Instance<'_, '_>,
+) -> Result<Option<crate::speaker::Played>, Trap> {
     let Some(hz) = exported_tone(inst)? else {
-        return Ok(());
+        return Ok(None);
     };
     if LAST_TONE.swap(hz, core::sync::atomic::Ordering::Relaxed) != hz {
-        let _played = crate::speaker::tone(hz);
+        Ok(Some(crate::speaker::tone(hz)))
+    } else {
+        Ok(None)
     }
-    Ok(())
 }
 
 #[cfg(any(feature = "shell", feature = "fb-core", feature = "glue-pixels"))]

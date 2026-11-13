@@ -3492,9 +3492,13 @@ glue_tone = (
     "R3ATH3_GLUE_TONE step=4 hz=0 gate=0\n"
     "R3ATH3_GLUE_TONE step=5 hz=400 divisor=2982 latched=ok gate=3\n"
     "R3ATH3_GLUE_TONE step=6 scrub=34 hz=500 divisor=2386 latched=ok gate=3\n"
-    "R3ATH3_GLUE_TONE step=7 off hz=0 gate=0\n"
-    "R3ATH3_GLUE_TONE step=8 absent=ok\n"
-    "R3ATH3_GLUE_TONE step=9 heap=same frames=same\n"
+    "R3ATH3_GLUE_TONE step=7 same hz=500 changed=no gate=3\n"
+    "app glue-duty: quit\n"
+    "R3ATH3_GLUE_TONE step=8 finish gate=0\n"
+    "R3ATH3_GLUE_TONE step=9 again hz=500 divisor=2386 latched=ok gate=3\n"
+    "R3ATH3_GLUE_TONE step=10 off hz=0 gate=0\n"
+    "R3ATH3_GLUE_TONE step=11 absent=ok\n"
+    "R3ATH3_GLUE_TONE step=12 heap=same frames=same\n"
     "R3ATH3_GLUE_TONE ok\n"
 )
 write_bytes("glue-tone.expected", glue_tone)
@@ -3965,7 +3969,12 @@ PY
       fi
       ;;
     appglue)
-      if judge_app_screen "$status" "$log_file" "$expected" "$vga_file" "$ROOT/apps/glue-duty/golden/app-glue.pix"; then
+      if ! "$ROOT/build/apps/glue-duty-replay" --pixels >"$OUT/app-glue.replay.pix"; then
+        log "[FAIL] $name replay --pixels"
+        FAILURES=$((FAILURES + 1))
+        return
+      fi
+      if judge_app_screen "$status" "$log_file" "$expected" "$vga_file" "$OUT/app-glue.replay.pix"; then
         passed=1
       fi
       ;;
@@ -3984,7 +3993,7 @@ PY
     log "----- expected -----"
     cat "$expected" 2>/dev/null || true
     if [[ "$kind" == "appglue" ]]; then
-      log "pixel dump differs from apps/glue-duty/golden/app-glue.pix"
+      log "pixel dump differs from replay --pixels"
     elif [[ "$kind" == "screen" || "$kind" == "apphello" ]]; then
       log "----- vga -----"
       cat "$vga_file" 2>/dev/null || true
@@ -4827,6 +4836,10 @@ else
     fi
   else
     log "[SKIP] wasm-glue (glue-duty did not build)"
+    FAILURES=$((FAILURES + 1))
+    log "[SKIP] glue-pixels (glue-duty did not build)"
+    FAILURES=$((FAILURES + 1))
+    log "[SKIP] glue-tone (glue-duty did not build)"
     FAILURES=$((FAILURES + 1))
     if build_kernel shell shell; then
       if write_shell_cases; then
