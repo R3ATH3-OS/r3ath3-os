@@ -412,15 +412,6 @@ pub(crate) fn printable(byte: u8) -> u8 {
     }
 }
 
-/// Copy an exported `r3_pixels` buffer into the framebuffer and blit it.
-/// `Ok(false)` means the module does not export `r3_pixels`. Apps without
-/// that export stay on the text path.
-/// Last frequency `play_exported` sent to the speaker. `u32::MAX` means
-/// none, so the first real word always programs channel 2. The silence
-/// block in `finish` uses the same `speaker` gate.
-#[cfg(feature = "speaker")]
-static LAST_TONE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(u32::MAX);
-
 /// `Some(hz)` when the module exports `r3_tone`. `None` when it does not.
 /// A negative result is `memory`.
 #[cfg(any(feature = "shell", feature = "glue-tone"))]
@@ -453,6 +444,15 @@ pub(crate) fn play_exported(
     }
 }
 
+/// Last frequency `play_exported` sent to the speaker. `u32::MAX` means
+/// none, so the first real word always programs channel 2. The silence
+/// block in `finish` uses the same `speaker` gate.
+#[cfg(feature = "speaker")]
+static LAST_TONE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(u32::MAX);
+
+/// Copy an exported `r3_pixels` buffer into the framebuffer and blit it.
+/// `Ok(false)` means the module does not export `r3_pixels`. Apps without
+/// that export stay on the text path.
 #[cfg(any(feature = "shell", feature = "fb-core", feature = "glue-pixels"))]
 pub fn blit_exported(inst: &mut Instance<'_, '_>) -> Result<bool, Trap> {
     if !inst.func_matches("r3_pixels", &[], Some(ValType::I32)) {
