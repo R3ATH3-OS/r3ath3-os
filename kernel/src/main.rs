@@ -20,6 +20,16 @@ extern crate alloc;
 mod boot;
 #[cfg(feature = "sched")]
 mod context;
+#[cfg(any(feature = "hw", feature = "mb2-boot", feature = "lfb-console"))]
+mod mb2;
+#[cfg(any(feature = "hw", feature = "mb2-boot", feature = "lfb-console"))]
+mod paging;
+#[cfg(any(feature = "hw", feature = "mb2-boot", feature = "lfb-console"))]
+mod font8x16;
+#[cfg(any(feature = "hw", feature = "mb2-boot", feature = "lfb-console"))]
+mod lfb;
+#[cfg(any(feature = "mb2-boot", feature = "lfb-console"))]
+mod hwtest;
 mod exceptions;
 mod frames;
 #[cfg(feature = "gate")]
@@ -52,9 +62,9 @@ mod ramdisk;
 mod store;
 #[cfg(feature = "store-core")]
 mod storetest;
-#[cfg(feature = "nvme")]
+#[cfg(all(feature = "nvme", not(feature = "hw")))]
 mod pci;
-#[cfg(feature = "nvme")]
+#[cfg(all(feature = "nvme", not(feature = "hw")))]
 mod nvme;
 #[cfg(feature = "nvme-core")]
 mod nvmetest;
@@ -134,6 +144,8 @@ const _: () = {
         + cfg!(feature = "speaker-core") as u8
         + cfg!(feature = "glue-pixels") as u8
         + cfg!(feature = "glue-tone") as u8
+        + cfg!(feature = "mb2-boot") as u8
+        + cfg!(feature = "lfb-console") as u8
         + cfg!(feature = "shell") as u8;
     assert!(modes <= 1, "enable at most one test feature");
 };
@@ -156,6 +168,9 @@ pub extern "C" fn kernel_main() -> ! {
         serial::write_str("\n");
         qemu_exit::mem_error();
     }
+
+    #[cfg(any(feature = "hw", feature = "mb2-boot", feature = "lfb-console"))]
+    lfb::init();
 
     #[cfg(feature = "mem-badinfo")]
     panic!("memory init accepted a zeroed start-info pointer");
@@ -268,6 +283,12 @@ pub extern "C" fn kernel_main() -> ! {
     #[cfg(feature = "glue-tone")]
     gluetone::run();
 
+    #[cfg(feature = "mb2-boot")]
+    hwtest::run_mb2();
+
+    #[cfg(feature = "lfb-console")]
+    hwtest::run_lfb();
+
     #[cfg(feature = "shell")]
     shell::run();
 
@@ -304,6 +325,8 @@ pub extern "C" fn kernel_main() -> ! {
         feature = "speaker-core",
         feature = "glue-pixels",
         feature = "glue-tone",
+        feature = "mb2-boot",
+        feature = "lfb-console",
         feature = "shell"
     )))]
     boot_ok();
@@ -342,6 +365,8 @@ pub extern "C" fn kernel_main() -> ! {
     feature = "speaker-core",
     feature = "glue-pixels",
     feature = "glue-tone",
+    feature = "mb2-boot",
+    feature = "lfb-console",
     feature = "shell"
 )))]
 fn boot_ok() -> ! {

@@ -18,10 +18,14 @@
 # WebAssembly: core 0x7D → 251. Glue Duty: 0x7E → 253.
 # Framebuffer: core 0x6D → 219. PC speaker: core 0x6E → 221.
 # Glue Duty pixels: 0x65 → 203. Glue Duty tones: 0x66 → 205.
+# Multiboot2 boot proof: 0x67 → 207. Linear framebuffer console: 0x6F → 223.
+# The hw image has no debug-exit port. hw-image is judged by the prompt
+# and a monitor quit.
 # With no NVMe controller the shell uses the RAM disk, and a reboot erases it.
 # With QEMU's emulated NVMe disk, earlier boots stay in the image.
 # Saved flight-recorder entries survive a reboot only inside that image.
-# Unused odd statuses: 207, 223, 237–239, 255.
+# Unused odd statuses: 237, 239, 255. 237 is reserved for the USB keyboard
+# proof. 255 is not used.
 # A triple-fault or silent reset does not print the fault line and does not
 # use those statuses (this QEMU build has exited 0 on triple fault).
 set -u
@@ -68,7 +72,10 @@ FB_CORE_STATUS=219
 SPEAKER_CORE_STATUS=221
 GLUE_PIXELS_STATUS=203
 GLUE_TONE_STATUS=205
+MB2_STATUS=207
+LFB_STATUS=223
 RAM_BYTES=67108864
+UEFI_RAM_BYTES=268435456
 HEAP_BYTES=1048576
 HEAP_LINE='R3ATH3_HEAP ok size=1048576 used=([0-9]+) align_max=4096'
 HEAP_OOM_LINE='R3ATH3_HEAP_OOM ok chunks=16 used=1048576'
@@ -285,7 +292,7 @@ PY
 
 # The 64 KiB mode-13h buffer is 16 frames. The plane-2 font save and the
 # text DAC add 3 more. Milestone 11's shell reported frames_total=15765.
-# Part A of milestone 12 reported 15746. This shell reports 15747, which
+# Part A of milestone 12 reported 15746. This shell reports 15746, which
 # sits inside the existing window 15741..=15757. That window is eight
 # frames either side of the earlier 15749 figure. It rejects another
 # 64 KiB of .bss. This is not part of judge_shell_mem: that judge's
@@ -4691,6 +4698,366 @@ expect_case() {
   fi
 }
 
+ovmf_code() {
+  local path
+  for path in /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd; do
+    if [[ -f "$path" ]]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  done
+  return 1
+}
+
+ovmf_vars() {
+  local path
+  for path in /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd; do
+    if [[ -f "$path" ]]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  done
+  return 1
+}
+
+judge_mb2() {
+  local status="$1" file="$2" fw="$3" ram_bytes="$4"
+  [[ "$status" -eq "$MB2_STATUS" ]] || return 1
+  grep -E -x -q 'R3ATH3_MB2_BOOT magic=ok' "$file" || return 1
+  grep -E -x -q "R3ATH3_MB2_BOOT fw=${fw}" "$file" || return 1
+  grep -E -x -q 'R3ATH3_MB2_BOOT entries=[0-9]+ raw=[0-9]+ type1=[0-9]+' "$file" || return 1
+  grep -E -x -q 'R3ATH3_MB2_BOOT window=0x30000000\.\.0x30200000 excluded=yes managed=no' "$file" || return 1
+  grep -E -x -q 'R3ATH3_MB2_BOOT ok' "$file" || return 1
+  if grep -F -q 'R3ATH3_PANIC' "$file"; then
+    return 1
+  fi
+  if grep -F -q 'R3ATH3_LFB_CONSOLE' "$file"; then
+    return 1
+  fi
+  python3 - "$file" "$fw" "$ram_bytes" <<'PY'
+import re, sys
+path, fw, ram = sys.argv[1:]
+lines = open(path, encoding="ascii", errors="replace").read().splitlines()
+frames = None
+fb = None
+for line in lines:
+    match = re.fullmatch(
+        r"R3ATH3_MB2_BOOT frames_total=(\d+) frames_free=(\d+) first=0x([0-9a-f]+) kernel_end=0x([0-9a-f]+)",
+        line,
+    )
+    if match:
+        frames = match
+    if line.startswith("R3ATH3_MB2_BOOT fb="):
+        fb = line
+if frames is None or fb is None:
+    sys.exit(1)
+total = int(frames.group(1))
+free = int(frames.group(2))
+first = int(frames.group(3), 16)
+kernel_end = int(frames.group(4), 16)
+if not (total > 0 and free == total and first >= kernel_end and total * 4096 <= int(ram)):
+    sys.exit(1)
+if fw == "uefi":
+    match = re.fullmatch(
+        r"R3ATH3_MB2_BOOT fb=(\d+)x(\d+)x32 addr=0x([0-9a-f]+) pitch=(\d+) type=rgb",
+        fb,
+    )
+    if not match or int(match.group(3), 16) < (1 << 30):
+        sys.exit(1)
+elif fb != "R3ATH3_MB2_BOOT fb=text":
+    match = re.fullmatch(
+        r"R3ATH3_MB2_BOOT fb=(\d+)x(\d+)x(\d+) addr=0x([0-9a-f]+) pitch=(\d+) type=(rgb|other)",
+        fb,
+    )
+    if not match:
+        sys.exit(1)
+sys.exit(0)
+PY
+}
+
+judge_lfb() {
+  local status="$1" file="$2"
+  [[ "$status" -eq "$LFB_STATUS" ]] || return 1
+  grep -E -x -q 'R3ATH3_LFB_CONSOLE fw=uefi fb=[0-9]+x[0-9]+x32 addr=0x[0-9a-f]+ pitch=[0-9]+' "$file" || return 1
+  grep -E -x -q 'R3ATH3_LFB_CONSOLE scrolled=1' "$file" || return 1
+  grep -E -x -q 'R3ATH3_LFB_CONSOLE fnv=434d640f42624b08' "$file" || return 1
+  grep -E -x -q 'R3ATH3_LFB_CONSOLE glyph=L ok' "$file" || return 1
+  grep -E -x -q 'R3ATH3_LFB_CONSOLE ok' "$file" || return 1
+  if grep -F -q 'R3ATH3_MB2_BOOT' "$file"; then
+    return 1
+  fi
+  if grep -F -q 'R3ATH3_PANIC' "$file"; then
+    return 1
+  fi
+  return 0
+}
+
+make_grub_iso() {
+  local elf="$1" iso="$2" stage="$3"
+  rm -rf "$stage"
+  mkdir -p "$stage/boot/grub"
+  cp "$elf" "$stage/boot/r3ath3" || return 1
+  cp "$ROOT/scripts/grub.cfg" "$stage/boot/grub/grub.cfg" || return 1
+  grub-mkrescue -o "$iso" "$stage" >"$stage.mkrescue.log" 2>&1 || return 1
+}
+
+run_firmware_qemu() {
+  local name="$1" seconds="$2" mem="$3" mode="$4" iso="$5"
+  local log_file="$OUT/$name.serial.log"
+  local err_file="$OUT/$name.qemu.err"
+  local vars="$OUT/$name.ovmf-vars.fd"
+  local code=""
+  set +e
+  if [[ "$mode" == uefi ]]; then
+    code="$(ovmf_code)" || code=""
+    local vars_src
+    vars_src="$(ovmf_vars)" || vars_src=""
+    if [[ -z "$code" || -z "$vars_src" ]]; then
+      echo "missing ovmf" >"$log_file"
+      echo 127
+      set -e
+      return
+    fi
+    cp "$vars_src" "$vars"
+    timeout --foreground --kill-after=5s "$seconds" qemu-system-x86_64 \
+      -machine pc,accel=tcg \
+      -cpu qemu64 \
+      -m "$mem" \
+      -smp 1 \
+      -drive if=pflash,format=raw,readonly=on,file="$code" \
+      -drive if=pflash,format=raw,file="$vars" \
+      -cdrom "$iso" \
+      -boot d \
+      -nic none \
+      -display none \
+      -vga std \
+      -serial stdio \
+      -no-reboot \
+      -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+      >"$log_file" 2>"$err_file"
+  else
+    timeout --foreground --kill-after=5s "$seconds" qemu-system-x86_64 \
+      -machine pc,accel=tcg \
+      -cpu qemu64 \
+      -m "$mem" \
+      -smp 1 \
+      -cdrom "$iso" \
+      -boot d \
+      -nic none \
+      -display none \
+      -vga std \
+      -serial stdio \
+      -no-reboot \
+      -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+      >"$log_file" 2>"$err_file"
+  fi
+  local status=$?
+  set -e
+  echo "$status"
+}
+
+expect_mb2() {
+  local name="$1" seconds="$2" mem="$3" fw="$4" iso="$5" ram="$6"
+  local started ended status
+  started="$(date +%s%3N)"
+  status="$(run_firmware_qemu "$name" "$seconds" "$mem" "$fw" "$iso")"
+  ended="$(date +%s%3N)"
+  log "${name}_ms=$((ended - started))"
+  if judge_mb2 "$status" "$OUT/$name.serial.log" "$fw" "$ram"; then
+    log "[PASS] $name exit=$status"
+  else
+    log "[FAIL] $name exit=$status"
+    log "----- serial -----"
+    cat "$OUT/$name.serial.log" 2>/dev/null || true
+    log "----- qemu stderr -----"
+    cat "$OUT/$name.qemu.err" 2>/dev/null || true
+    FAILURES=$((FAILURES + 1))
+  fi
+}
+
+expect_lfb() {
+  local name="$1" seconds="$2" iso="$3"
+  local started ended status
+  started="$(date +%s%3N)"
+  status="$(run_firmware_qemu "$name" "$seconds" 256M uefi "$iso")"
+  ended="$(date +%s%3N)"
+  log "${name}_ms=$((ended - started))"
+  if judge_lfb "$status" "$OUT/$name.serial.log"; then
+    log "[PASS] $name exit=$status"
+  else
+    log "[FAIL] $name exit=$status"
+    log "----- serial -----"
+    cat "$OUT/$name.serial.log" 2>/dev/null || true
+    log "----- qemu stderr -----"
+    cat "$OUT/$name.qemu.err" 2>/dev/null || true
+    FAILURES=$((FAILURES + 1))
+  fi
+}
+
+expect_hw_image() {
+  local image="$ROOT/build/image/r3ath3-usb.img"
+  local log_file="$OUT/hw-image.serial.log"
+  local err_file="$OUT/hw-image.qemu.err"
+  local sock="$OUT/hw-image.mon.sock"
+  local vars="$OUT/hw-image.ovmf-vars.fd"
+  local code vars_src
+  rm -f "$sock" "$log_file"
+  code="$(ovmf_code)" || code=""
+  vars_src="$(ovmf_vars)" || vars_src=""
+  if [[ ! -f "$image" || -z "$code" || -z "$vars_src" ]]; then
+    log "[FAIL] hw-image missing image or ovmf"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  cp "$vars_src" "$vars"
+  set +e
+  python3 - "$image" "$log_file" "$err_file" "$sock" "$code" "$vars" <<'PY'
+import os, socket, subprocess, sys, time
+image, out_log, err_log, sock_path, code, vars_path = sys.argv[1:]
+try:
+    os.remove(out_log)
+except FileNotFoundError:
+    pass
+try:
+    os.remove(sock_path)
+except FileNotFoundError:
+    pass
+err_f = open(err_log, "wb")
+start = time.time()
+proc = subprocess.Popen(
+    [
+        "qemu-system-x86_64",
+        "-machine", "q35,accel=tcg",
+        "-cpu", "qemu64",
+        "-m", "256M",
+        "-smp", "1",
+        "-drive", "if=pflash,format=raw,readonly=on,file=" + code,
+        "-drive", "if=pflash,format=raw,file=" + vars_path,
+        "-device", "qemu-xhci,id=xhci",
+        "-drive", "if=none,id=stick,format=raw,file=" + image,
+        "-device", "usb-storage,bus=xhci.0,drive=stick",
+        "-nic", "none",
+        "-display", "none",
+        "-serial", "file:" + out_log,
+        "-monitor", "unix:" + sock_path + ",server,nowait",
+        "-no-reboot",
+    ],
+    stdout=subprocess.DEVNULL,
+    stderr=err_f,
+)
+deadline = start + 90
+prompt_at = None
+while time.time() < deadline:
+    if proc.poll() is not None:
+        break
+    try:
+        data = open(out_log, "rb").read()
+    except FileNotFoundError:
+        data = b""
+    if b"R3ATH3 hw boot " in data and b"r3> " in data:
+        prompt_at = time.time()
+        mon = None
+        for _ in range(50):
+            if os.path.exists(sock_path):
+                try:
+                    mon = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    mon.settimeout(1)
+                    mon.connect(sock_path)
+                    break
+                except OSError:
+                    mon = None
+            time.sleep(0.05)
+        if mon is None:
+            prompt_at = None
+            break
+        try:
+            mon.recv(4096)
+        except OSError:
+            pass
+        try:
+            mon.sendall(b"quit\n")
+        except OSError:
+            prompt_at = None
+        break
+    time.sleep(0.05)
+try:
+    proc.wait(timeout=15)
+except subprocess.TimeoutExpired:
+    proc.kill()
+    proc.wait()
+try:
+    mon.close()
+except Exception:
+    pass
+ms = int((prompt_at - start) * 1000) if prompt_at is not None else -1
+print("hw_image_boot_ms=%d" % ms)
+if prompt_at is None:
+    sys.exit(1)
+code = proc.returncode
+sys.exit(0 if code == 0 else 1)
+PY
+  local py=$?
+  set -e
+  if [[ "$py" -eq 0 ]] \
+    && grep -E -q 'R3ATH3 hw boot fw=uefi fb=[0-9]+x[0-9]+ mem_mib=[0-9]+' "$log_file" \
+    && grep -F -q 'r3> ' "$log_file"; then
+    log "[PASS] hw-image exit=quit"
+  else
+    log "[FAIL] hw-image py=$py"
+    log "----- serial -----"
+    cat "$log_file" 2>/dev/null || true
+    log "----- qemu stderr -----"
+    cat "$err_file" 2>/dev/null || true
+    FAILURES=$((FAILURES + 1))
+  fi
+}
+
+run_hardware_cases() {
+  if ! command -v grub-mkrescue >/dev/null 2>&1 || ! command -v xorriso >/dev/null 2>&1; then
+    log "[FAIL] grub-mkrescue or xorriso missing"
+    FAILURES=$((FAILURES + 1))
+    return
+  fi
+  if build_kernel mb2-boot mb2-boot; then
+    if make_grub_iso "$OUT/mb2-boot.elf" "$OUT/mb2.iso" "$OUT/mb2-iso"; then
+      expect_mb2 mb2-bios 45 64M bios "$OUT/mb2.iso" "$RAM_BYTES"
+      expect_mb2 mb2-uefi 90 256M uefi "$OUT/mb2.iso" "$UEFI_RAM_BYTES"
+      if judge_lfb "$LFB_STATUS" "$OUT/mb2-uefi.serial.log"; then
+        log "[FAIL] swap mb2-uefi judged as lfb-console"
+        FAILURES=$((FAILURES + 1))
+      fi
+      if judge_lfb "$LFB_STATUS" "$OUT/mb2-bios.serial.log"; then
+        log "[FAIL] swap mb2-bios judged as lfb-console"
+        FAILURES=$((FAILURES + 1))
+      fi
+    else
+      log "[FAIL] iso mb2"
+      FAILURES=$((FAILURES + 1))
+    fi
+  fi
+  if build_kernel lfb-console lfb-console; then
+    if make_grub_iso "$OUT/lfb-console.elf" "$OUT/lfb.iso" "$OUT/lfb-iso"; then
+      expect_lfb lfb-console 90 "$OUT/lfb.iso"
+      if judge_mb2 "$MB2_STATUS" "$OUT/lfb-console.serial.log" uefi "$UEFI_RAM_BYTES"; then
+        log "[FAIL] swap lfb-console judged as mb2-uefi"
+        FAILURES=$((FAILURES + 1))
+      fi
+    else
+      log "[FAIL] iso lfb"
+      FAILURES=$((FAILURES + 1))
+    fi
+  fi
+  if "$ROOT/scripts/make-image.sh" >"$OUT/hw-image.build.log" 2>&1; then
+    log "[PASS] build hw-image"
+    grep -E '^[0-9a-f]{64} |^size=' "$OUT/hw-image.build.log" || true
+    expect_hw_image
+  else
+    log "[FAIL] build hw-image"
+    cat "$OUT/hw-image.build.log" 2>/dev/null || true
+    FAILURES=$((FAILURES + 1))
+  fi
+}
+
 git_report() {
   local when="$1" head dirty
   head="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
@@ -4851,6 +5218,8 @@ else
     fi
   fi
 fi
+
+run_hardware_cases
 
 git_report after
 if [[ "$FAILURES" -eq 0 ]]; then

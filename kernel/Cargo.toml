@@ -66,6 +66,13 @@ speaker = []
 speaker-core = ["speaker"]
 # Glue Duty tones on PIT channel 2. Test mode.
 glue-tone = ["speaker", "wasm"]
+# Internal. Hardware-safe image: no QEMU exit port and no NVMe driver.
+# Not a test mode. `scripts/make-image.sh` combines it with `shell`.
+hw = []
+# Multiboot2 boot proof. Test mode.
+mb2-boot = []
+# Linear framebuffer console proof. Test mode.
+lfb-console = []
 # Internal. Not a test mode, and not part of the "at most one" assert.
 # Smoke turns it on for the shell image after `scripts/build-apps.sh`.
 # `include_bytes!` of `glue_duty.wasm` is behind this feature, `wasm-glue`,

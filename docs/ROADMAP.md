@@ -23,10 +23,10 @@
 9. Flight recorder + selftest. Merged in PR #9 at 08a4bc6 from tested head 9ce5596 (61/61 smoke cases).
 10. **Storage (QEMU-emulated).** RAM disk merged in PR #10; emulated NVMe merged in PR #11 at `3ac0fe5` from tested head `ac0f38a`. Official smoke on the tested head `ac0f38a` was 68/68, 28 builds, harness-selftest PASS, smoke_exit=0, dirty 0, rustc 1.83.0, QEMU 8.2.2. Saved data survives a reboot only inside the emulated disk image. Without a disk the RAM disk is erased by a reboot.
 11. **WebAssembly runtime.** A sandbox for apps and for AI tools, running under the gate's permissions. Game logic is written once and runs on R3@TH3 and on the web. Merged in PR #13 at `3036b6b` from tested head `c9c778f`. Official smoke on that tested head was 75/75. Glue Duty runs in text mode. Later native apps, not started: Watch Mechanic, The Movement (a system monitor), the shop terminal, and a Patterns trainer.
+12. **Framebuffer graphics + PC speaker sound.** Merged in PR #15 at `0099dea4`. VGA mode 13h, 320×200×8, and the PC speaker on PIT channel 2 (`docs/FRAMEBUFFER.md`, `docs/SPEAKER.md`). Glue Duty draws into that framebuffer and plays tones on that speaker. The two-host match is the 320×200×8 buffer.
 
 ## Next, in order
-12. **Framebuffer graphics + PC speaker sound.** Part A is on main at `43b99218`, the merge of PR #14, tested head `918fd40`. Official smoke on that tested head was 77/77, 34 builds. It is VGA mode 13h, 320×200×8, and the PC speaker on PIT channel 2 (`docs/FRAMEBUFFER.md`, `docs/SPEAKER.md`). Part B ports Glue Duty onto that framebuffer and that speaker. The two-host match is the 320×200×8 buffer. Higher resolution and other upgrades come later.
-13. **Real hardware.** USB keyboard and booting on a mini PC or a Raspberry Pi, leading to the instant-boot, offline shop appliance.
+13. **Real hardware, in progress.** Part A is a Multiboot2 header, a GRUB USB image, and a text console on the firmware framebuffer (`docs/HARDWARE.md`). Part B, not started, is a USB keyboard. Part C is a checklist John runs himself: a Proxmox VM, then a machine he chooses. The image from `scripts/make-image.sh` is the one meant for that checklist. Writing a stick and booting a physical machine are not part of the part A change.
 
 ## Editions (later)
 - **Shop:** for maintenance work.

@@ -32,6 +32,7 @@ use crate::gate::{
 };
 use crate::heap;
 use crate::irq::{self, Key};
+#[cfg(not(feature = "hw"))]
 use crate::nvme::NvmeDisk;
 use crate::qemu_exit;
 use crate::ramdisk::RamDisk;
@@ -236,6 +237,8 @@ pub fn run() -> ! {
     vga::console_clear();
     let mut out = Out;
     out.both(b"R3@TH3 shell. Type help for commands.\n");
+    #[cfg(feature = "hw")]
+    hw_banner(&mut out);
     mount_store(&mut out);
     out.both(PROMPT);
 
@@ -1557,11 +1560,61 @@ fn selftest_body(ok: usize, fail: usize) -> [u8; 11] {
 fn on_disk<R>(device: Device, f: impl FnOnce(&mut dyn crate::block::BlockDev) -> R) -> R {
     match device {
         Device::Ram => f(&mut RamDisk),
-        Device::Nvme => f(&mut NvmeDisk),
+        Device::Nvme => {
+            // The `hw` image does not compile the NVMe driver, and it never
+            // selects this device. The arm exists so the enum stays exhaustive.
+            #[cfg(not(feature = "hw"))]
+            {
+                f(&mut NvmeDisk)
+            }
+            #[cfg(feature = "hw")]
+            {
+                f(&mut RamDisk)
+            }
+        }
     }
 }
 
+#[cfg(feature = "hw")]
+fn hw_banner(out: &mut Out) {
+    let fw = if crate::mb2::valid() {
+        if crate::mb2::firmware_uefi() {
+            "uefi"
+        } else {
+            "bios"
+        }
+    } else {
+        "pvh"
+    };
+    let mut bytes = 0u64;
+    for region in crate::memmap::regions() {
+        if region.kind == crate::memmap::KIND_RAM {
+            bytes = bytes.saturating_add(region.size);
+        }
+    }
+    let mem_mib = bytes >> 20;
+    let _ = write!(out, "R3ATH3 hw boot fw={fw} fb=");
+    if crate::lfb::is_active() {
+        if let Some(screen) = crate::lfb::screen() {
+            let _ = write!(out, "{}x{}", screen.width, screen.height);
+        }
+    } else {
+        let _ = write!(out, "text");
+    }
+    let _ = write!(out, " mem_mib={mem_mib}\n");
+}
+
 fn mount_store(out: &mut Out) {
+    #[cfg(feature = "hw")]
+    {
+        mount_ram(out);
+    }
+    #[cfg(not(feature = "hw"))]
+    mount_store_probe(out);
+}
+
+#[cfg(not(feature = "hw"))]
+fn mount_store_probe(out: &mut Out) {
     match crate::nvme::probe() {
         Err(crate::nvme::ProbeError::NoDevice) => mount_ram(out),
         Err(error) => {
@@ -1596,6 +1649,7 @@ fn mount_store(out: &mut Out) {
     }
 }
 
+#[cfg(not(feature = "hw"))]
 fn note_nvme(out: &mut Out, word: &'static str) {
     NVME_NOTE.with(|slot| *slot = Some(word));
     let _ = write!(

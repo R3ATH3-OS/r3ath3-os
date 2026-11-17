@@ -24,16 +24,23 @@
 //! The framebuffer proof writes `0x6D` (core → 219). The PC speaker proof
 //! writes `0x6E` (core → 221). Glue Duty's pixel proof writes `0x65`
 //! (pixels → 203). Glue Duty's tone proof writes `0x66` (tone → 205).
+//! The Multiboot2 boot proof writes `0x67` (207). The linear framebuffer
+//! console proof writes `0x6F` (223).
 //! With an NVMe disk the shell writes the live record through to that disk,
 //! and an earlier boot is read with `boots K`. Without a disk the shell uses
 //! the RAM disk, and a reboot erases both. Saved flight-recorder entries
 //! survive a reboot only inside the QEMU-emulated disk image. Unused odd
-//! statuses: `0x67` (207), `0x6F` (223), `0x76`–`0x77` (237–239), and
-//! `0x7F` (255).
-//! This device exists only in the emulator. Do not boot this image on hardware.
+//! statuses: `0x76` (237), `0x77` (239), and `0x7F` (255). 237 is reserved
+//! for the USB keyboard proof. 255 is not used.
+//! This device exists only in the emulator. The `hw` build does not write
+//! port `0xF4`: it prints `R3ATH3_HALT status=<n>` on the screen and on
+//! serial, then halts. Only the `hw` image from `scripts/make-image.sh` is
+//! meant for hardware.
 
+#[cfg(not(feature = "hw"))]
 use crate::port;
 
+#[cfg(not(feature = "hw"))]
 const DEBUG_EXIT_PORT: u16 = 0xF4;
 #[allow(dead_code)] // panic and hang builds do not report success
 pub const SUCCESS: u32 = 0x10;
@@ -207,6 +214,16 @@ pub fn glue_tone_ok() -> ! {
     exit(0x66)
 }
 
+#[cfg(feature = "mb2-boot")]
+pub fn mb2_boot_ok() -> ! {
+    exit(0x67)
+}
+
+#[cfg(feature = "lfb-console")]
+pub fn lfb_console_ok() -> ! {
+    exit(0x6F)
+}
+
 pub fn cpu_fault(vector: u64) -> ! {
     let code = match vector {
         0 => 0x30,
@@ -220,10 +237,50 @@ pub fn cpu_fault(vector: u64) -> ! {
 }
 
 fn exit(code: u32) -> ! {
+    #[cfg(not(feature = "hw"))]
     unsafe {
+        // SAFETY: port 0xF4 is QEMU's isa-debug-exit device. This `out` is
+        // compiled only when the `hw` feature is off. One CPU.
         port::outl(DEBUG_EXIT_PORT, code);
     }
+    #[cfg(feature = "hw")]
+    hw_halt_line(code);
     halt_forever()
+}
+
+#[cfg(feature = "hw")]
+fn hw_halt_line(code: u32) {
+    let mut buf = [0u8; 32];
+    let prefix = b"R3ATH3_HALT status=";
+    let mut len = 0;
+    for &byte in prefix {
+        buf[len] = byte;
+        len += 1;
+    }
+    let mut digits = [0u8; 10];
+    let mut n = code;
+    let mut written = 0usize;
+    if n == 0 {
+        digits[0] = b'0';
+        written = 1;
+    } else {
+        while n > 0 {
+            digits[written] = b'0' + (n % 10) as u8;
+            written += 1;
+            n /= 10;
+        }
+    }
+    while written > 0 {
+        written -= 1;
+        buf[len] = digits[written];
+        len += 1;
+    }
+    buf[len] = b'\n';
+    len += 1;
+    crate::serial::write_bytes(&buf[..len]);
+    for &byte in &buf[..len] {
+        crate::vga::console_put(byte);
+    }
 }
 
 pub fn halt_forever() -> ! {

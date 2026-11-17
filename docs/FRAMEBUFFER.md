@@ -8,7 +8,7 @@ Part A of milestone 12 is on main: VGA mode 13h, 320×200×8, and the path back 
 
 `kernel/src/fb.rs` is the driver. It is safe to call from the rest of the kernel. Every `unsafe` block in that file has a `// SAFETY:` comment.
 
-Mode is VGA mode 13h: 320×200, 256 colors, one byte per pixel. The software buffer is 64,000 bytes in `.bss`, not on the heap. `blit` copies it to physical `0xA0000`. That address is inside the 1 GiB identity map, below 1 MiB, and the frame allocator never hands those frames out. A Bochs/VBE linear framebuffer is not programmed. It usually sits above the 1 GiB map and would need new page tables.
+Mode is VGA mode 13h: 320×200, 256 colors, one byte per pixel. The software buffer is 64,000 bytes in `.bss`, not on the heap. `blit` copies it to physical `0xA0000`. That address is inside the 1 GiB identity map, below 1 MiB, and the frame allocator never hands those frames out. This driver does not program a Bochs/VBE mode. On a Multiboot2 boot, `lfb.rs` draws the 80×25 text console into a framebuffer GRUB already set, when that tag is RGB at 32 bpp and at least 640×400. See `docs/HARDWARE.md`.
 
 `fb` is internal. `shell` and `fb-core` turn it on. `fb-core` is a test mode. It is in the at-most-one assert and in both `boot_ok` exclusion lists.
 
@@ -55,6 +55,8 @@ Chain-4 writes at `0xA0000` overwrite plane 2, which is the font the text render
 ## Optional `r3_pixels`
 
 A module may export `r3_pixels`, `() -> i32`, the offset of a 64,000-byte buffer in its own linear memory. `apps::blit_exported` calls it, copies those bytes into the software buffer, enters mode 13h only when graphics mode is not already on, and blits. An out-of-range offset is `memory`. A module that does not export it returns `Ok(false)` and the text path is unchanged. `check_abi` does not require the export. Integers only. Modules are still baked into the image. There are no imports.
+
+On a linear-framebuffer boot the mode 13h blit does not run. The first pixel app in that boot prints `app NAME: no vga screen on this boot` and stays on the text console. Glue Duty does this. A PVH boot still uses mode 13h.
 
 `hello` and `spin` do not export it. Their screens stay the text screens they already had. Glue Duty does export it. The buffer lives in the guest's `Game` and is a picture of the same 80×25 grid `text.rs` already paints: each cell is a 4×8 block, a 3×5 glyph, and one byte of the cell itself so two different grid bytes cannot paint the same block. The shell calls `blit_exported` after each text paint. On the way out of an app, `finish` restores text mode, the plane-2 font, and DAC entries 0–63 when graphics mode was entered, then clears the console.
 
@@ -104,12 +106,12 @@ Step 2 fills the software buffer with `(i * 3 + 1) as u8` and blits. The sum and
 
 ## Frames
 
-The software buffer is 64,000 bytes. The link rounds the kernel image up to whole frames, so the shell image loses 16 frames for that buffer. The saved font and DAC are another 8 KiB plus 192 bytes in `.bss`, which the link rounds to 3 frames. Milestone 11's shell reported `frames_total=15765`. Before the font save this shell reported `frames_total=15749`. Part A reported `frames_total=15746`. Part B's shell reports `frames_total=15747`. `shell-mem` still requires 15741..=15757. `heap_used` is still at most 4096. On this shell image `heap_used` is 0. Builds that do not include `fb` do not carry the buffer or the save.
+The software buffer is 64,000 bytes. The link rounds the kernel image up to whole frames, so the shell image loses 16 frames for that buffer. The saved font and DAC are another 8 KiB plus 192 bytes in `.bss`, which the link rounds to 3 frames. Milestone 11's shell reported `frames_total=15765`. Before the font save this shell reported `frames_total=15749`. Part A reported `frames_total=15746`. Part B's shell reported `frames_total=15747`. After the spare page directory in milestone 13, this shell reports `frames_total=15746`. `shell-mem` still requires 15741..=15757. `heap_used` is still at most 4096. On this shell image `heap_used` is 0. Builds that do not include `fb` do not carry the buffer or the save.
 
 ## Unsafe
 
-`rg -n 'unsafe|asm!' kernel/src` is 145 lines. Milestone 11 ended at 122. The framebuffer and speaker lines are only in `kernel/src/fb.rs` (21) and `kernel/src/speaker.rs` (2). `fbtest.rs` and `speakertest.rs` have none. Every block in those two files has a `// SAFETY:` comment.
+`rg -n 'unsafe|asm!' kernel/src` is 166 lines. Milestone 12 ended at 145. The mode 13h and speaker lines are in `kernel/src/fb.rs` and `kernel/src/speaker.rs`. The linear console adds lines in `kernel/src/lfb.rs`. `fbtest.rs`, `speakertest.rs`, `hwtest.rs`, and `font8x16.rs` have none. Every block in those driver files has a `// SAFETY:` comment. The full list is in `docs/FOUNDATION.md`.
 
 ## Not in this part
 
-A mouse, a graphical shell, a Bochs/VBE framebuffer, and any resolution above 320×200. Those are later.
+A mouse, a graphical shell, and a mode this kernel programs above 320×200. The linear console is text on a framebuffer GRUB set. It is not a graphical shell.
