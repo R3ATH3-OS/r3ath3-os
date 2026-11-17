@@ -8,20 +8,28 @@
 //! page-table manager. One CPU. Called only for the linear framebuffer.
 
 use core::ptr;
+use core::sync::atomic::{AtomicU16, Ordering};
 
 const GIB: u64 = 1 << 30;
 const PAGE_2M: u64 = 2 << 20;
+const PD_ENTRIES: usize = 512;
 /// Present, writable, PWT, PCD, page-size. The physical address is OR-ed in.
 const PTE_UNCACHED_2M: u64 = 0x9B;
 const PDPT_PRESENT: u64 = 0x3;
+/// No PDPT slot has claimed `pd_hi` yet. A real slot is 1..=511.
+const SLOT_NONE: u16 = u16::MAX;
 
-// SAFETY: `pdpt` and `pd_hi` are 4096-byte aligned tables in `.bss.boot`.
+// SAFETY: `pdpt` and `pd_hi` are 4096-byte (512-entry) tables in `.bss.boot`.
 // The boot stub zeroes them before `kernel_main`. This declaration only
 // names those symbols. The writes are in `map_uncached_2m`.
 unsafe extern "C" {
-    static mut pdpt: u64;
-    static mut pd_hi: u64;
+    static mut pdpt: [u64; PD_ENTRIES];
+    static mut pd_hi: [u64; PD_ENTRIES];
 }
+
+/// Which PDPT slot currently points at `pd_hi`. There is one spare directory,
+/// so a second call for a different slot is refused.
+static MAPPED_SLOT: AtomicU16 = AtomicU16::new(SLOT_NONE);
 
 /// Map `[phys, phys+len)` as uncached 2 MiB pages. `false` if the range is
 /// empty, below 1 GiB, or does not fit in one spare PDPT slot.
@@ -36,24 +44,47 @@ pub fn map_uncached_2m(phys: u64, len: u64) -> bool {
         return false;
     }
     let slot = phys >> 30;
-    if slot == 0 || slot >= 512 || ((end - 1) >> 30) != slot {
+    if slot == 0 || slot >= PD_ENTRIES as u64 || ((end - 1) >> 30) != slot {
         return false;
     }
-    // SAFETY: `pd_hi` and `pdpt` are 4096-byte aligned tables in `.bss.boot`,
-    // inside the identity map. The boot stub zeroes them and writes only
-    // `pdpt[0]`. `slot != 0`, so the low 1 GiB map stays. One CPU. Each store
-    // is a full 8-byte page-table entry. CR3 is reloaded so the new entries
-    // are visible. The physical addresses written are the caller's range,
+    let first = phys & !(PAGE_2M - 1);
+    // Rounding the exclusive end up to 2 MiB must not wrap the address space.
+    let Some(rounded) = end.checked_add(PAGE_2M - 1) else {
+        return false;
+    };
+    let last = rounded & !(PAGE_2M - 1);
+    if last < first {
+        return false;
+    }
+    let slot_u = slot as u16;
+    match MAPPED_SLOT.compare_exchange(SLOT_NONE, slot_u, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => {}
+        Err(prev) if prev == slot_u => {}
+        Err(_) => return false,
+    }
+    // SAFETY: `pd_hi` and `pdpt` are 512-entry tables in `.bss.boot`, inside
+    // the identity map. The boot stub zeroes them and writes only `pdpt[0]`.
+    // `slot != 0`, so the low 1 GiB map stays. One spare directory exists.
+    // A different slot was refused above, so this directory is not also
+    // installed in another PDPT entry. One CPU. Each store is one 8-byte
+    // entry, and `index` is masked to 0..512. CR3 is reloaded so the new
+    // entries are visible. The addresses written are the caller's range
     // rounded out to 2 MiB, and that range was checked to sit in this slot.
     unsafe {
         let pd = ptr::addr_of_mut!(pd_hi).cast::<u64>();
-        let first = phys & !(PAGE_2M - 1);
-        let last = (end + PAGE_2M - 1) & !(PAGE_2M - 1);
+        let mut index = 0;
+        while index < PD_ENTRIES {
+            pd.add(index).write_volatile(0);
+            index += 1;
+        }
         let mut addr = first;
         while addr < last {
-            let index = ((addr >> 21) & 0x1FF) as usize;
-            pd.add(index).write_volatile(addr | PTE_UNCACHED_2M);
-            addr += PAGE_2M;
+            let pte = ((addr >> 21) & 0x1FF) as usize;
+            pd.add(pte).write_volatile(addr | PTE_UNCACHED_2M);
+            let Some(next) = addr.checked_add(PAGE_2M) else {
+                return false;
+            };
+            addr = next;
         }
         let entry = (pd as u64) | PDPT_PRESENT;
         ptr::addr_of_mut!(pdpt)

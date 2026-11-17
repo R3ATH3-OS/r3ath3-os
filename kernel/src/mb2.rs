@@ -146,9 +146,11 @@ pub fn framebuffer() -> Option<Framebuffer> {
 }
 
 fn read_u32(addr: u64) -> u32 {
-    // SAFETY: callers pass an address inside the info block already checked
-    // to lie below 1 GiB. The read is unaligned so a tag field that is only
-    // 4-byte aligned is still defined.
+    // SAFETY: `parse` rejects a header that is not entirely below 1 GiB
+    // before this first load, and it rejects a block whose end is above
+    // 1 GiB before any later load. Callers pass an address inside that
+    // block. The read is unaligned so a tag field that is only 4-byte
+    // aligned is still defined.
     unsafe { ptr::read_unaligned(addr as *const u32) }
 }
 
@@ -171,6 +173,15 @@ pub fn parse() -> Result<Parsed, MemError> {
     }
     let info = u64::from(saved_info());
     if info % 8 != 0 {
+        return Err(MemError::Mb2);
+    }
+    // The 8-byte header has to lie inside the identity map before the first
+    // load. A pointer at or above 1 GiB, or one whose header crosses 1 GiB,
+    // is rejected here and is not read.
+    let Some(header_end) = info.checked_add(8) else {
+        return Err(MemError::Mb2);
+    };
+    if header_end > GIB {
         return Err(MemError::Mb2);
     }
     let total = u64::from(read_u32(info));

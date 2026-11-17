@@ -13,6 +13,14 @@ case "$OUT" in
     exit 1
     ;;
 esac
+if [ -L "$OUT" ]; then
+  echo "refusing to write through a symlink: $OUT" >&2
+  exit 1
+fi
+if [ -c "$OUT" ]; then
+  echo "refusing to write a character device: $OUT" >&2
+  exit 1
+fi
 if [ -b "$OUT" ]; then
   echo "refusing to write a block device: $OUT" >&2
   exit 1
@@ -32,6 +40,14 @@ mkdir -p "$STAGE/boot/grub" "$ROOT/build/image"
 cp "$ROOT/kernel/target/x86_64-unknown-none/release/r3ath3" "$STAGE/boot/r3ath3"
 cp "$ROOT/scripts/grub.cfg" "$STAGE/boot/grub/grub.cfg"
 grub-mkrescue -o "$OUT" "$STAGE"
+if [ -L "$OUT" ]; then
+  echo "refusing to leave a symlink at $OUT" >&2
+  exit 1
+fi
+if [ -c "$OUT" ]; then
+  echo "refusing to leave a character device at $OUT" >&2
+  exit 1
+fi
 if [ -b "$OUT" ]; then
   echo "refusing to leave a block device at $OUT" >&2
   exit 1

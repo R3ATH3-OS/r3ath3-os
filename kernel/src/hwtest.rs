@@ -60,15 +60,22 @@ pub fn run_mb2() -> ! {
     if first_addr < kernel_end || kernel_start != 0x10_0000 {
         fail("kernel");
     }
+    let covered = window_covered();
+    let excluded = window_excluded();
+    if !excluded {
+        fail("window");
+    }
     let managed = frames::is_managed(frames::UNCACHED_START);
     let _ = write!(
         serial::Writer,
         "R3ATH3_MB2_BOOT frames_total={total} frames_free={free2} first=0x{first_addr:x} kernel_end=0x{kernel_end:x}\n"
     );
     let managed_word = if managed { "yes" } else { "no" };
+    let excluded_word = if excluded { "yes" } else { "no" };
+    let covered_word = if covered { "yes" } else { "no" };
     let _ = write!(
         serial::Writer,
-        "R3ATH3_MB2_BOOT window=0x{:x}..0x{:x} excluded=yes managed={managed_word}\n",
+        "R3ATH3_MB2_BOOT window=0x{:x}..0x{:x} excluded={excluded_word} managed={managed_word} covered={covered_word}\n",
         frames::UNCACHED_START,
         frames::UNCACHED_END
     );
@@ -120,6 +127,29 @@ fn put_bytes(bytes: &[u8]) {
 #[cfg(feature = "lfb-console")]
 fn two_digits(value: u32) -> [u8; 2] {
     [b'0' + ((value / 10) % 10) as u8, b'0' + (value % 10) as u8]
+}
+
+#[cfg(feature = "mb2-boot")]
+fn window_covered() -> bool {
+    crate::memmap::regions().iter().any(|region| {
+        if region.kind != crate::memmap::KIND_RAM || region.size == 0 {
+            return false;
+        }
+        let end = region.addr.saturating_add(region.size);
+        region.addr < frames::UNCACHED_END && end > frames::UNCACHED_START
+    })
+}
+
+#[cfg(feature = "mb2-boot")]
+fn window_excluded() -> bool {
+    let mut addr = frames::UNCACHED_START;
+    while addr < frames::UNCACHED_END {
+        if frames::is_managed(addr) {
+            return false;
+        }
+        addr += frames::FRAME_SIZE;
+    }
+    true
 }
 
 fn fail(detail: &str) -> ! {

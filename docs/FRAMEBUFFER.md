@@ -110,7 +110,7 @@ The software buffer is 64,000 bytes. The link rounds the kernel image up to whol
 
 ## Unsafe
 
-`rg -n 'unsafe|asm!' kernel/src` is 166 lines. Milestone 12 ended at 145. The mode 13h and speaker lines are in `kernel/src/fb.rs` and `kernel/src/speaker.rs`. The linear console adds lines in `kernel/src/lfb.rs`. `fbtest.rs`, `speakertest.rs`, `hwtest.rs`, and `font8x16.rs` have none. Every block in those driver files has a `// SAFETY:` comment. The full list is in `docs/FOUNDATION.md`.
+`rg -n 'unsafe|asm!' kernel/src` is 169 lines. Milestone 12 ended at 145. The mode 13h and speaker lines are in `kernel/src/fb.rs` and `kernel/src/speaker.rs`. The linear console adds lines in `kernel/src/lfb.rs`. `fbtest.rs`, `speakertest.rs`, `hwtest.rs`, and `font8x16.rs` have none. Every block in those driver files has a `// SAFETY:` comment. The full list is in `docs/FOUNDATION.md`.
 
 ## Not in this part
 

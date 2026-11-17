@@ -75,7 +75,7 @@ GLUE_TONE_STATUS=205
 MB2_STATUS=207
 LFB_STATUS=223
 RAM_BYTES=67108864
-UEFI_RAM_BYTES=268435456
+UEFI_RAM_BYTES=2147483648
 HEAP_BYTES=1048576
 HEAP_LINE='R3ATH3_HEAP ok size=1048576 used=([0-9]+) align_max=4096'
 HEAP_OOM_LINE='R3ATH3_HEAP_OOM ok chunks=16 used=1048576'
@@ -4726,7 +4726,7 @@ judge_mb2() {
   grep -E -x -q 'R3ATH3_MB2_BOOT magic=ok' "$file" || return 1
   grep -E -x -q "R3ATH3_MB2_BOOT fw=${fw}" "$file" || return 1
   grep -E -x -q 'R3ATH3_MB2_BOOT entries=[0-9]+ raw=[0-9]+ type1=[0-9]+' "$file" || return 1
-  grep -E -x -q 'R3ATH3_MB2_BOOT window=0x30000000\.\.0x30200000 excluded=yes managed=no' "$file" || return 1
+  grep -E -x -q 'R3ATH3_MB2_BOOT window=0x30000000\.\.0x30200000 excluded=yes managed=no covered=(yes|no)' "$file" || return 1
   grep -E -x -q 'R3ATH3_MB2_BOOT ok' "$file" || return 1
   if grep -F -q 'R3ATH3_PANIC' "$file"; then
     return 1
@@ -4740,6 +4740,8 @@ path, fw, ram = sys.argv[1:]
 lines = open(path, encoding="ascii", errors="replace").read().splitlines()
 frames = None
 fb = None
+entries = None
+window = None
 for line in lines:
     match = re.fullmatch(
         r"R3ATH3_MB2_BOOT frames_total=(\d+) frames_free=(\d+) first=0x([0-9a-f]+) kernel_end=0x([0-9a-f]+)",
@@ -4747,30 +4749,62 @@ for line in lines:
     )
     if match:
         frames = match
+    counted = re.fullmatch(r"R3ATH3_MB2_BOOT entries=(\d+) raw=(\d+) type1=(\d+)", line)
+    if counted:
+        entries = counted
     if line.startswith("R3ATH3_MB2_BOOT fb="):
         fb = line
-if frames is None or fb is None:
+    covered = re.fullmatch(
+        r"R3ATH3_MB2_BOOT window=0x30000000\.\.0x30200000 excluded=yes managed=no covered=(yes|no)",
+        line,
+    )
+    if covered:
+        window = covered
+if frames is None or fb is None or entries is None or window is None:
+    sys.exit(1)
+stored = int(entries.group(1))
+raw = int(entries.group(2))
+type1 = int(entries.group(3))
+if stored < 1 or raw < stored or type1 <= 0:
     sys.exit(1)
 total = int(frames.group(1))
 free = int(frames.group(2))
 first = int(frames.group(3), 16)
 kernel_end = int(frames.group(4), 16)
-if not (total > 0 and free == total and first >= kernel_end and total * 4096 <= int(ram)):
+if not (
+    total > 0
+    and free == total
+    and first == kernel_end
+    and kernel_end % 4096 == 0
+    and kernel_end > 0x100000
+    and total * 4096 <= int(ram)
+    and total * 4096 <= type1
+):
     sys.exit(1)
-if fw == "uefi":
+def rgb_fb(text):
     match = re.fullmatch(
         r"R3ATH3_MB2_BOOT fb=(\d+)x(\d+)x32 addr=0x([0-9a-f]+) pitch=(\d+) type=rgb",
-        fb,
-    )
-    if not match or int(match.group(3), 16) < (1 << 30):
-        sys.exit(1)
-elif fb != "R3ATH3_MB2_BOOT fb=text":
-    match = re.fullmatch(
-        r"R3ATH3_MB2_BOOT fb=(\d+)x(\d+)x(\d+) addr=0x([0-9a-f]+) pitch=(\d+) type=(rgb|other)",
-        fb,
+        text,
     )
     if not match:
+        return False
+    width = int(match.group(1))
+    height = int(match.group(2))
+    addr = int(match.group(3), 16)
+    pitch = int(match.group(4))
+    if width < 640 or height < 400 or pitch < width * 4 or pitch % 4 != 0:
+        return False
+    if addr < (1 << 30):
+        return False
+    return True
+
+if fw == "uefi":
+    if window.group(1) != "yes" or not rgb_fb(fb):
         sys.exit(1)
+elif window.group(1) != "no":
+    sys.exit(1)
+elif fb != "R3ATH3_MB2_BOOT fb=text" and not rgb_fb(fb):
+    sys.exit(1)
 sys.exit(0)
 PY
 }
@@ -5021,7 +5055,7 @@ run_hardware_cases() {
   if build_kernel mb2-boot mb2-boot; then
     if make_grub_iso "$OUT/mb2-boot.elf" "$OUT/mb2.iso" "$OUT/mb2-iso"; then
       expect_mb2 mb2-bios 45 64M bios "$OUT/mb2.iso" "$RAM_BYTES"
-      expect_mb2 mb2-uefi 90 256M uefi "$OUT/mb2.iso" "$UEFI_RAM_BYTES"
+      expect_mb2 mb2-uefi 90 2G uefi "$OUT/mb2.iso" "$UEFI_RAM_BYTES"
       if judge_lfb "$LFB_STATUS" "$OUT/mb2-uefi.serial.log"; then
         log "[FAIL] swap mb2-uefi judged as lfb-console"
         FAILURES=$((FAILURES + 1))

@@ -4,15 +4,18 @@
 //! Used only after a Multiboot2 boot that supplied an RGB framebuffer at
 //! 32 bits per pixel, at least 640×400. The 80×25 console is 8×16 cells
 //! (640×400), centered. Green is `0x55FF55`, black is zero. The cursor is
-//! an underline on the bottom row of the cell. Scrolling copies pixel rows.
-//! `vga`'s public console calls come here when `is_active` is set. One CPU,
-//! main context only, the same rule as `vga`. PVH boots never call `init`
-//! successfully, so `is_active` stays false and `vga` keeps `0xB8000`.
+//! an underline on the bottom row of the cell. Scrolling redraws every cell
+//! from the text grid. `vga`'s public console calls come here when
+//! `is_active` is set. One CPU. `&mut Geom` is taken only while `BUSY` is
+//! clear. A fault during a console call leaves `BUSY` set; the halt line
+//! then draws through `FIXED` and raw framebuffer pointers, never through
+//! `GEOM`. PVH boots never call `init` successfully, so `is_active` stays
+//! false and `vga` keeps `0xB8000`.
 
 #![allow(dead_code)]
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::font8x16;
 use crate::mb2;
@@ -51,9 +54,38 @@ struct Geom {
 
 struct Cell(UnsafeCell<Geom>);
 
-// SAFETY: one CPU, main context only. IRQ handlers never enter this module.
-// `init` publishes `ACTIVE` only after `GEOM` is fully written.
+// SAFETY: `with_geom` is the only code that forms `&mut Geom`. It does that
+// only after `BUSY` swaps from false to true, and it does not clear `BUSY`
+// until that reference is gone. One CPU. A fault or panic during the
+// closure leaves `BUSY` set. `put` then sees the lock and draws the byte
+// through `FIXED`, which is a different object, and through raw framebuffer
+// pointers. That path does not read or write `GEOM`, so it does not alias
+// the live `&mut`. IRQ handlers do not enter this module.
 unsafe impl Sync for Cell {}
+
+/// Framebuffer fields that do not change after `init`. The halt path reads
+/// these when `GEOM` is already borrowed.
+struct Fixed {
+    base: u64,
+    pitch: usize,
+    screen_w: usize,
+    screen_h: usize,
+    origin_x: usize,
+    origin_y: usize,
+    red_pos: u8,
+    red_size: u8,
+    green_pos: u8,
+    green_size: u8,
+    blue_pos: u8,
+    blue_size: u8,
+}
+
+struct FixedCell(UnsafeCell<Fixed>);
+
+// SAFETY: `init` writes `FIXED` once, then stores `FIXED_READY` with
+// Release. Nothing writes it after that. Readers load `FIXED_READY` with
+// Acquire first.
+unsafe impl Sync for FixedCell {}
 
 static GEOM: Cell = Cell(UnsafeCell::new(Geom {
     base: 0,
@@ -76,11 +108,45 @@ static GEOM: Cell = Cell(UnsafeCell::new(Geom {
 }));
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+static BUSY: AtomicBool = AtomicBool::new(false);
+static FIXED_READY: AtomicBool = AtomicBool::new(false);
+static EM_COL: AtomicUsize = AtomicUsize::new(0);
 
-fn with_geom<R>(f: impl FnOnce(&mut Geom) -> R) -> R {
-    // SAFETY: one CPU; only the shell task (or a boot proof) calls the
-    // console; IRQ handlers never do. The `&mut` does not escape `f`.
-    f(unsafe { &mut *GEOM.0.get() })
+static FIXED: FixedCell = FixedCell(UnsafeCell::new(Fixed {
+    base: 0,
+    pitch: 0,
+    screen_w: 0,
+    screen_h: 0,
+    origin_x: 0,
+    origin_y: 0,
+    red_pos: 0,
+    red_size: 0,
+    green_pos: 0,
+    green_size: 0,
+    blue_pos: 0,
+    blue_size: 0,
+}));
+
+fn with_geom<R>(f: impl FnOnce(&mut Geom) -> R) -> Option<R> {
+    if BUSY.swap(true, Ordering::Acquire) {
+        return None;
+    }
+    // SAFETY: the swap just moved `BUSY` from false to true, so no other
+    // `&mut Geom` exists. One CPU, and a fault that runs before this swap
+    // is stored takes the same swap itself or has not entered yet. The
+    // reference does not escape `f`. `BUSY` stays set if `f` diverges.
+    let result = f(unsafe { &mut *GEOM.0.get() });
+    BUSY.store(false, Ordering::Release);
+    Some(result)
+}
+
+fn fixed() -> Option<&'static Fixed> {
+    if !FIXED_READY.load(Ordering::Acquire) {
+        return None;
+    }
+    // SAFETY: the write of `FIXED` happened before `FIXED_READY`'s Release,
+    // and nothing writes `FIXED` afterwards.
+    Some(unsafe { &*FIXED.0.get() })
 }
 
 pub fn is_active() -> bool {
@@ -115,7 +181,7 @@ pub fn init() {
     if fb.addr < GIB && fb.addr.saturating_add(bytes) > GIB {
         return;
     }
-    with_geom(|geom| {
+    let installed = with_geom(|geom| {
         geom.base = fb.addr;
         geom.pitch = fb.pitch as usize;
         geom.screen_w = fb.width as usize;
@@ -133,7 +199,29 @@ pub fn init() {
         geom.col = 0;
         geom.scrolls = 0;
         geom.grid = [0; WIDTH * HEIGHT];
+        // SAFETY: `BUSY` is held and `FIXED_READY` is still false, so the
+        // halt path is not reading `FIXED`. This is the only write.
+        unsafe {
+            FIXED.0.get().write(Fixed {
+                base: geom.base,
+                pitch: geom.pitch,
+                screen_w: geom.screen_w,
+                screen_h: geom.screen_h,
+                origin_x: geom.origin_x,
+                origin_y: geom.origin_y,
+                red_pos: geom.red_pos,
+                red_size: geom.red_size,
+                green_pos: geom.green_pos,
+                green_size: geom.green_size,
+                blue_pos: geom.blue_pos,
+                blue_size: geom.blue_size,
+            });
+        }
     });
+    if installed.is_none() {
+        return;
+    }
+    FIXED_READY.store(true, Ordering::Release);
     ACTIVE.store(true, Ordering::Release);
 }
 
@@ -148,19 +236,19 @@ pub fn screen() -> Option<Screen> {
     if !is_active() {
         return None;
     }
-    Some(with_geom(|geom| Screen {
+    with_geom(|geom| Screen {
         addr: geom.base,
         pitch: geom.pitch as u32,
         width: geom.screen_w as u32,
         height: geom.screen_h as u32,
-    }))
+    })
 }
 
 pub fn scrolls() -> u32 {
     if !is_active() {
         return 0;
     }
-    with_geom(|geom| geom.scrolls)
+    with_geom(|geom| geom.scrolls).unwrap_or(0)
 }
 
 pub fn clear() {
@@ -181,7 +269,11 @@ pub fn put(byte: u8) {
     if !is_active() {
         return;
     }
-    with_geom(|geom| {
+    if BUSY.load(Ordering::Acquire) {
+        emergency_put(byte);
+        return;
+    }
+    if with_geom(|geom| {
         if byte == b'\n' {
             newline(geom);
         } else {
@@ -197,7 +289,11 @@ pub fn put(byte: u8) {
             geom.col += 1;
         }
         draw_cursor(geom);
-    });
+    })
+    .is_none()
+    {
+        emergency_put(byte);
+    }
 }
 
 pub fn backspace() {
@@ -290,6 +386,7 @@ pub fn console_fnv() -> u64 {
         }
         hash
     })
+    .unwrap_or(0)
 }
 
 /// Every lit pixel of the cell matches the font, and the cell is not the cursor.
@@ -304,6 +401,7 @@ pub fn glyph_matches(row: usize, col: usize) -> bool {
         let glyph = geom.grid[row * WIDTH + col];
         cell_matches_font(geom, row, col, glyph, false)
     })
+    .unwrap_or(false)
 }
 
 fn store(geom: &mut Geom, row: usize, col: usize, glyph: u8) {
@@ -326,24 +424,66 @@ fn scroll(geom: &mut Geom) {
     for col in 0..WIDTH {
         geom.grid[(HEIGHT - 1) * WIDTH + col] = b' ';
     }
-    let row_bytes = CONSOLE_W * 4;
-    for y in 0..(CONSOLE_H - CELL_H) {
-        for x in 0..row_bytes {
-            let src = pixel_ptr(geom, geom.origin_x * 4 + x, geom.origin_y + y + CELL_H);
-            let dst = pixel_ptr(geom, geom.origin_x * 4 + x, geom.origin_y + y);
-            // SAFETY: both pointers are inside the framebuffer bytes checked
-            // in `init`. One CPU. The copy moves the console up one cell.
-            unsafe {
-                dst.write_volatile(src.read_volatile());
-            }
-        }
-    }
-    for row in (HEIGHT - 1)..HEIGHT {
+    for row in 0..HEIGHT {
         for col in 0..WIDTH {
-            blit(geom, row, col, b' ', false);
+            let glyph = geom.grid[row * WIDTH + col];
+            blit(geom, row, col, glyph, false);
         }
     }
     geom.scrolls = geom.scrolls.saturating_add(1);
+}
+
+fn emergency_put(byte: u8) {
+    let Some(fixed) = fixed() else {
+        return;
+    };
+    if byte == b'\n' {
+        EM_COL.store(0, Ordering::Relaxed);
+        return;
+    }
+    let col = EM_COL.fetch_add(1, Ordering::Relaxed);
+    if col >= WIDTH {
+        return;
+    }
+    let glyph = if (0x20..=0x7E).contains(&byte) {
+        byte
+    } else {
+        b'?'
+    };
+    let green = pack_fixed(fixed, GREEN_R, GREEN_G, GREEN_B);
+    for gy in 0..CELL_H {
+        let bits = font8x16::GLYPHS[glyph as usize][gy];
+        for gx in 0..CELL_W {
+            let on = bits & (0x80 >> gx) != 0;
+            let color = if on { green } else { 0 };
+            emergency_pixel(
+                fixed,
+                fixed.origin_x + col * CELL_W + gx,
+                fixed.origin_y + (HEIGHT - 1) * CELL_H + gy,
+                color,
+            );
+        }
+    }
+}
+
+fn pack_fixed(fixed: &Fixed, red: u8, green: u8, blue: u8) -> u32 {
+    channel(red, fixed.red_pos, fixed.red_size)
+        | channel(green, fixed.green_pos, fixed.green_size)
+        | channel(blue, fixed.blue_pos, fixed.blue_size)
+}
+
+fn emergency_pixel(fixed: &Fixed, x: usize, y: usize, color: u32) {
+    if x >= fixed.screen_w || y >= fixed.screen_h {
+        return;
+    }
+    let ptr = (fixed.base as usize + y * fixed.pitch + x * 4) as *mut u32;
+    // SAFETY: `FIXED_READY` means `init` mapped this framebuffer. `x` and
+    // `y` were checked against its width and height. The store does not
+    // read or write `GEOM`. The address stays 4-byte aligned because the
+    // base and `x * 4` are.
+    unsafe {
+        ptr.write_volatile(color);
+    }
 }
 
 fn draw_cursor(geom: &mut Geom) {

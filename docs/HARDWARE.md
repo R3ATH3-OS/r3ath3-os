@@ -58,7 +58,7 @@ Four cases, on top of the existing 79. The build count is 39.
 | Case | Status | How it runs |
 | --- | --- | --- |
 | `mb2-bios` | 207 | `mb2-boot` kernel, GRUB ISO, SeaBIOS, `-m 64M` |
-| `mb2-uefi` | 207 | Same ISO, OVMF pflash, `-m 256M` |
+| `mb2-uefi` | 207 | Same ISO, OVMF pflash, `-m 2G`, so the uncached window is inside RAM |
 | `lfb-console` | 223 | `lfb-console` kernel, OVMF. FNV-1a of the 640×400 console is `434d640f42624b08`. A glyph sample matches the font. |
 | `hw-image` | none | `build/image/r3ath3-usb.img` as a USB stick on OVMF, `-m 256M`. No debug-exit device. Pass needs the hw boot line and `r3> `, then a monitor `quit`. |
 
