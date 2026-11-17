@@ -5,7 +5,8 @@
 //! the state. `used` has a 1 for every frame that is allocated or unavailable;
 //! `init` sets every bit to 1 before clearing any. `managed` has a 1 for every
 //! frame the allocator may ever hand out: type-1 RAM in `[1 MiB, 1 GiB)` minus
-//! the kernel image, the start-info struct, and the memory-map table. `alloc`
+//! the kernel image, the start-info struct, the memory-map table, and the
+//! uncached window `0x3000_0000..0x3020_0000`. `alloc`
 //! returns the lowest free frame, zeroed through the identity map. `free`
 //! accepts only a managed frame that is currently allocated.
 //!
@@ -23,6 +24,11 @@ use crate::mem::MemError;
 use crate::memmap;
 
 pub const FRAME_SIZE: u64 = 4096;
+/// NVMe MMIO window. Kept out of `managed` in every build, including ones
+/// that never probe NVMe. Under `-m 64M` it is not RAM, so the count of
+/// managed frames does not change.
+pub const UNCACHED_START: u64 = 0x3000_0000;
+pub const UNCACHED_END: u64 = 0x3020_0000;
 const COVERAGE: u64 = 1 << 30;
 const LOW_LIMIT: u64 = 1 << 20;
 const FRAME_COUNT: usize = (COVERAGE / FRAME_SIZE) as usize;
@@ -173,6 +179,11 @@ pub fn kernel_end() -> u64 {
     kernel_range().1
 }
 
+/// First byte of the kernel image. The link places it at 1 MiB.
+pub fn kernel_start() -> u64 {
+    kernel_range().0
+}
+
 fn zero_frame(addr: u64) {
     // SAFETY: `addr` is a frame this call just took from the bitmap, so it is
     // managed RAM below 1 GiB (identity mapped), outside the kernel image and
@@ -217,6 +228,7 @@ pub fn init() -> Result<(), MemError> {
         map.reserve(kernel_start, kernel_end);
         map.reserve(info_start, info_end);
         map.reserve(table_start, table_end);
+        map.reserve(UNCACHED_START, UNCACHED_END);
         let total: u32 = map.managed.iter().map(|word| word.count_ones()).sum();
         map.total = total as usize;
         map.free = map.total;
@@ -252,6 +264,18 @@ pub fn free(frame: PhysFrame) -> Result<(), FrameError> {
 /// hand out; the kernel image and start-info pages are not counted.
 pub fn stats() -> (usize, usize) {
     with_map(|map| (map.total, map.free))
+}
+
+/// `true` when `addr` is a 4 KiB-aligned frame the allocator may hand out.
+pub fn is_managed(addr: u64) -> bool {
+    if addr % FRAME_SIZE != 0 || addr >= COVERAGE {
+        return false;
+    }
+    with_map(|map| {
+        let index = (addr / FRAME_SIZE) as usize;
+        let (word, mask) = split(index);
+        map.managed[word] & mask != 0
+    })
 }
 
 /// Test helper: is every byte of an allocated frame zero? `false` for a frame

@@ -8,13 +8,13 @@ This repository boots a small Rust kernel in QEMU. The default image prints a bo
 ## What is implemented
 
 - x86_64 kernel, ring 0 only, built with `no_std` / `no_main` (not a Linux wrapper).
-- QEMU `-kernel` entry via a Xen PVH `PHYS32_ENTRY` note. QEMU 8.2 rejects ELF64 Multiboot, so there is no Multiboot header. The entry contract is 32-bit protected mode, paging off.
+- QEMU `-kernel` entry via a Xen PVH `PHYS32_ENTRY` note. QEMU 8.2's own Multiboot loader rejects this ELF64 file, so `-kernel` stays on PVH. The same ELF has a Multiboot2 header. GRUB loads it. The entry contract is 32-bit protected mode, paging off. Spec: `docs/HARDWARE.md`.
 - Identity map of the first 1 GiB, then a jump to 64-bit Rust.
 - Deterministic COM1 line: `R3ATH3_BOOT_OK arch=x86_64 serial=com1 milestone=boot-foundation`
 - QEMU `isa-debug-exit`: pass status **33**, panic status **35**.
 - A 64-bit IDT for CPU exceptions, plus a GDT/TSS so `#DF` uses a dedicated IST stack. Init remaps the 8259 PIC and runs `sti`, with only IRQ0 (timer) and IRQ1 (keyboard) unmasked.
 - Fault serial line, then a distinct QEMU status: `#UD` **99**, `#PF` **103** (`cr2=0x40000000`), `#DF` **105**. Also handled: `#DE` **97**, `#GP` **101**. Any other vector exits **95** (outside GNU timeout's 124–127). The RIP printed for `#DF` is architecturally undefined. The `#DF` stack has no guard page.
-- Bounded smoke test of 68 cases: pass, injected panic, hang/timeout, `#UD`, `#PF`, forced `#DF`, 12 task-script cases, timer, keyboard, keyboard script, the six allocator cases, thirty shell, gate, recorder, and store cases, six scheduler proofs, two gate proofs, one recorder proof, one store proof, and one NVMe proof. The harness rejects a missing marker, a silent log, and a triple-fault status.
+- Bounded smoke test of 83 cases and 39 builds. The list is in `docs/FOUNDATION.md`. It covers pass, injected panic, hang/timeout, `#UD`, `#PF`, forced `#DF`, task scripts, the timer, the keyboard, the allocator, the shell, the scheduler, the gate, the flight recorder, the store, emulated NVMe, WebAssembly, Glue Duty, the VGA framebuffer, the PC speaker, a Multiboot2 boot on BIOS and on OVMF (status **207**), a linear framebuffer console (status **223**), and the hw USB image (no debug-exit status). The harness rejects a missing marker, a silent log, and a triple-fault status.
 - A fixed-buffer task language. The `script` build reads COM1 (status **161**/**163**). The `kbd-script` build reads the PS/2 keyboard and echoes lines (success status **181**). Spec: `docs/TASK.md`.
 - IRQ0 timer at nominal 100 Hz (PIT divisor 11932) and IRQ1 keyboard. Other PIC lines stay masked. Proof waits 300 ticks and exits **177**. Keyboard echo exits **179**.
 - Memory (milestone 5, spec `docs/MEMORY.md`): the boot stub saves the PVH start-info pointer, `memmap` parses the memory map, `heap` is a 1 MiB bump allocator registered as `#[global_allocator]` (`Box`, `Vec`, `String` work; the heap only grows and is reclaimed only by reboot), and `frames` hands out zeroed 4 KiB frames from usable RAM in [1 MiB, 1 GiB). Bad start info prints `R3ATH3_MEM_ERROR reason=<startinfo|memmap|nousable>` and exits **201**. Smoke statuses: heap **193**, heap exhaustion **195**, frames **197**, frame exhaustion **199**. A heap overflow through `Box`/`Vec`/`String` panics and exits **35**.
@@ -26,7 +26,7 @@ This repository boots a small Rust kernel in QEMU. The default image prints a bo
 
 ## What is not implemented
 
-Userspace, processes, isolation, user mode, virtual memory management (page tables are only the boot identity map, plus one uncached 2 MiB window at `0x3000_0000` for emulated NVMe), a heap that can free or grow, files, networking, accounts, model inference, an agent runtime, persistent storage on real hardware (earlier boots survive only inside a QEMU-emulated NVMe image, and are read with `boots K`; without that disk the flight recorder is written through to a RAM disk, and a reboot erases both), a mouse, a graphical UI, shell history, and tab completion. Only IRQ0 and IRQ1 are unmasked. The task language is not an AI runtime. AI code is not linked into this kernel. The gate checks permissions of request lines that arrive on COM1 (`docs/GATE.md`). Agent names are self-asserted.
+Userspace, processes, isolation, user mode, virtual memory management beyond the boot identity map and one spare page directory for a linear framebuffer (the 2 MiB page at `0x3000_0000` stays uncached), a heap that can free or grow, files, networking, accounts, model inference, an agent runtime, persistent storage on real hardware (earlier boots survive only inside a QEMU-emulated NVMe image, and are read with `boots K`; without that disk the flight recorder is written through to a RAM disk, and a reboot erases both; the `hw` image never mounts a disk), a USB keyboard, a mouse, a graphical UI, shell history, and tab completion. Only IRQ0 and IRQ1 are unmasked. The task language is not an AI runtime. AI code is not linked into this kernel. The gate checks permissions of request lines that arrive on COM1 (`docs/GATE.md`). Agent names are self-asserted.
 
 Historical notes in [r3ath3-docs](https://github.com/R3ATH3-OS/r3ath3-docs) describe a userspace agent environment on Windows, WSL, and Docker. This boot milestone does not migrate or replace those notes.
 
@@ -65,8 +65,17 @@ qemu-system-x86_64 -machine pc,accel=tcg -cpu qemu64 -m 64M -smp 1 \
   -device isa-debug-exit,iobase=0xf4,iosize=0x04
 ```
 
-Status 33 is the pass. Do not write this image to a physical disk or a host OS.
+Status 33 is the pass. That `-kernel` image is not for a physical machine.
+
+The hardware image is a separate file. It needs the apt packages `grub-pc-bin`, `grub-efi-amd64-bin`, `xorriso`, `mtools`, and `ovmf`.
+
+```sh
+chmod +x scripts/make-image.sh
+./scripts/make-image.sh
+```
+
+That writes `build/image/r3ath3-usb.img` and prints its SHA-256 and its size. It does not write a device. Only this `hw` image is meant for hardware, and writing it to a stick is a separate step in `docs/HARDWARE.md`. BIOS and UEFI QEMU commands are in that file.
 
 ## Licenses
 
-No third-party source is vendored. The kernel has zero crates.io dependencies. Tool licenses are in `docs/FOUNDATION.md`. This repository still has no project `LICENSE` file.
+The kernel has zero crates.io dependencies. Spleen 8x16 2.2.0 (Copyright (c) 2018-2026 Frederic Cambus, BSD-2-Clause) is vendored as glyph bytes in `kernel/src/font8x16.rs`, with the license text. GRUB (GPL-3.0) is a build tool and is not vendored in the kernel source. The ISO contains it. Tool licenses are in `docs/FOUNDATION.md`. This repository still has no project `LICENSE` file.

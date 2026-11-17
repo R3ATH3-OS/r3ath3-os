@@ -1,12 +1,14 @@
 //! PVH start-info parser and the saved physical memory map.
 //!
 //! # Invariants
-//! The boot stub stores `%ebx` in `pvh_start_info`. `init` runs once, on the
-//! boot processor, with the 1 GiB identity map on. It validates the
-//! `hvm_start_info` struct in the order listed in `docs/MEMORY.md` and copies
-//! up to 32 memory-map entries into a static table. Every raw read is at an
-//! address already checked to lie below 1 GiB. No reference into the PVH
-//! memory is kept. After `init` succeeds the table is read-only.
+//! The boot stub stores `%ebx` in `pvh_start_info`, or, on a Multiboot2
+//! entry, in `mb2_info`. `init` runs once, on the boot processor, with the
+//! 1 GiB identity map on. A Multiboot2 boot copies that block's memory map.
+//! Otherwise `init` validates the `hvm_start_info` struct in the order listed
+//! in `docs/MEMORY.md`. Either way it copies up to 32 memory-map entries into
+//! a static table. Every raw read is at an address already checked to lie
+//! below 1 GiB. No reference into the firmware memory is kept. After `init`
+//! succeeds the table is read-only. A bad Multiboot2 block fails with `mb2`.
 //!
 //! Layout (Xen `hvm/start_info.h`, little-endian): `magic u32 @0`,
 //! `version u32 @4`, `memmap_paddr u64 @40`, `memmap_entries u32 @48`; the
@@ -57,6 +59,7 @@ unsafe impl Sync for Table {}
 static TABLE: Table = Table(UnsafeCell::new([EMPTY; MAX_REGIONS]));
 static COUNT: AtomicUsize = AtomicUsize::new(0);
 static INFO_ADDR: AtomicU64 = AtomicU64::new(0);
+static INFO_BYTES: AtomicU64 = AtomicU64::new(0);
 static MAP_ADDR: AtomicU64 = AtomicU64::new(0);
 static MAP_BYTES: AtomicU64 = AtomicU64::new(0);
 
@@ -107,6 +110,10 @@ fn entry_u64(addr: u64) -> u64 {
 pub fn init() -> Result<(), MemError> {
     if COUNT.load(Ordering::Acquire) != 0 {
         return Ok(());
+    }
+    #[cfg(any(feature = "hw", feature = "mb2-boot", feature = "lfb-console"))]
+    if crate::mb2::valid() {
+        return init_mb2();
     }
     let info = u64::from(saved_start_info());
     if info == 0
@@ -159,9 +166,49 @@ pub fn init() -> Result<(), MemError> {
         unsafe { table.add(i).write(*region) };
     }
     INFO_ADDR.store(info, Ordering::Relaxed);
+    INFO_BYTES.store(START_INFO_SIZE, Ordering::Relaxed);
     MAP_ADDR.store(map, Ordering::Relaxed);
     MAP_BYTES.store(bytes, Ordering::Relaxed);
     COUNT.store(entries as usize, Ordering::Release);
+    Ok(())
+}
+
+#[cfg(any(feature = "hw", feature = "mb2-boot", feature = "lfb-console"))]
+fn init_mb2() -> Result<(), MemError> {
+    let parsed = crate::mb2::parse()?;
+    let mut has_ram = false;
+    for region in parsed.regions.iter().take(parsed.count) {
+        let copied = Region {
+            addr: region.addr,
+            size: region.size,
+            kind: region.kind,
+        };
+        if copied.kind == KIND_RAM && overlaps_low_gib(&copied) {
+            has_ram = true;
+        }
+    }
+    if !has_ram {
+        return Err(MemError::Mb2);
+    }
+    let table = TABLE.0.get().cast::<Region>();
+    for (index, region) in parsed.regions.iter().take(parsed.count).enumerate() {
+        let copied = Region {
+            addr: region.addr,
+            size: region.size,
+            kind: region.kind,
+        };
+        // SAFETY: `index < count <= MAX_REGIONS`, so the slot is inside the
+        // static table, and nothing reads the table until COUNT is published.
+        unsafe { table.add(index).write(copied) };
+    }
+    INFO_ADDR.store(parsed.info_start, Ordering::Relaxed);
+    INFO_BYTES.store(
+        parsed.info_end.saturating_sub(parsed.info_start),
+        Ordering::Relaxed,
+    );
+    MAP_ADDR.store(0, Ordering::Relaxed);
+    MAP_BYTES.store(0, Ordering::Relaxed);
+    COUNT.store(parsed.count, Ordering::Release);
     Ok(())
 }
 
@@ -181,7 +228,7 @@ pub fn regions() -> &'static [Region] {
 /// Physical `[start, end)` of the `hvm_start_info` struct.
 pub fn start_info_range() -> (u64, u64) {
     let start = INFO_ADDR.load(Ordering::Relaxed);
-    (start, start + START_INFO_SIZE)
+    (start, start + INFO_BYTES.load(Ordering::Relaxed))
 }
 
 /// Physical `[start, end)` of the memory-map table.

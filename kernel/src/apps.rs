@@ -208,7 +208,7 @@ fn host_loop(name: &str, inst: &mut Instance<'_, '_>) -> End {
     if let Err(trap) = inst.call("r3_init", &[i64::from(seed)]) {
         return End::Trap(trap);
     }
-    if let Err(trap) = present(inst) {
+    if let Err(trap) = present(name, inst) {
         return End::Trap(trap);
     }
     // One step before the ready line, so a fuel trap (spin) is reported
@@ -218,7 +218,7 @@ fn host_loop(name: &str, inst: &mut Instance<'_, '_>) -> End {
         Ok(None) => return End::Trap(Trap::Stack),
         Err(trap) => return End::Trap(trap),
     };
-    if let Err(trap) = present(inst) {
+    if let Err(trap) = present(name, inst) {
         return End::Trap(trap);
     }
     let _ = core::fmt::Write::write_fmt(
@@ -249,7 +249,7 @@ fn host_loop(name: &str, inst: &mut Instance<'_, '_>) -> End {
             );
             previous = state;
         }
-        if let Err(trap) = present(inst) {
+        if let Err(trap) = present(name, inst) {
             return End::Trap(trap);
         }
     }
@@ -271,7 +271,7 @@ fn take_key(inst: &mut Instance<'_, '_>) -> Option<End> {
 }
 
 #[cfg(feature = "shell")]
-fn present(inst: &mut Instance<'_, '_>) -> Result<(), Trap> {
+fn present(name: &str, inst: &mut Instance<'_, '_>) -> Result<(), Trap> {
     let offset = match inst.call("r3_text", &[]) {
         Ok(Some(value)) => value,
         Ok(None) => return Err(Trap::Memory),
@@ -282,11 +282,52 @@ fn present(inst: &mut Instance<'_, '_>) -> Result<(), Trap> {
         Some(start) => start,
         None => return Err(Trap::Memory),
     };
+    note_no_vga(name, inst);
     vga::present(&memory[start..start + 2000]);
-    blit_exported(inst)?;
+    if !linear_console() {
+        blit_exported(inst)?;
+    }
     let _played = play_exported(inst)?;
     Ok(())
 }
+
+fn linear_console() -> bool {
+    #[cfg(any(feature = "hw", feature = "mb2-boot", feature = "lfb-console"))]
+    {
+        crate::lfb::is_active()
+    }
+    #[cfg(not(any(
+        feature = "hw",
+        feature = "mb2-boot",
+        feature = "lfb-console"
+    )))]
+    {
+        false
+    }
+}
+
+fn note_no_vga(name: &str, inst: &Instance<'_, '_>) {
+    #[cfg(any(feature = "hw", feature = "mb2-boot", feature = "lfb-console"))]
+    if linear_console()
+        && inst.func_matches("r3_pixels", &[], Some(ValType::I32))
+        && !NO_VGA_NOTED.swap(true, core::sync::atomic::Ordering::Relaxed)
+    {
+        both(b"app ");
+        both(name.as_bytes());
+        both(b": no vga screen on this boot\n");
+    }
+    #[cfg(not(any(
+        feature = "hw",
+        feature = "mb2-boot",
+        feature = "lfb-console"
+    )))]
+    {
+        let _ = (name, inst);
+    }
+}
+
+#[cfg(any(feature = "hw", feature = "mb2-boot", feature = "lfb-console"))]
+static NO_VGA_NOTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 #[cfg(any(
     feature = "shell",

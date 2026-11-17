@@ -19,6 +19,11 @@ use core::cell::UnsafeCell;
 
 use crate::port;
 
+#[cfg(any(feature = "hw", feature = "mb2-boot", feature = "lfb-console"))]
+fn linear() -> bool {
+    crate::lfb::is_active()
+}
+
 const WIDTH: usize = 80;
 const HEIGHT: usize = 25;
 const CELLS: usize = WIDTH * HEIGHT;
@@ -48,6 +53,11 @@ fn with_console<R>(f: impl FnOnce(&mut ConsolePos) -> R) -> R {
 }
 
 pub fn write_marker(text: &str) {
+    #[cfg(any(feature = "hw", feature = "mb2-boot", feature = "lfb-console"))]
+    if linear() {
+        crate::lfb::write_marker(text);
+        return;
+    }
     unsafe {
         let cells = core::slice::from_raw_parts_mut(BUFFER, CELLS);
         for cell in cells.iter_mut() {
@@ -65,6 +75,11 @@ pub fn write_marker(text: &str) {
 }
 
 pub fn write_line(text: &[u8]) {
+    #[cfg(any(feature = "hw", feature = "mb2-boot", feature = "lfb-console"))]
+    if linear() {
+        crate::lfb::write_line(text);
+        return;
+    }
     unsafe {
         let cells = core::slice::from_raw_parts_mut(BUFFER, WIDTH);
         for cell in cells.iter_mut() {
@@ -79,6 +94,11 @@ pub fn write_line(text: &[u8]) {
 /// Paint an 80×25 grid. `0x00` is a space, `0x20`–`0x7E` are themselves, and
 /// every other byte is `?`. The attribute is green on black (`0x0A`).
 pub fn present(grid: &[u8]) {
+    #[cfg(any(feature = "hw", feature = "mb2-boot", feature = "lfb-console"))]
+    if linear() {
+        crate::lfb::present(grid);
+        return;
+    }
     for row in 0..HEIGHT {
         for col in 0..WIDTH {
             let index = row * WIDTH + col;
@@ -102,6 +122,11 @@ pub fn present(grid: &[u8]) {
 
 /// Fill the 80×25 buffer with green-on-black spaces and home the cursor.
 pub fn console_clear() {
+    #[cfg(any(feature = "hw", feature = "mb2-boot", feature = "lfb-console"))]
+    if linear() {
+        crate::lfb::clear();
+        return;
+    }
     for index in 0..CELLS {
         // SAFETY: `index` is below 2000, so the write stays inside the VGA
         // text buffer at 0xB8000. Single CPU, main context only.
@@ -122,6 +147,11 @@ pub fn console_clear() {
 /// row; a `\n` at column 80 moves to the next row once and does not insert a
 /// blank line. Moving past row 24 scrolls.
 pub fn console_put(byte: u8) {
+    #[cfg(any(feature = "hw", feature = "mb2-boot", feature = "lfb-console"))]
+    if linear() {
+        crate::lfb::put(byte);
+        return;
+    }
     let (row, col) = with_console(|pos| {
         if byte == b'\n' {
             newline(pos);
@@ -145,6 +175,11 @@ pub fn console_put(byte: u8) {
 /// Erase the previous cell on this row. Does nothing at column 0, and never
 /// moves to the previous row.
 pub fn console_backspace() {
+    #[cfg(any(feature = "hw", feature = "mb2-boot", feature = "lfb-console"))]
+    if linear() {
+        crate::lfb::backspace();
+        return;
+    }
     let (row, col) = with_console(|pos| {
         if pos.col > 0 {
             pos.col -= 1;

@@ -8,7 +8,7 @@ This document is the spec for the kernel heap and the physical frame allocator. 
 
 - The boot stub (`kernel/src/boot.rs`) identity-maps 0–1 GiB with 2 MiB pages and calls `kernel_main` on a 16 KiB stack. The kernel links at 1 MiB (`kernel/linker.ld`). The map is not uniformly write-back: the 2 MiB page at `0x3000_0000` is uncached (PWT and PCD). That page is the NVMe MMIO window. The NVMe driver takes five DMA frames from `frames::alloc` only when a controller is found.
 - The smoke harness boots QEMU with `-m 64M`. The identity map is 1 GiB, but only about 64 MiB of it is RAM. The frame allocator never hands out a frame just because it is mapped. It uses the real memory map.
-- QEMU enters through PVH. At `_start`, `%ebx` holds the physical address of the `hvm_start_info` struct, which carries the memory map.
+- QEMU `-kernel` enters through PVH. At `_start`, `%ebx` holds the physical address of the `hvm_start_info` struct, which carries the memory map. A GRUB boot enters at `_start_mb2`. The memory map then comes from the Multiboot2 info block. See section 12.
 - There are no crates.io dependencies. The toolchain is rustc/cargo 1.83.0 targeting `x86_64-unknown-none`, which ships `core` and `alloc`, so `extern crate alloc` needs nothing new.
 
 ## 2. Scope
@@ -84,6 +84,7 @@ Concurrency: one CPU. **IRQ handlers must not allocate.** `irq.rs` stays allocat
   - [`__kernel_start`, `__kernel_end`). This covers code, data, `.bss`, page tables, both stacks, the heap, and the bitmaps themselves. `linker.ld` defines `__kernel_start` at 1 MiB and `__kernel_end` after `.bss`, 4 KiB-aligned.
   - The frames holding `hvm_start_info` and the memmap table.
   - Everything below 1 MiB is never handed out, because the clip starts at 1 MiB.
+  - `0x3000_0000..0x3020_0000` in every build. At `-m 64M` that window is not RAM, so `frames_total` does not change because of the exclusion. At `-m 2G` on the PVH path the window is inside a type-1 region, and the exclusion removes 512 frames.
 - If no managed frame is left after that, `init` fails with `nousable`.
 - The allocator assumes type-1 entries do not overlap reserved entries, as QEMU and firmware E820 maps provide. An overlapping map is not detected.
 
@@ -99,7 +100,7 @@ API, main context only:
 ## 7. Plugging into `main.rs`
 
 - `extern crate alloc;` and `mod heap; mod memmap; mod frames; mod mem;`.
-- `mem.rs` is safe code. `mem::init()` calls `memmap::init()` and then `frames::init()`, and returns `Result<(), MemError>`. `MemError` is `StartInfo`, `MemMap`, or `NoUsable`, printed as `startinfo`, `memmap`, or `nousable`.
+- `mem.rs` is safe code. `mem::init()` calls `memmap::init()` and then `frames::init()`, and returns `Result<(), MemError>`. `MemError` is `StartInfo`, `MemMap`, `NoUsable`, or `Mb2`, printed as `startinfo`, `memmap`, `nousable`, or `mb2`.
 - In `kernel_main`, the order is `serial::init()`, the stage line, `exceptions::init()`, then `mem::init()`. A fault during memory init therefore gets a fault line. On `Err`, the kernel prints the error line and exits 201 (section 8).
 - Memory init runs in every build, so every existing case also exercises it. On success it prints nothing, so every existing expected log is unchanged.
 - The `#[global_allocator]` static lives in `heap.rs`.
@@ -149,3 +150,11 @@ The harness self-test also feeds each new judge a right line with a wrong status
 - `frames.rs`: the shared bitmap state behind the busy flag, `rep stosq` zeroing of a frame, and the volatile frame reads and writes in the two test helpers.
 
 The only other change is the one `movl %ebx, pvh_start_info` line (and its symbol) in the assembly in `boot.rs`. The full unsafe list is in `docs/FOUNDATION.md`. `script.rs`, `shell.rs`, `mem.rs`, `memtest.rs`, and `main.rs` have no `unsafe`. Every new `unsafe` block or impl has a `// SAFETY:` comment naming its invariant.
+
+## 12. Multiboot2 memory map (milestone 13, part A)
+
+On a Multiboot2 boot, `memmap::init` does not read `hvm_start_info`. `mb2::parse` reads the info block `_start_mb2` saved. The block must be 8-byte aligned, at most 64 KiB, and entirely below 1 GiB. Tag 6 is the memory map. Type 1 is RAM, the same numbering as the PVH map. The entries are copied into the same `[Region; 32]`. Type 1 entries are stored first. If a type 1 entry does not fit, init fails with `mb2` and exits 201. The PVH path, including `mem-badinfo`, is unchanged.
+
+The info block itself is excluded from the frame allocator by its length. `MAP_ADDR` stays 0 on this path because the source table is inside that block.
+
+`frames::kernel_start()` is the link address, 1 MiB. `frames::is_managed` reports whether a frame is managed. The `mb2-boot` proof prints both, and prints `window=0x30000000..0x30200000 excluded=yes managed=no`.

@@ -2,7 +2,8 @@
 //!
 //! # Invariants
 //! `init` runs once, on the boot processor, after `exceptions::init` and
-//! before anything uses `frames`. It parses the PVH memory map and then builds
+//! before anything uses `frames`. It parses the PVH memory map, or the
+//! Multiboot2 map when that entry was used, and then builds
 //! the frame allocator from it. It prints nothing on success. The heap does
 //! not depend on it. Spec: `docs/MEMORY.md`.
 
@@ -15,6 +16,9 @@ pub enum MemError {
     StartInfo,
     MemMap,
     NoUsable,
+    /// Multiboot2 info block failed a check. PVH boots do not construct this.
+    #[allow(dead_code)]
+    Mb2,
 }
 
 impl MemError {
@@ -23,6 +27,7 @@ impl MemError {
             MemError::StartInfo => "startinfo",
             MemError::MemMap => "memmap",
             MemError::NoUsable => "nousable",
+            MemError::Mb2 => "mb2",
         }
     }
 }

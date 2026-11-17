@@ -8,6 +8,8 @@ There are no crates.io dependencies. The toolchain is rustc/cargo 1.83.0, target
 
 Part A is a RAM disk. A reboot erases it. Part B adds a polled driver for QEMU's emulated NVMe controller. With that disk attached, earlier boots stay in the host image and are read with `boots K`. The live record still starts empty every boot. Without a controller the shell uses the RAM disk and prints nothing about it. This is not a real disk and not real hardware.
 
+The `hw` build does not compile `pci` or `nvme`. It mounts the RAM disk only, and it never touches a disk. A reboot erases that disk.
+
 ## 1. Words
 
 - **Block:** 512 bytes, addressed by an LBA from 0.
@@ -455,4 +457,4 @@ FNV-1a is not crypto. A host that can edit the image can recompute the links.
 
 ## 11. Not in this image
 
-A file system, a VFS, an erase command, an agent storage verb, SHA-256, virtio, real hardware, and a disk that is not QEMU's emulated NVMe controller. The unused odd statuses are 203, 205, 207, 219, 221, 223, 237, 239, 251, 253, and 255.
+A file system, a VFS, an erase command, an agent storage verb, SHA-256, virtio, and a disk that is not QEMU's emulated NVMe controller. The `hw` image does not add one. After milestone 13 part A the unused odd statuses are 237, 239, and 255. 237 is reserved for the USB keyboard proof and is not used yet. 255 is not used.
